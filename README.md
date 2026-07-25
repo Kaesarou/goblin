@@ -211,9 +211,9 @@ A confirmed pending setup may use a structural SL while retaining the named base
 
 | Asset class | `P_TP` gate | `P_TOUCH` gate | Top N |
 |---|---:|---:|---:|
-| Crypto | ≥ 10% | < 50% | 2 |
-| US equity | ≥ 10% | < 50% | 2 |
-| EU equity | ≥ 10% | < 50% | 1 |
+| Crypto | ≥ 12.5% | < 40% | 2 |
+| US equity | ≥ 12.5% | < 40% | 1 |
+| EU equity | ≥ 12.5% | < 40% | 1 |
 
 The order is intentional:
 
@@ -222,9 +222,12 @@ The order is intentional:
 3. keep the asset-specific top N;
 4. apply the `P_TP` and `P_TOUCH` gates without backfilling a rejected slot.
 
-This exact abstention policy is the replayed PR5-E challenger. Applying the
-gates before top-N would be a different and weaker policy on the three-day
-cohort.
+The strict policy is the initial live PR5-E policy. On the historical
+leave-one-day-out replay it retained 28 candidates: 8 `TP_FIRST`, 2 `SL_FIRST`
+and 18 `NEITHER`, for a mean counterfactual net result of +0.150%. Those
+thresholds were selected after observing the three-day cohort, so the next
+five complete sessions are an external frozen-policy validation rather than
+proof of profitability.
 
 Crypto was absent from that cohort. The runtime does not reject crypto as an
 asset class, but marks predictions outside the training domain in probability
