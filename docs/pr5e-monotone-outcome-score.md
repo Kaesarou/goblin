@@ -248,3 +248,18 @@ checks are:
 One positive session is not sufficient to validate the model. A failed
 monotonicity or a large calibration drift is evidence to investigate, not a
 reason to tune coefficients intraday.
+
+## Session-boundary runtime safety
+
+The validation run must not restart when the broker sends a cached quote from
+just before a finite session opens. A snapshot with a broker timestamp outside
+`[session_start, session_end)` remains available to TP/SL and open-position
+management, but is excluded from:
+
+- strategy snapshots;
+- M1 candle construction and downstream timeframes;
+- benchmark, breadth and sector context.
+
+The runtime journals the exclusion as `market_data_event_ignored`, including
+the snapshot timestamp and session bounds. The multi-timeframe exception for a
+candle preceding its session anchor remains in place as an invariant.
