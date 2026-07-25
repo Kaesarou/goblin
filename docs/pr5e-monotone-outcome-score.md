@@ -146,7 +146,7 @@ This margin ranks candidates; it does not replace the hard TP-profit guard.
 Training uses scikit-learn only in the offline calibration script:
 
 ```bash
-python -m pip install -e "[calibration]"
+python -m pip install -e ".[calibration]"
 python -m scripts.fit_pr5e_probability_model \
   path/to/candidates.csv \
   app/execution/scoring/models/pr5e_outcome_probability_v1.json
