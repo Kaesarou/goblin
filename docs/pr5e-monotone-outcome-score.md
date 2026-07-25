@@ -146,7 +146,7 @@ This margin ranks candidates; it does not replace the hard TP-profit guard.
 Training uses scikit-learn only in the offline calibration script:
 
 ```bash
-python -m pip install -e ".[calibration]"
+python -m pip install -e "[calibration]"
 python -m scripts.fit_pr5e_probability_model \
   path/to/candidates.csv \
   app/execution/scoring/models/pr5e_outcome_probability_v1.json
@@ -193,23 +193,29 @@ Pooled out-of-day probability bins were:
 uncertainty roughly 0.519–0.629. PR5-E must therefore expose it separately and
 must not present direction ranking as solved.
 
-## Live challenger policy
+## Initial live policy
 
 Within each asset class:
 
 1. apply entry route, readiness, structural feasibility and hard economics;
 2. rank by `direction_edge`;
 3. break ties with directional score, then deterministic candidate ID;
-4. keep top 1 Europe or top 2 US/crypto;
-5. require `P_TP >= 10%`;
-6. require `P_TOUCH < 50%`;
+4. keep top 1 Europe or top 1 US; crypto remains top 2 but is omitted from the
+   validation watchlist because it is outside the training domain;
+5. require `P_TP >= 12.5%`;
+6. require `P_TOUCH < 40%`;
 7. do not backfill a slot rejected by either probability gate.
 
-The top-N-before-gates order is intentional. It exactly replays the challenger
-that retained 286 candidates in the three-day simulation. Gate-before-top-N
-would retain 340 candidates and is a different policy.
+The top-N-before-gates order is intentional. The strict policy retained 28
+candidates in the leave-one-day-out replay: 8 `TP_FIRST`, 2 `SL_FIRST` and
+18 `NEITHER`, with a mean counterfactual net result of approximately +0.150%.
 
-The `P_TOUCH < 50%` gate is an empirical abstention rule from this challenger,
+This policy was selected after observing the three-day cohort. It is therefore
+a post-hoc hypothesis, not independent profitability evidence. The next five
+complete sessions must keep the model, thresholds, top-N and order of
+operations frozen. Intraday tuning would invalidate the external test.
+
+The `P_TOUCH < 40%` gate is an empirical abstention rule from this challenger,
 not a universal claim that quiet markets are better. It must be re-evaluated
 after external sessions.
 
@@ -243,7 +249,9 @@ checks are:
 - TP/rest and TP/SL discrimination;
 - order count, TP/SL/NEITHER mix and net result;
 - outside-training-domain and missing-feature rates;
-- stability by profile and side.
+- stability by profile and side;
+- replay of the original broader 10% / 50% policy from journalled evidence for
+  comparison, without keeping a second live selector.
 
 One positive session is not sufficient to validate the model. A failed
 monotonicity or a large calibration drift is evidence to investigate, not a
