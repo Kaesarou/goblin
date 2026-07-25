@@ -21,7 +21,7 @@ def evaluated_candidate(
         pending_entry_id=None,
         symbol='AMZN',
         signal=SimpleNamespace(action='BUY'),
-        score=score,
+        probability_score=score,
         rank_reason='bullish_breakout',
     )
     return SimpleNamespace(
@@ -76,6 +76,7 @@ def test_summary_separates_entry_route_selection_and_risk():
     assert data['decision_pipeline']['selection_rejected'] == 1
     assert data['decision_pipeline']['risk_approved'] == 1
     assert data['decision_pipeline']['risk_rejected'] == 0
+    assert data['selected_candidates'][0]['score'] == 120.0
     assert 'entry_decisions' not in data
     assert 'decisions' not in data
 

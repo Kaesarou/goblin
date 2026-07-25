@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from app.execution.candidate_economics import EvaluatedTradeCandidate
@@ -16,8 +16,7 @@ from app.runtime.resilient_candidate_execution import (
 )
 from app.strategies.signals import Signal
 
-
-NOW = datetime(2026, 7, 22, 9, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 7, 22, 9, 0, tzinfo=UTC)
 
 
 class RecordingWriter:
@@ -93,11 +92,19 @@ def candidate() -> TradeCandidate:
         snapshot=snapshot,
         candle=candle,
         signal=Signal('BUY', 90.0, 'breakout'),
-        score=118.0,
         rank_reason='test',
         session_key='eu:2026-07-22',
         base_score=115.0,
         directional_score=116.0,
+        probability_score=34.0,
+        touch_probability=0.40,
+        direction_probability=0.425,
+        tp_probability=0.17,
+        sl_probability=0.23,
+        neither_probability=0.60,
+        direction_break_even_probability=0.55,
+        direction_edge=-0.125,
+        outcome_probability_model_version='outcome_probability_v1',
         candidate_id='candidate-1',
         origin_candidate_id='candidate-1',
     )
@@ -121,8 +128,8 @@ def evaluated_candidate() -> EvaluatedTradeCandidate:
             entry_freshness_score=55.0,
             model_version='tp_feasibility_score_v4',
         ),
-        tp_probability=SimpleNamespace(
-            calibration_profile_key='eu_trend_buy_v1:BUY',
+        outcome_probability=SimpleNamespace(
+            profile_key='eu_trend_buy_v1',
         ),
         entry_decision=SimpleNamespace(
             action='READY_FOR_SELECTION',

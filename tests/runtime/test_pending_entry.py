@@ -53,13 +53,13 @@ def evaluated(side='BUY', score=120.0):
     )
     current_candle = candle()
     candidate = TradeCandidate(
-        'AMD',
-        MarketSnapshot('AMD', 100, 100.05, 100.2, NOW),
-        current_candle,
-        signal,
-        score,
-        'test',
-        'US',
+        symbol='AMD',
+        snapshot=MarketSnapshot('AMD', 100, 100.05, 100.2, NOW),
+        candle=current_candle,
+        signal=signal,
+        rank_reason='test',
+        session_key='US',
+        directional_score=score,
         candidate_id='candidate-origin',
         origin_candidate_id='candidate-origin',
     )

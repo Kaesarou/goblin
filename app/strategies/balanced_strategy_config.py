@@ -46,15 +46,18 @@ def _selection_configs() -> dict[AssetClass, CandidateSelectionConfig]:
     return {
         AssetClass.CRYPTO: CandidateSelectionConfig(
             top_n=2,
-            min_score=115.0,
+            minimum_tp_probability=0.10,
+            maximum_touch_probability=0.50,
         ),
         AssetClass.EQUITY_US: CandidateSelectionConfig(
             top_n=2,
-            min_score=115.0,
+            minimum_tp_probability=0.10,
+            maximum_touch_probability=0.50,
         ),
         AssetClass.EQUITY_EU: CandidateSelectionConfig(
             top_n=1,
-            min_score=110.0,
+            minimum_tp_probability=0.10,
+            maximum_touch_probability=0.50,
         ),
     }
 

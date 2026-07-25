@@ -3,23 +3,27 @@ import json
 import os
 import platform
 import subprocess
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from app.config.settings import Settings
 from app.execution.entry_decision import ENTRY_DECISION_MODEL_VERSION
+from app.execution.scoring.frozen_logistic import (
+    FrozenOutcomeProbabilityModel,
+)
 from app.execution.scoring.market_context_scorer import (
     MARKET_CONTEXT_SCORER_VERSION,
 )
 from app.execution.scoring.multi_timeframe_scorer import (
     MULTI_TIMEFRAME_SCORER_VERSION,
 )
+from app.execution.scoring.pr5e_model_contract import (
+    OUTCOME_PROBABILITY_FEATURE_CONTRACT_VERSION,
+    OUTCOME_PROBABILITY_MODEL_VERSION,
+)
 from app.execution.scoring.tp_feasibility import (
     TP_FEASIBILITY_MODEL_VERSION,
-)
-from app.execution.scoring.tp_probability import (
-    TP_PROBABILITY_MODEL_VERSION,
 )
 from app.instruments.instrument_registry import InstrumentRegistry
 from app.journal.serialization import serialize_value
@@ -30,12 +34,11 @@ from app.market.timeframes import (
     SUPPORTED_TIMEFRAMES,
 )
 
-
 _SENSITIVE_SETTINGS = {'ETORO_API_KEY', 'ETORO_USER_KEY'}
 
 
 def build_run_id(started_at: datetime | None = None) -> str:
-    actual_started_at = started_at or datetime.now(timezone.utc)
+    actual_started_at = started_at or datetime.now(UTC)
     return actual_started_at.strftime('run_%Y%m%dT%H%M%S_%fZ')
 
 
@@ -108,8 +111,9 @@ def build_run_manifest(
     }
     actual_manifest_path = manifest_path or settings.run_manifest_path
     actual_summary_path = summary_path or settings.daily_summary_path
+    outcome_probability_model = FrozenOutcomeProbabilityModel.load()
     return {
-        'schema_version': 9,
+        'schema_version': 10,
         'run_id': run_id,
         'status': 'running',
         'started_at': started_at,
@@ -126,7 +130,21 @@ def build_run_manifest(
             'multi_timeframe_score': MULTI_TIMEFRAME_SCORER_VERSION,
             'entry_decision': ENTRY_DECISION_MODEL_VERSION,
             'tp_feasibility': TP_FEASIBILITY_MODEL_VERSION,
-            'tp_probability': TP_PROBABILITY_MODEL_VERSION,
+            'outcome_probability': OUTCOME_PROBABILITY_MODEL_VERSION,
+            'outcome_probability_features': (
+                OUTCOME_PROBABILITY_FEATURE_CONTRACT_VERSION
+            ),
+            'outcome_probability_artifact_sha256': (
+                outcome_probability_model.artifact_sha256
+            ),
+            'outcome_probability_training_dataset_sha256': (
+                outcome_probability_model.provenance.get(
+                    'dataset_sha256'
+                )
+            ),
+            'outcome_probability_training_asset_classes': list(
+                outcome_probability_model.training_asset_classes
+            ),
         },
         'strategy': {
             'name': 'TrendStrategy',
@@ -184,7 +202,7 @@ def build_run_manifest(
                 'effective_stop_loss_percent',
                 'effective_take_profit_percent',
                 'estimated_total_cost_percent',
-                'score',
+                'probability_score',
                 'base_score',
                 'directional_score',
                 'market_context_score',
@@ -202,12 +220,14 @@ def build_run_manifest(
                 'extension_to_tp_ratio',
                 'selection_outcome',
                 'selection_reason',
-                'raw_tp_before_sl_probability',
-                'tp_before_sl_probability',
-                'calibration_profile_key',
-                'break_even_probability',
-                'net_expected_value_percent',
-                'probability_edge',
+                'touch_probability',
+                'direction_probability',
+                'tp_probability',
+                'sl_probability',
+                'neither_probability',
+                'direction_break_even_probability',
+                'direction_edge',
+                'outcome_probability_model_version',
             ],
         },
         'files': {
@@ -250,7 +270,7 @@ def finalize_run_manifest(
         return
     manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
     manifest['status'] = status
-    manifest['ended_at'] = ended_at or datetime.now(timezone.utc)
+    manifest['ended_at'] = ended_at or datetime.now(UTC)
     if summary is not None:
         manifest['result'] = {
             'market_snapshots': summary.get('market_data', {}).get(

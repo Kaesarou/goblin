@@ -77,7 +77,6 @@ def evaluated_candidate(
         snapshot=MarketSnapshot('AMD', 100, 100.05, 100.5, NOW),
         candle=candle,
         signal=signal,
-        score=120.0,
         rank_reason='test',
         session_key='US',
         candidate_id=(
@@ -195,7 +194,7 @@ def test_confirmed_candidate_hard_reject_is_invalidated_after_selection():
     )[0]
     selection = select_evaluated_trade_candidates(
         [recalculated],
-        CandidateSelectionConfig(top_n=1, min_score=0),
+        CandidateSelectionConfig(top_n=1),
     )
     reconcile_pending_selection_rejections(
         rejected_candidates=selection.rejected_candidates,
@@ -227,7 +226,7 @@ def test_economically_invalid_confirmed_candidate_is_removed():
     )[0]
     selection = select_evaluated_trade_candidates(
         [recalculated],
-        CandidateSelectionConfig(top_n=1, min_score=0),
+        CandidateSelectionConfig(top_n=1),
     )
     reconcile_pending_selection_rejections(
         rejected_candidates=selection.rejected_candidates,

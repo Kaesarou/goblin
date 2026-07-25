@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -11,11 +11,12 @@ from app.execution.scoring.market_context_scorer import (
 from app.execution.scoring.multi_timeframe_scorer import (
     MULTI_TIMEFRAME_SCORER_VERSION,
 )
+from app.execution.scoring.pr5e_model_contract import (
+    OUTCOME_PROBABILITY_FEATURE_CONTRACT_VERSION,
+    OUTCOME_PROBABILITY_MODEL_VERSION,
+)
 from app.execution.scoring.tp_feasibility import (
     TP_FEASIBILITY_MODEL_VERSION,
-)
-from app.execution.scoring.tp_probability import (
-    TP_PROBABILITY_MODEL_VERSION,
 )
 from app.instruments.instrument_registry import InstrumentRegistry
 from app.journal.run_manifest import (
@@ -27,7 +28,7 @@ from app.journal.run_manifest import (
 from app.strategies.balanced_strategy_config import BalancedStrategyConfig
 
 
-def test_run_manifest_captures_pr5d_contract_without_broker_secrets():
+def test_run_manifest_captures_pr5e_contract_without_broker_secrets():
     settings = Settings(
         WATCHLIST='AAPL',
         EQUITY_US_SYMBOLS='AAPL',
@@ -45,13 +46,13 @@ def test_run_manifest_captures_pr5d_contract_without_broker_secrets():
         instrument_registry=registry,
         symbols=['AAPL'],
         run_id='run-test',
-        started_at=datetime(2026, 7, 10, 8, 0, tzinfo=timezone.utc),
+        started_at=datetime(2026, 7, 10, 8, 0, tzinfo=UTC),
         manifest_path='data/logs/runs/run-test/run_manifest.json',
         summary_path='data/logs/runs/run-test/daily_summary.json',
     )
 
     snapshot = manifest['runtime']['settings']
-    assert manifest['schema_version'] == 9
+    assert manifest['schema_version'] == 10
     assert 'ETORO_API_KEY' not in snapshot
     assert 'ETORO_USER_KEY' not in snapshot
     assert manifest['strategy']['profile'] == 'balanced'
@@ -77,11 +78,15 @@ def test_run_manifest_captures_pr5d_contract_without_broker_secrets():
         'movement_consumed_to_tp_ratio',
         'entry_freshness_score',
         'extension_to_tp_ratio',
-        'raw_tp_before_sl_probability',
-        'tp_before_sl_probability',
-        'calibration_profile_key',
-        'break_even_probability',
-        'net_expected_value_percent',
+        'probability_score',
+        'touch_probability',
+        'direction_probability',
+        'tp_probability',
+        'sl_probability',
+        'neither_probability',
+        'direction_break_even_probability',
+        'direction_edge',
+        'outcome_probability_model_version',
     ):
         assert field in fields
     assert manifest['models']['entry_decision'] == ENTRY_DECISION_MODEL_VERSION
@@ -98,8 +103,29 @@ def test_run_manifest_captures_pr5d_contract_without_broker_secrets():
     assert manifest['models']['multi_timeframe_score'] == 'multi_timeframe_score_v2'
     assert manifest['models']['tp_feasibility'] == TP_FEASIBILITY_MODEL_VERSION
     assert manifest['models']['tp_feasibility'] == 'tp_feasibility_score_v4'
-    assert manifest['models']['tp_probability'] == TP_PROBABILITY_MODEL_VERSION
-    assert manifest['models']['tp_probability'] == 'heuristic_v5'
+    assert manifest['models']['outcome_probability'] == (
+        OUTCOME_PROBABILITY_MODEL_VERSION
+    )
+    assert manifest['models']['outcome_probability'] == (
+        'outcome_probability_v1'
+    )
+    assert manifest['models']['outcome_probability_features'] == (
+        OUTCOME_PROBABILITY_FEATURE_CONTRACT_VERSION
+    )
+    assert manifest['models']['outcome_probability_features'] == (
+        'pr5e_features_v1'
+    )
+    assert manifest['models']['outcome_probability_artifact_sha256'] == (
+        '0507ab0788d4683a0b69587f49a920afa665af95584f5dec07383a64f3daf58f'
+    )
+    assert manifest[
+        'models'
+    ]['outcome_probability_training_dataset_sha256'] == (
+        '4608e799936ac007292dcb5cfc1894880893e3f9544d0b7a33096d23b5bb8290'
+    )
+    assert manifest['models'][
+        'outcome_probability_training_asset_classes'
+    ] == ['EQUITY_EU', 'EQUITY_US']
     assert manifest['models']['multi_timeframe'] == 'multi_timeframe_features_v2'
     assert manifest['runtime']['multi_timeframe'][
         'supported_timeframes_seconds'

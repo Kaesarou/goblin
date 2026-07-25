@@ -20,7 +20,13 @@ def evaluated(
     base = evaluated_candidate_with_profit(candidate(symbol))
     return replace(
         base,
-        candidate=replace(base.candidate, score=score),
+        candidate=replace(
+            base.candidate,
+            tp_probability=0.20,
+            touch_probability=0.40,
+            direction_probability=0.50,
+            direction_edge=score / 1000,
+        ),
         readiness=readiness,
         readiness_reason=reason,
     )
@@ -42,7 +48,7 @@ def test_hard_rejected_readiness_never_participates_in_top_n():
 
     result = select_evaluated_trade_candidates(
         [rejected, tradable],
-        CandidateSelectionConfig(top_n=1, min_score=100.0),
+        CandidateSelectionConfig(top_n=1),
     )
 
     assert [

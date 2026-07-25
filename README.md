@@ -12,9 +12,11 @@
 - **Deterministic execution** — the same accepted data and versioned configuration must produce the same decision.
 - **Demo first** — an edge is never assumed from a handful of trades.
 - **Validated data only** — rejected or quarantined snapshots cannot create candles or entries.
-- **TP-aware evidence** — the score and probability describe whether the effective TP can be reached before the effective SL.
+- **Calibrated outcome evidence** — the live score is a direct scale of the
+  estimated `TP_FIRST` probability.
 - **Costs are part of the trade** — fees and spread are evaluated before selection and in net expectancy.
-- **No probabilistic vetoes** — context, MTF and timing modify evidence but cannot reject a trade alone.
+- **Explicit probabilistic gates** — probability and activity gates are named,
+  versioned and journalled.
 - **Hard constraints remain explicit** — invalid data, impossible economics, incompatible session horizon, invalid structure and risk limits may reject.
 - **Every decision leaves evidence** — raw data, bars, candidates, contributions, routes, summaries and manifests are retained.
 - **Doing nothing is valid** — zero trades can still be the correct outcome.
@@ -34,13 +36,14 @@ Goblin currently includes:
 - benchmark, breadth, sector and compressed relative-strength scoring;
 - deterministic BUY and SELL trend/breakout signals;
 - three-factor TP feasibility with diagnostic entry freshness;
-- profile-and-side-calibrated TP-before-SL probability and net expectancy;
+- frozen two-stage `TP_FIRST` / `SL_FIRST` / `NEITHER` probability model
+  trained on US and European equities;
 - structural retest pending entries with deterministic lineage;
 - fixed named SL/TP profiles and structural pending stops;
 - net breakeven and trailing-stop management;
 - cooldown, account and session risk limits;
 - SQLite position and cooldown persistence;
-- JSONL journals, schema-v8 summaries and versioned run manifests;
+- JSONL journals, schema-v12 summaries and versioned run manifests;
 - a broad pytest suite validated by GitHub Actions.
 
 ## Decision pipeline
@@ -58,12 +61,12 @@ flowchart TD
     G --> H
     H --> I[Named fixed TP/SL profile]
     I --> J[TP-aware freshness and feasibility]
-    J --> K[Final context compensation]
-    K --> L[Profile-and-side probability + EV]
-    L --> M[EntryDecisionEngine]
-    M -->|READY_FOR_SELECTION| N[Asset-specific selector]
-    M -->|WAIT_FOR_RETEST| O[PendingEntryManager]
-    M -->|SKIP hard constraint| P[Counterfactual journal]
+    J --> K[EntryDecisionEngine]
+    K -->|READY_FOR_SELECTION| L[Two-stage outcome model]
+    K -->|WAIT_FOR_RETEST| O[PendingEntryManager]
+    K -->|SKIP hard constraint| P[Counterfactual journal]
+    L --> M[Direction-edge ranking]
+    M --> N[Top-N then probability gates]
     O --> H
     N --> Q[RiskManager]
     Q --> R[TradeExecutor]
@@ -71,17 +74,22 @@ flowchart TD
     S --> P
 ```
 
-## Canonical candidate score
+## Canonical PR5-E score
 
 ```text
-final score
-= directional setup score
-+ compressed market-context contribution [-4, +4]
-+ READY M5 contribution [-3, +3]
-+ TP-feasibility contribution
+P_TP = P_TOUCH × P_DIRECTION
+probability_score = round(200 × P_TP, 4)
 ```
 
-Every contribution is journalled independently. There are no hidden score caps.
+The mapping is monotone by construction: a score of 20 means an estimated
+`P(TP_FIRST)` of 10%, 40 means 20%, and 120 would mean 60%. The model does not
+manufacture high scores when the evidence does not support them. Its maximum
+leave-one-day-out score on the PR5-D cohort was 83, or 41.5%.
+
+The former combined PR5-D score is removed from the runtime. Its raw
+directional, context, timeframe and feasibility evidence remains journalled
+and feeds the frozen probability features where applicable; it is no longer
+reassembled into a legacy score or evaluated as a shadow policy.
 
 ### TP-aware entry freshness
 
@@ -92,7 +100,9 @@ movement_consumed_to_tp_ratio
 = directional session move / effective TP
 ```
 
-The ratio becomes a continuous `entry_freshness_score` from 0 to 100. It is retained for diagnosis and counterfactual analysis, but has no live score or probability weight.
+The ratio becomes a continuous `entry_freshness_score` from 0 to 100. It no
+longer adds points to the live score; it is one of the frozen `P_TOUCH`
+features.
 
 ### Market context
 
@@ -113,21 +123,15 @@ strong relative strength + consumed move
 → limited compensation
 ```
 
-A contrary benchmark is never a veto. The raw context remains bounded to `[-15, +15]`; its live contribution is `clip(raw × 0.25, -4, +4)`.
+A contrary benchmark is never a standalone veto. Relative strength, sector
+participation and benchmark momentum are inputs to `P_DIRECTION`.
 
 ### Multi-timeframe contribution
 
-Only `READY` observations contribute:
-
-| Timeframe | Aligned | Opposed |
-|---|---:|---:|
-| M5 | +3 | -3 |
-| M15 | 0 | 0 |
-| M30 | 0 | 0 |
-| H1 | 0 | 0 |
-| `PROVISIONAL` | 0 | 0 |
-
-Only M5 affects the live score, bounded to `[-3, +3]`. M15, M30 and H1 remain fully journalled diagnostics.
+PR5-E does not add fixed timeframe points to the live score. Maturity and
+alignment are frozen model features for `P_TOUCH`; `P_DIRECTION` uses M5
+maturity and the interaction between an aligned M5 and movement already
+consumed.
 
 ### TP feasibility
 
@@ -140,34 +144,55 @@ Only M5 affects the live score, bounded to `[-3, +3]`. M15, M30 and H1 remain fu
 | Estimated costs versus TP | 35% |
 | TP-aware entry freshness | 0% — diagnostic only |
 
-It contributes between `-15` and `+15`. The only feasibility hard reject is:
+Its normalized score and former contribution transform remain explicit
+features of `P_TOUCH`, but they are never added to the probability score. The
+only feasibility hard reject is:
 
 ```text
 estimated total costs >= gross TP distance
 ```
 
-## Probability and ranking
+## Two-stage probability and ranking
 
-`heuristic_v5` uses direct components once each:
-
-- cost/TP;
-- TP/ATR;
-- TP/momentum;
-- trend and close quality;
-- regime;
-- final context;
-- READY M5.
-
-Calibration is keyed by the named profile and side, for example:
+`outcome_probability_v1` separates activity from direction:
 
 ```text
-us_intraday_fixed_v1:BUY
-us_intraday_fixed_v1:SELL
-eu_trend_buy_v1:BUY
-eu_intraday_fixed_v1:SELL
+P_TOUCH     = P(TP_FIRST or SL_FIRST)
+P_DIRECTION = P(TP_FIRST | one barrier is touched)
+
+P_TP      = P_TOUCH × P_DIRECTION
+P_SL      = P_TOUCH × (1 - P_DIRECTION)
+P_NEITHER = 1 - P_TOUCH
 ```
 
-The model exposes raw probability, calibrated probability, break-even probability, probability edge and net expected value. EV remains diagnostic and is not a veto. Live ranking uses exact score, then TP feasibility, then directional score.
+For example, `P_TOUCH = 40%` and `P_DIRECTION = 35%` produce:
+
+```text
+P_TP = 14%, P_SL = 26%, P_NEITHER = 60%
+```
+
+`P_DIRECTION` is therefore not the overall chance of a TP. It answers:
+“among decisive paths, which barrier is more likely to be first?”
+
+The selector compares it with the conditional break-even probability:
+
+```text
+direction_break_even
+= net loss at SL / (net gain at TP + net loss at SL)
+
+direction_edge
+= P_DIRECTION - direction_break_even
+```
+
+Candidates rank by `direction_edge`, then directional score, then deterministic
+candidate ID. This reproduces the simulated challenger. It is separate from
+the existing hard economics check that a reached TP must leave the configured
+minimum net profit after costs.
+
+The frozen model was fitted on 1,958 usable US/EU candidates from 22–24 July
+2026. Leave-one-day-out validation produced TP/rest AUC 0.667, Brier 0.101 and
+calibration error 1.8%. Direction discrimination remains weaker: TP/SL AUC
+0.575. These are challenger results, not proof of profitability.
 
 ## Fixed V1 profiles
 
@@ -184,13 +209,27 @@ A confirmed pending setup may use a structural SL while retaining the named base
 
 ## Selection
 
-| Asset class | Minimum score | Top N per loop |
-|---|---:|---:|
-| Crypto | 115 | 2 |
-| US equity | 115 | 2 |
-| EU equity | 110 | 1 |
+| Asset class | `P_TP` gate | `P_TOUCH` gate | Top N |
+|---|---:|---:|---:|
+| Crypto | ≥ 10% | < 50% | 2 |
+| US equity | ≥ 10% | < 50% | 2 |
+| EU equity | ≥ 10% | < 50% | 1 |
 
-Selection limits are independent by asset class. There is no dynamic US threshold.
+The order is intentional:
+
+1. apply route, readiness, structural and hard-economic checks;
+2. rank by direction edge;
+3. keep the asset-specific top N;
+4. apply the `P_TP` and `P_TOUCH` gates without backfilling a rejected slot.
+
+This exact abstention policy is the replayed PR5-E challenger. Applying the
+gates before top-N would be a different and weaker policy on the three-day
+cohort.
+
+Crypto was absent from that cohort. The runtime does not reject crypto as an
+asset class, but marks predictions outside the training domain in probability
+metadata. The next validation runs keep crypto out of `WATCHLIST`; the crypto
+instrument and risk profiles remain available for a future dedicated cohort.
 
 ## Session horizon
 
@@ -243,17 +282,21 @@ python -m app.main
 
 ## Analysis contract
 
-PR5-D uses summary and run-manifest schema **v9**. Standalone `entry_decision` records include:
+PR5-E uses summary schema **v12** and run-manifest schema **v10**. Standalone
+`entry_decision` records include:
 
 - deterministic candidate/pending lineage;
 - named profile and effective SL/TP;
-- directional, context, MTF and feasibility scores;
+- probability score;
+- directional, context, MTF and feasibility evidence;
 - `movement_consumed_to_tp_ratio` and `entry_freshness_score`;
-- raw and calibrated probability plus calibration profile;
-- break-even, EV and probability edge;
+- `P_TOUCH`, `P_DIRECTION`, `P_TP`, `P_SL` and `P_NEITHER`;
+- conditional direction break-even and direction edge;
 - route and selection outcome.
 
-The summary also exposes profile horizon rejections, managed-stop updates and corrected risk-stage counts.
+The summary also exposes probability buckets, training-domain coverage,
+profile horizon rejections, managed-stop updates and corrected risk-stage
+counts.
 
 ## Pre-live status
 

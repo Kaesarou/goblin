@@ -34,7 +34,15 @@ def test_candidate_selection_emits_standalone_entry_route_event(tmp_path):
         symbol='AAPL',
         signal=SimpleNamespace(action='BUY', metadata={}),
         snapshot=SimpleNamespace(last=201.25, timestamp=timestamp),
-        score=120.0,
+        probability_score=34.0,
+        touch_probability=0.40,
+        direction_probability=0.425,
+        tp_probability=0.17,
+        sl_probability=0.23,
+        neither_probability=0.60,
+        direction_break_even_probability=0.55,
+        direction_edge=-0.125,
+        outcome_probability_model_version='outcome_probability_v1',
         base_score=132.0,
         rank_reason='test',
         market_context=context,
@@ -53,7 +61,9 @@ def test_candidate_selection_emits_standalone_entry_route_event(tmp_path):
             estimated_total_cost_percent=0.35,
         ),
         tp_feasibility=SimpleNamespace(runway_score=80.0),
-        tp_probability=None,
+        outcome_probability=SimpleNamespace(
+            profile_key='us_intraday_fixed_v1',
+        ),
         effective_sl_tp=SimpleNamespace(
             take_profit_percent=1.6,
             stop_loss_percent=0.9,
@@ -84,7 +94,10 @@ def test_candidate_selection_emits_standalone_entry_route_event(tmp_path):
     assert payload['effective_stop_loss_percent'] == 0.9
     assert payload['effective_take_profit_percent'] == 1.6
     assert payload['estimated_total_cost_percent'] == 0.35
-    assert payload['score'] == 120.0
+    assert payload['probability_score'] == 34.0
+    assert payload['tp_probability'] == 0.17
+    assert payload['direction_probability'] == 0.425
+    assert payload['direction_edge'] == -0.125
     assert payload['base_score'] == 132.0
     assert payload['entry_route_action'] == 'ready_for_selection'
     assert payload['entry_route_reason'] == 'entry_conditions_satisfied'

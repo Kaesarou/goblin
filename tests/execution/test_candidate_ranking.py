@@ -243,7 +243,7 @@ def test_build_trade_candidate_scores_buy_with_penalized_score():
         base_score_without_exhaustion(candidate.snapshot, candidate.signal),
         4,
     )
-    assert candidate.score == round(
+    assert candidate.directional_score == round(
         candidate.base_score - candidate.exhaustion_penalty,
         4,
     )
@@ -277,7 +277,7 @@ def test_build_trade_candidate_scores_clean_sell_with_penalty_metadata():
         base_score_without_exhaustion(candidate.snapshot, candidate.signal),
         4,
     )
-    assert candidate.score == round(
+    assert candidate.directional_score == round(
         candidate.base_score - candidate.exhaustion_penalty,
         4,
     )
@@ -316,7 +316,7 @@ def test_hold_or_unknown_action_uses_penalized_scoring_path():
         base_score_without_exhaustion(candidate.snapshot, candidate.signal),
         4,
     )
-    assert candidate.score == round(
+    assert candidate.directional_score == round(
         candidate.base_score - candidate.exhaustion_penalty,
         4,
     )
@@ -358,7 +358,7 @@ def test_candidate_ranking_puts_stronger_opportunity_first():
     ranked = rank_trade_candidates([weaker, stronger])
     assert ranked[0].symbol == 'MSFT'
     assert ranked[1].symbol == 'AIR.PA'
-    assert ranked[0].score > ranked[1].score
+    assert ranked[0].directional_score > ranked[1].directional_score
 
 
 def test_candidate_ranking_penalizes_wide_spread():
@@ -394,4 +394,7 @@ def test_candidate_ranking_penalizes_wide_spread():
             breakout_percent=0.2,
         ),
     )
-    assert tight_spread.score > wide_spread.score
+    assert (
+        tight_spread.directional_score
+        > wide_spread.directional_score
+    )

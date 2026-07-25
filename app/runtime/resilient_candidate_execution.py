@@ -14,10 +14,10 @@ from app.execution.sl_tp_profile import EffectiveSlTpResolver
 from app.risk.models import TradePlan
 from app.runtime.async_candidate_execution import (
     AsyncCandidateExecutionCoordinator,
+    _as_utc,
     _CandidateBatch,
     _OrderContext,
     _UnknownOrder,
-    _as_utc,
 )
 from app.runtime.broker_queries import (
     order_id_from_confirmation_error,
@@ -28,6 +28,7 @@ from app.runtime.candidate_flow import (
     _candidate_selection_result_from_evaluated,
     _evaluate_risk_manager,
     _resolve_runtime_effective_sl_tp,
+    apply_outcome_probability_to_evaluated_candidates,
     apply_tp_feasibility_to_evaluated_candidates,
     apply_trade_cooldown_guard,
     attach_entry_decisions,
@@ -39,7 +40,6 @@ from app.runtime.pending_candidate_lifecycle import (
     keep_pending_waiting,
     reconcile_pending_selection_rejections,
 )
-
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +105,19 @@ class ResilientCandidateExecutionCoordinator(
                 {'equity': equity, 'evaluated_candidates': evaluated},
             )
             evaluated = attach_entry_decisions(evaluated)
+            evaluated = (
+                apply_outcome_probability_to_evaluated_candidates(
+                    evaluated_candidates=evaluated,
+                    risk_manager=self.risk_manager,
+                )
+            )
+            self.trade_journal.write(
+                'candidate_outcome_probability',
+                {
+                    'equity': equity,
+                    'evaluated_candidates': evaluated,
+                },
+            )
             allowed_evaluated, cooldown_rejections = (
                 self._filter_evaluated_candidates_by_cooldown(
                     evaluated,
@@ -304,7 +317,9 @@ class ResilientCandidateExecutionCoordinator(
                     'candidate_economics': evaluated.economics,
                     'effective_sl_tp': evaluated.effective_sl_tp,
                     'tp_feasibility': evaluated.tp_feasibility,
-                    'tp_probability': evaluated.tp_probability,
+                    'outcome_probability': (
+                        evaluated.outcome_probability
+                    ),
                     'entry_decision': evaluated.entry_decision,
                     'trade_plan': plan,
                     'cooldown': decision.active_cooldown,
