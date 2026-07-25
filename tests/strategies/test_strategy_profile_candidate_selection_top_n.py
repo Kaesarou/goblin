@@ -14,17 +14,17 @@ def test_strategy_profile_resolves_asset_specific_selection_configs():
         crypto.top_n,
         crypto.minimum_tp_probability,
         crypto.maximum_touch_probability,
-    ) == (2, 0.10, 0.50)
+    ) == (2, 0.125, 0.40)
     assert (
         us.top_n,
         us.minimum_tp_probability,
         us.maximum_touch_probability,
-    ) == (2, 0.10, 0.50)
+    ) == (1, 0.125, 0.40)
     assert (
         eu.top_n,
         eu.minimum_tp_probability,
         eu.maximum_touch_probability,
-    ) == (1, 0.10, 0.50)
+    ) == (1, 0.125, 0.40)
     assert not hasattr(us, 'dynamic_min_score')
 
 
