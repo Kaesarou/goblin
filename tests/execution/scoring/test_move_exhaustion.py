@@ -173,7 +173,7 @@ def test_trade_candidate_exposes_penalty_metadata_without_cap_fields():
         ),
     )
 
-    assert candidate.score == pytest.approx(
+    assert candidate.directional_score == pytest.approx(
         candidate.base_score - candidate.exhaustion_penalty
     )
     assert candidate.late_entry_severity == 'HIGH'

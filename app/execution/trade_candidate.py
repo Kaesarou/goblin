@@ -19,7 +19,6 @@ class TradeCandidate:
     snapshot: MarketSnapshot
     candle: Candle
     signal: Signal
-    score: float
     rank_reason: str
     session_key: str = ''
     base_score: float = 0.0
@@ -40,14 +39,18 @@ class TradeCandidate:
     tp_feasibility_score: float | None = None
     tp_feasibility_contribution: float = 0.0
     tp_feasibility_hard_rejection_reason: str | None = None
-    raw_tp_before_sl_probability: float | None = None
-    tp_before_sl_probability: float | None = None
-    tp_before_sl_probability_band: str | None = None
-    tp_probability_model_version: str | None = None
-    break_even_probability: float | None = None
-    net_expected_value_percent: float | None = None
-    probability_edge: float | None = None
-    tp_probability_metadata: dict[str, Any] = field(default_factory=dict)
+    probability_score: float | None = None
+    touch_probability: float | None = None
+    direction_probability: float | None = None
+    tp_probability: float | None = None
+    sl_probability: float | None = None
+    neither_probability: float | None = None
+    direction_break_even_probability: float | None = None
+    direction_edge: float | None = None
+    outcome_probability_model_version: str | None = None
+    outcome_probability_metadata: dict[str, Any] = field(
+        default_factory=dict
+    )
     candidate_id: str = ''
     origin_candidate_id: str = ''
     pending_entry_id: str | None = None

@@ -30,7 +30,6 @@ def candidate(symbol: str, score: float) -> TradeCandidate:
         snapshot=snapshot(symbol),
         candle=candle(symbol),
         signal=Signal(action='BUY', setup_quality=0.8, reason='test_candidate', metadata={'session_move_percent': 1.0, 'trend_strength_percent': 0.2, 'breakout_percent': 0.2, 'candle_range_percent': 0.5, 'close_position_percent': 90.0}),
-        score=score,
         rank_reason=f'score={score}',
         session_key=TEST_SESSION_KEY,
     )

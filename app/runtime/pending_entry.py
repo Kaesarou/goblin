@@ -35,7 +35,8 @@ class PendingEntry:
     detected_candle_time: datetime
     initial_reference_price: float
     breakout_or_breakdown_level: float
-    initial_score: float
+    initial_probability_score: float | None
+    initial_direction_edge: float | None
     initial_feasibility_score: float
     initial_feasibility_contribution: float
     expires_after_candles: int
@@ -145,7 +146,8 @@ class PendingEntryManager:
         if existing is not None:
             updated = replace(
                 existing,
-                initial_score=candidate.score,
+                initial_probability_score=candidate.probability_score,
+                initial_direction_edge=candidate.direction_edge,
                 initial_feasibility_score=feasibility_score,
                 initial_feasibility_contribution=contribution,
             )
@@ -172,7 +174,8 @@ class PendingEntryManager:
             detected_candle_time=candidate.candle.closed_at,
             initial_reference_price=candidate.snapshot.last,
             breakout_or_breakdown_level=level,
-            initial_score=candidate.score,
+            initial_probability_score=candidate.probability_score,
+            initial_direction_edge=candidate.direction_edge,
             initial_feasibility_score=feasibility_score,
             initial_feasibility_contribution=contribution,
             expires_after_candles=max(1, max_candles),

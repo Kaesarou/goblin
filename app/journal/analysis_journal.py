@@ -244,7 +244,10 @@ def _entry_decision_record(
     economics = _attribute(evaluated, 'economics')
     effective_sl_tp = _attribute(evaluated, 'effective_sl_tp')
     tp_feasibility = _attribute(evaluated, 'tp_feasibility')
-    tp_probability = _attribute(evaluated, 'tp_probability')
+    outcome_probability = _attribute(
+        evaluated,
+        'outcome_probability',
+    )
     market_context = _attribute(candidate, 'market_context')
     multi_timeframe_context = _attribute(
         candidate,
@@ -258,9 +261,15 @@ def _entry_decision_record(
         'symbol': _attribute(candidate, 'symbol'),
         'side': _attribute(signal, 'action'),
         'entry_reference_price': _attribute(snapshot, 'last'),
-        'profile_key': _profile_key(effective_sl_tp, tp_probability),
+        'profile_key': _profile_key(
+            effective_sl_tp,
+            outcome_probability,
+        ),
         'sl_tp_source': _attribute(effective_sl_tp, 'source'),
-        'score': _attribute(candidate, 'score'),
+        'probability_score': _attribute(
+            candidate,
+            'probability_score',
+        ),
         'base_score': _attribute(candidate, 'base_score'),
         'directional_score': _attribute(candidate, 'directional_score'),
         'market_context_score': _attribute(
@@ -311,27 +320,31 @@ def _entry_decision_record(
             economics,
             'expected_net_profit_percent',
         ),
-        'raw_tp_before_sl_probability': _attribute(
+        'touch_probability': _attribute(
             candidate,
-            'raw_tp_before_sl_probability',
+            'touch_probability',
         ),
-        'tp_before_sl_probability': _attribute(
+        'direction_probability': _attribute(
             candidate,
-            'tp_before_sl_probability',
+            'direction_probability',
         ),
-        'calibration_profile_key': _attribute(
-            tp_probability,
-            'calibration_profile_key',
-        ),
-        'break_even_probability': _attribute(
+        'tp_probability': _attribute(
             candidate,
-            'break_even_probability',
+            'tp_probability',
         ),
-        'net_expected_value_percent': _attribute(
+        'sl_probability': _attribute(
             candidate,
-            'net_expected_value_percent',
+            'sl_probability',
         ),
-        'probability_edge': _attribute(candidate, 'probability_edge'),
+        'neither_probability': _attribute(
+            candidate,
+            'neither_probability',
+        ),
+        'direction_break_even_probability': _attribute(
+            candidate,
+            'direction_break_even_probability',
+        ),
+        'direction_edge': _attribute(candidate, 'direction_edge'),
         'entry_route_action': _enum_value(_attribute(decision, 'action')),
         'entry_route_reason': _attribute(decision, 'reason'),
         'selection_outcome': selection_outcome,
@@ -341,7 +354,7 @@ def _entry_decision_record(
         'multi_timeframe_context': multi_timeframe_context,
         'candidate_economics': economics,
         'tp_feasibility': tp_feasibility,
-        'tp_probability': tp_probability,
+        'outcome_probability': outcome_probability,
         'effective_sl_tp': effective_sl_tp,
         'entry_decision': decision,
         'market_context_version': _attribute(market_context, 'version'),
@@ -361,9 +374,9 @@ def _entry_decision_record(
             tp_feasibility,
             'model_version',
         ),
-        'tp_probability_model_version': _attribute(
+        'outcome_probability_model_version': _attribute(
             candidate,
-            'tp_probability_model_version',
+            'outcome_probability_model_version',
         ),
         'entry_route_model_version': _attribute(
             decision,
@@ -373,13 +386,16 @@ def _entry_decision_record(
     }
 
 
-def _profile_key(effective_sl_tp: Any, tp_probability: Any) -> Any:
-    calibration_key = _attribute(
-        tp_probability,
-        'calibration_profile_key',
+def _profile_key(
+    effective_sl_tp: Any,
+    outcome_probability: Any,
+) -> Any:
+    calibrated_profile = _attribute(
+        outcome_probability,
+        'profile_key',
     )
-    if calibration_key and ':' in str(calibration_key):
-        return str(calibration_key).rsplit(':', maxsplit=1)[0]
+    if calibrated_profile:
+        return calibrated_profile
     return _attribute(effective_sl_tp, 'source')
 
 

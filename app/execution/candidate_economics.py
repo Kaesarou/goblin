@@ -12,8 +12,10 @@ from app.utils.commons import spread_percent
 
 if TYPE_CHECKING:
     from app.execution.entry_decision import EntryDecision
+    from app.execution.scoring.outcome_probability import (
+        OutcomeProbabilityEstimate,
+    )
     from app.execution.scoring.tp_feasibility import TpFeasibilityAnalysis
-    from app.execution.scoring.tp_probability import TpBeforeSlProbabilityEstimate
 
 
 @dataclass(frozen=True)
@@ -39,7 +41,7 @@ class EvaluatedTradeCandidate:
     economics: CandidateEconomics
     effective_sl_tp: EffectiveSlTp | None = None
     tp_feasibility: TpFeasibilityAnalysis | None = None
-    tp_probability: TpBeforeSlProbabilityEstimate | None = None
+    outcome_probability: OutcomeProbabilityEstimate | None = None
     entry_decision: EntryDecision | None = None
     readiness: Any = None
     readiness_reason: str | None = None

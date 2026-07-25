@@ -1,10 +1,11 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.instruments.models import AssetClass
 from app.market.timeframes import BarCompleteness
 from app.runtime.pending_entry_flow import write_pending_events
 from app.runtime.runtime_policy import POSITION_RECONCILIATION_INTERVAL_SECONDS
 from app.runtime.session_runtime import filter_symbols_by_trading_session
+from app.runtime.trading_session_window import TradingSessionDecision
 from app.strategies.strategy import TrendStrategy
 
 
@@ -112,7 +113,7 @@ class MarketDataSessionFlow:
                 'added_symbols': added,
                 'removed_symbols': removed,
                 'requested_symbols': list(desired),
-                'requested_at': datetime.now(timezone.utc),
+                'requested_at': datetime.now(UTC),
                 'loop_id': self.loop_id,
             },
         )
@@ -167,6 +168,27 @@ class MarketDataSessionFlow:
                 if symbol not in active_symbols:
                     result[symbol] = asset_class
         return result
+
+    def _session_decision_for_market_data_symbol(
+        self,
+        symbol: str,
+    ) -> TradingSessionDecision | None:
+        normalized = symbol.strip().upper()
+        if normalized in self.active_symbols:
+            return self.session_decisions.get(normalized)
+
+        asset_class = self.context_asset_classes.get(normalized)
+        if asset_class is None:
+            return None
+        for active_symbol in self.active_symbols:
+            decision = self.session_decisions.get(active_symbol)
+            if (
+                decision is not None
+                and decision.collect_snapshots
+                and decision.asset_class == asset_class
+            ):
+                return decision
+        return None
 
     def _write_partial_timeframe_bars(self, symbol: str, bars) -> None:
         for bar in bars:

@@ -21,7 +21,7 @@ def candle() -> Candle:
 
 
 def candidate() -> TradeCandidate:
-    return TradeCandidate(symbol='AAPL', snapshot=snapshot(), candle=candle(), signal=Signal(action='BUY', setup_quality=0.8, reason='test'), score=100.0, rank_reason='test', session_key=SESSION_KEY)
+    return TradeCandidate(symbol='AAPL', snapshot=snapshot(), candle=candle(), signal=Signal(action='BUY', setup_quality=0.8, reason='test'), rank_reason='test', session_key=SESSION_KEY)
 
 
 class FakeBroker:

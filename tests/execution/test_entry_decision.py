@@ -104,7 +104,6 @@ def evaluated(
             'TEST', 60, 99.8, last, 99.7, last, None, NOW, NOW
         ),
         signal=signal,
-        score=120.0,
         rank_reason='test',
         entry_quality_metadata={
             'remaining_move_quality': remaining_move_quality

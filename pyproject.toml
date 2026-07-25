@@ -24,6 +24,14 @@ dev = [
     "pytest>=8.0.0",
     "ruff>=0.4.0",
 ]
+calibration = [
+    "numpy==2.5.1",
+    "pandas==3.0.5",
+    "scikit-learn==1.8.0",
+]
+
+[tool.setuptools.package-data]
+"app.execution.scoring" = ["models/*.json"]
 
 [tool.setuptools.packages.find]
 include = ["app*"]

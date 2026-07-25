@@ -4,6 +4,7 @@ from app.runtime.runtime_policy import (
     POSITION_FALLBACK_INTERVAL_SECONDS,
     REST_CONTROL_INTERVAL_SECONDS,
 )
+from app.runtime.session_runtime import session_timestamp_rejection_reason
 
 
 class MarketDataMaintenance:
@@ -26,11 +27,21 @@ class MarketDataMaintenance:
         if monotonic_now - self._last_context_update < 1.0:
             return
         self._last_context_update = monotonic_now
-        relevant = {
-            symbol: self.latest_snapshots[symbol]
-            for symbol in [*self.active_symbols, *self.context_asset_classes]
-            if symbol in self.latest_snapshots
-        }
+        relevant = {}
+        for symbol in [*self.active_symbols, *self.context_asset_classes]:
+            snapshot = self.latest_snapshots.get(symbol)
+            decision = self._session_decision_for_market_data_symbol(symbol)
+            if snapshot is None or decision is None:
+                continue
+            if (
+                session_timestamp_rejection_reason(
+                    decision=decision,
+                    timestamp=snapshot.timestamp,
+                )
+                is not None
+            ):
+                continue
+            relevant[symbol] = snapshot
         if not relevant:
             return
         self.market_context_service.update(

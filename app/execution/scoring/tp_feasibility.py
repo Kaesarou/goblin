@@ -39,9 +39,7 @@ class TpFeasibilityAnalysis:
     entry_freshness_score: float
     feasibility_score: float
     component_scores: dict[str, float]
-    score_before_tp_feasibility: float
     score_contribution: float
-    adjusted_score: float
     tp_feasibility_hard_rejection_reason: str | None
     readiness: CandidateReadiness
     readiness_reason: str
@@ -180,7 +178,6 @@ class TpFeasibilityAnalyzer:
         readiness = evaluate_candidate_readiness(
             hard_rejection_reason=hard_rejection_reason,
         )
-        preliminary_score = round(candidate.score, 4)
         reasons = _reason_components(
             component_scores=component_scores,
             atr_missing=tp_to_atr_ratio is None,
@@ -233,12 +230,7 @@ class TpFeasibilityAnalyzer:
                 name: round(value, 4)
                 for name, value in component_scores.items()
             },
-            score_before_tp_feasibility=preliminary_score,
             score_contribution=round(contribution, 4),
-            adjusted_score=round(
-                max(0.0, preliminary_score + contribution),
-                4,
-            ),
             tp_feasibility_hard_rejection_reason=hard_rejection_reason,
             readiness=readiness.readiness,
             readiness_reason=readiness.reason,
@@ -252,7 +244,6 @@ class TpFeasibilityAnalyzer:
         evaluated_candidate: EvaluatedTradeCandidate,
         effective_sl_tp,
     ) -> TpFeasibilityAnalysis:
-        score = round(evaluated_candidate.candidate.score, 4)
         return TpFeasibilityAnalysis(
             effective_take_profit_percent=round(
                 effective_sl_tp.take_profit_percent,
@@ -285,9 +276,7 @@ class TpFeasibilityAnalyzer:
             entry_freshness_score=50.0,
             feasibility_score=50.0,
             component_scores={},
-            score_before_tp_feasibility=score,
             score_contribution=0.0,
-            adjusted_score=score,
             tp_feasibility_hard_rejection_reason=None,
             readiness=CandidateReadiness.TRADABLE_NOW,
             readiness_reason='tp_feasibility_disabled',
@@ -316,27 +305,8 @@ class CandidateTpFeasibilityEvaluator:
             side=candidate.signal.action,
             entry_freshness_score=analysis.entry_freshness_score,
         )
-        score_before_tp_feasibility = max(
-            0.0,
-            candidate.directional_score
-            + context_score.score
-            + candidate.multi_timeframe_score,
-        )
-        adjusted_score = max(
-            0.0,
-            score_before_tp_feasibility + analysis.score_contribution,
-        )
-        analysis = replace(
-            analysis,
-            score_before_tp_feasibility=round(
-                score_before_tp_feasibility,
-                4,
-            ),
-            adjusted_score=round(adjusted_score, 4),
-        )
         updated_candidate = replace(
             candidate,
-            score=analysis.adjusted_score,
             rank_reason=_append_rank_reason(
                 candidate.rank_reason,
                 analysis,
@@ -362,11 +332,7 @@ class CandidateTpFeasibilityEvaluator:
             readiness=analysis.readiness,
             readiness_reason=analysis.readiness_reason,
         )
-        from app.execution.scoring.tp_probability import (
-            CandidateTpProbabilityEvaluator,
-        )
-
-        return CandidateTpProbabilityEvaluator().evaluate(evaluated)
+        return evaluated
 
 
 def analysis_to_metadata(
@@ -405,9 +371,7 @@ def analysis_to_metadata(
         'entry_freshness_score': analysis.entry_freshness_score,
         'feasibility_score': analysis.feasibility_score,
         'component_scores': analysis.component_scores,
-        'score_before_tp_feasibility': analysis.score_before_tp_feasibility,
         'score_contribution': analysis.score_contribution,
-        'adjusted_score': analysis.adjusted_score,
         'tp_feasibility_hard_rejection_reason': (
             analysis.tp_feasibility_hard_rejection_reason
         ),
@@ -426,7 +390,6 @@ def _append_rank_reason(
     final_market_context_score: float,
 ) -> str:
     suffix = (
-        f'final_score={analysis.adjusted_score:.2f},'
         f'final_market_context_score={final_market_context_score:.2f},'
         f'tp_feasibility_score={analysis.feasibility_score:.2f},'
         f'tp_feasibility_contribution={analysis.score_contribution:.2f},'
@@ -436,8 +399,6 @@ def _append_rank_reason(
         f'tp_feasibility_components={analysis.component_scores},'
         f'readiness={analysis.readiness.value},'
         f'readiness_reason={analysis.readiness_reason},'
-        f'score_before_tp_feasibility='
-        f'{analysis.score_before_tp_feasibility:.2f},'
         f'sl_tp_mode={analysis.sl_tp_mode},'
         f'sl_tp_source={analysis.sl_tp_source}'
     )

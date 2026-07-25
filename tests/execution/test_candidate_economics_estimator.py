@@ -40,7 +40,6 @@ def make_candidate(symbol: str) -> TradeCandidate:
         snapshot=snapshot,
         candle=candle,
         signal=signal,
-        score=120.0,
         rank_reason='test',
     )
 

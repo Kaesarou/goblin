@@ -14,7 +14,8 @@ from app.runtime.pending_entry_flow import write_pending_events
 
 _RETRYABLE_SELECTION_REASONS = {
     'candidate_selection_outside_top_n',
-    'candidate_selection_score_too_low',
+    'candidate_selection_tp_probability_too_low',
+    'candidate_selection_touch_probability_too_high',
 }
 
 

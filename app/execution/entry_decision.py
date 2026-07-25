@@ -146,7 +146,6 @@ class EntryDecisionEngine:
         context = candidate.market_context
         return {
             'candidate_id': candidate.candidate_id,
-            'score': candidate.score,
             'side': candidate.signal.action,
             'market_regime': (
                 context.regime.value if context is not None else None

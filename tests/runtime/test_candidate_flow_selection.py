@@ -46,14 +46,25 @@ def make_candidate(symbol: str, score: float) -> TradeCandidate:
                 'close_position_percent': 85.0,
             },
         ),
-        score=score,
         rank_reason=f'test_score={score}',
+        directional_score=score,
     )
 
 
 def make_evaluated_candidate(symbol: str, score: float) -> EvaluatedTradeCandidate:
     return EvaluatedTradeCandidate(
-        candidate=make_candidate(symbol=symbol, score=score),
+        candidate=replace(
+            make_candidate(symbol=symbol, score=score),
+            probability_score=40.0,
+            touch_probability=0.40,
+            direction_probability=0.50,
+            tp_probability=0.20,
+            sl_probability=0.20,
+            neither_probability=0.60,
+            direction_break_even_probability=0.40,
+            direction_edge=score / 1000,
+            outcome_probability_model_version='outcome_probability_v1',
+        ),
         economics=CandidateEconomics(
             position_value=100.0,
             expected_gross_profit=2.0,
@@ -86,15 +97,12 @@ def build_strategy_profile() -> BalancedStrategyConfig:
         candidate_selection_configs={
             AssetClass.CRYPTO: CandidateSelectionConfig(
                 top_n=2,
-                min_score=0.0,
             ),
             AssetClass.EQUITY_US: CandidateSelectionConfig(
                 top_n=2,
-                min_score=0.0,
             ),
             AssetClass.EQUITY_EU: CandidateSelectionConfig(
                 top_n=1,
-                min_score=0.0,
             ),
         },
     )

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
@@ -12,9 +12,7 @@ from app.execution.candidate_economics import (
     CandidateEconomicsEstimator,
     EvaluatedTradeCandidate,
 )
-from app.execution.candidate_ranking import rank_trade_candidates
 from app.execution.candidate_selector import (
-    CandidateSelectionResult,
     EvaluatedCandidateSelectionResult,
     rank_evaluated_trade_candidates,
 )
@@ -40,6 +38,7 @@ from app.runtime.candidate_flow import (
     _evaluate_risk_manager,
     _resolve_runtime_effective_sl_tp,
     _slippage_percent,
+    apply_outcome_probability_to_evaluated_candidates,
     apply_tp_feasibility_to_evaluated_candidates,
     apply_trade_cooldown_guard,
     attach_entry_decisions,
@@ -54,7 +53,6 @@ from app.runtime.pending_candidate_lifecycle import (
 )
 from app.runtime.pending_entry import PendingEntryManager
 from app.strategies.models import StrategyProfileConfig
-
 
 logger = logging.getLogger(__name__)
 
@@ -314,6 +312,19 @@ class AsyncCandidateExecutionCoordinator:
                 {'equity': equity, 'evaluated_candidates': evaluated},
             )
             evaluated = attach_entry_decisions(evaluated)
+            evaluated = (
+                apply_outcome_probability_to_evaluated_candidates(
+                    evaluated_candidates=evaluated,
+                    risk_manager=self.risk_manager,
+                )
+            )
+            self.trade_journal.write(
+                'candidate_outcome_probability',
+                {
+                    'equity': equity,
+                    'evaluated_candidates': evaluated,
+                },
+            )
             evaluated_selection = (
                 EvaluatedCandidateSelectionResult(
                     rank_evaluated_trade_candidates(evaluated),
