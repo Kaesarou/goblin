@@ -26,7 +26,6 @@ def candidate(*, side='BUY', score=150.0, metadata=None) -> TradeCandidate:
             None, TIMESTAMP, TIMESTAMP,
         ),
         signal=Signal(side, 0.8, 'test', metadata=metadata or {}),
-        score=score,
         rank_reason='test',
         session_key='session',
         base_score=score,
@@ -85,7 +84,6 @@ def test_easy_tp_has_high_feasibility_and_positive_contribution():
     )
     assert analysis.feasibility_score >= 75.0
     assert analysis.score_contribution > 0
-    assert analysis.adjusted_score > 150.0
     assert analysis.movement_consumed_to_tp_ratio == 0.3
     assert analysis.entry_freshness_score == 100.0
 
@@ -117,7 +115,6 @@ def test_opposite_snapshot_momentum_is_a_continuous_weak_component():
     )
     assert analysis.component_scores['tp_vs_momentum'] == 0.0
     assert analysis.tp_feasibility_hard_rejection_reason is None
-    assert analysis.adjusted_score > 0
 
 
 def test_cost_equal_to_tp_is_the_only_feasibility_hard_rejection():
@@ -173,7 +170,7 @@ def test_sell_uses_directional_momentum_and_freshness():
     assert good.feasibility_score > bad.feasibility_score
 
 
-def test_evaluator_persists_freshness_context_and_probability():
+def test_evaluator_persists_freshness_context_and_feasibility_evidence():
     result = CandidateTpFeasibilityEvaluator().evaluate(
         evaluated_candidate=evaluated(metadata={
             'atr_percent': 0.8,
@@ -187,6 +184,5 @@ def test_evaluator_persists_freshness_context_and_probability():
     assert result.candidate.tp_feasibility_score == result.tp_feasibility.feasibility_score
     assert result.candidate.tp_feasibility_contribution == result.tp_feasibility.score_contribution
     assert result.tp_feasibility.entry_freshness_score == 100.0
-    assert result.candidate.raw_tp_before_sl_probability is not None
-    assert result.candidate.tp_before_sl_probability is not None
+    assert result.candidate.tp_probability is None
     assert 'entry_freshness_score=' in result.candidate.rank_reason

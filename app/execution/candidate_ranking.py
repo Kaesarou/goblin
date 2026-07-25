@@ -51,12 +51,6 @@ def build_trade_candidate(
         context=multi_timeframe_context,
         side=signal.action,
     )
-    score = max(
-        0.0,
-        directional_score
-        + context_score.score
-        + multi_timeframe_score.score,
-    )
     exhaustion = score_breakdown.exhaustion
     entry_quality_metadata = _entry_quality_metadata(score_breakdown)
     sell_score_metadata = score_breakdown.score_metadata.get('sell_score', {})
@@ -74,13 +68,11 @@ def build_trade_candidate(
         snapshot=snapshot,
         candle=candle,
         signal=signal,
-        score=round(score, 4),
         rank_reason=_rank_reason(
             snapshot=snapshot,
             signal=signal,
             base_score=score_breakdown.base_score,
             directional_score=directional_score,
-            score=score,
             entry_quality_metadata=entry_quality_metadata,
             sell_score_metadata=sell_score_metadata,
             market_context_score=context_score.score,
@@ -119,7 +111,14 @@ def build_trade_candidate(
 
 
 def rank_trade_candidates(candidates: list[TradeCandidate]) -> list[TradeCandidate]:
-    return sorted(candidates, key=lambda candidate: candidate.score, reverse=True)
+    return sorted(
+        candidates,
+        key=lambda candidate: (
+            -_ranking_value(candidate.probability_score),
+            -candidate.directional_score,
+            candidate.candidate_id,
+        ),
+    )
 
 
 def _candidate_id(
@@ -211,7 +210,6 @@ def _rank_reason(
     signal: Signal,
     base_score: float,
     directional_score: float,
-    score: float,
     entry_quality_metadata: dict[str, Any],
     sell_score_metadata: dict[str, Any],
     market_context_score: float,
@@ -222,7 +220,6 @@ def _rank_reason(
     metadata = signal.metadata or {}
     sell_reason = _sell_rank_reason(sell_score_metadata)
     return (
-        f'score={round(score, 4)} | '
         f'base_score={round(base_score, 4)} | '
         f'directional_score={round(directional_score, 4)} | '
         f'market_context_score={round(market_context_score, 4)} | '
@@ -246,6 +243,10 @@ def _rank_reason(
         f'close_position={float_metadata(metadata, "close_position_percent")} | '
         f'spread={round(spread_percent(snapshot), 4)}'
     )
+
+
+def _ranking_value(value: float | None) -> float:
+    return float('-inf') if value is None else float(value)
 
 
 def _sell_rank_reason(sell_score_metadata: dict[str, Any]) -> str:

@@ -17,13 +17,13 @@ def test_analysis_ready_summary_distinguishes_context_and_trading_snapshots():
     summary.record('market_snapshot', {'symbol': 'MSFT'})
 
     data = summary.to_dict()
-    assert data['schema_version'] == 11
+    assert data['schema_version'] == 12
     assert data['market_data']['accepted'] == 3
     assert data['market_data']['trading_snapshots_processed'] == 2
     assert data['market_data']['context_snapshots_accepted'] == 1
 
 
-def test_analysis_ready_summary_exposes_tp_aware_scores_profiles_and_events():
+def test_analysis_ready_summary_exposes_pr5e_scores_profiles_and_events():
     summary = AnalysisReadySummaryAggregator(run_id='run-test')
     analysis = SimpleNamespace(
         feasibility_score=24.0,
@@ -35,19 +35,27 @@ def test_analysis_ready_summary_exposes_tp_aware_scores_profiles_and_events():
     candidate = SimpleNamespace(
         market_context_score=6.0,
         multi_timeframe_score=4.0,
-        net_expected_value_percent=-0.12,
+        probability_score=34.0,
+        touch_probability=0.40,
+        direction_probability=0.425,
+        direction_edge=-0.10,
     )
     probability = SimpleNamespace(
-        calibration_profile_key='eu_trend_buy_v1:BUY'
+        profile_key='eu_trend_buy_v1',
+        in_training_domain=True,
     )
     evaluated = SimpleNamespace(
         tp_feasibility=analysis,
-        tp_probability=probability,
+        outcome_probability=probability,
         effective_sl_tp=SimpleNamespace(source='eu_trend_buy_v1'),
         candidate=candidate,
     )
     summary.record(
         'candidate_tp_feasibility',
+        {'evaluated_candidates': [evaluated]},
+    )
+    summary.record(
+        'candidate_outcome_probability',
         {'evaluated_candidates': [evaluated]},
     )
     summary.record(
@@ -69,15 +77,21 @@ def test_analysis_ready_summary_exposes_tp_aware_scores_profiles_and_events():
     assert data['effective_sl_tp']['by_source'] == {
         'eu_trend_buy_v1': 1,
     }
-    assert data['tp_probability']['by_calibration_profile'] == {
-        'eu_trend_buy_v1:BUY': 1,
+    assert data['outcome_probability']['by_profile'] == {
+        'eu_trend_buy_v1': 1,
+    }
+    assert data['outcome_probability']['training_domain'] == {
+        'in_training_domain': 1,
     }
     contributions = data['score_contributions']
     assert sum(contributions['market_context'].values()) == 1
     assert sum(contributions['multi_timeframe'].values()) == 1
     assert sum(contributions['tp_feasibility_score'].values()) == 1
     assert sum(contributions['entry_freshness_score'].values()) == 1
-    assert sum(contributions['net_expected_value_percent'].values()) == 1
+    assert sum(contributions['probability_score'].values()) == 1
+    assert sum(contributions['touch_probability'].values()) == 1
+    assert sum(contributions['direction_probability'].values()) == 1
+    assert sum(contributions['direction_edge'].values()) == 1
     assert data['entry_horizon']['rejections_by_profile'] == {
         'eu_trend_buy_v1': 1,
     }

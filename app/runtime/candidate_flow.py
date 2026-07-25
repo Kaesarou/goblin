@@ -21,6 +21,9 @@ from app.execution.candidate_selector import (
 )
 from app.execution.entry_decision import EntryDecisionEngine
 from app.execution.position_tracker import PositionTracker
+from app.execution.scoring.outcome_probability import (
+    CandidateOutcomeProbabilityEvaluator,
+)
 from app.execution.scoring.tp_feasibility import (
     CandidateTpFeasibilityEvaluator,
 )
@@ -41,7 +44,6 @@ from app.runtime.pending_candidate_lifecycle import (
 )
 from app.runtime.pending_entry import PendingEntryManager
 from app.strategies.models import StrategyProfileConfig
-
 
 logger = logging.getLogger(__name__)
 BrokerAuthorizationErrorChecker = Callable[[Exception], bool]
@@ -210,6 +212,24 @@ def attach_entry_decisions(
     return result
 
 
+def apply_outcome_probability_to_evaluated_candidates(
+    *,
+    evaluated_candidates: list[EvaluatedTradeCandidate],
+    risk_manager: RiskManager,
+    evaluator: CandidateOutcomeProbabilityEvaluator | None = None,
+) -> list[EvaluatedTradeCandidate]:
+    actual_evaluator = evaluator or CandidateOutcomeProbabilityEvaluator()
+    return [
+        actual_evaluator.evaluate(
+            evaluated_candidate=item,
+            risk_profile=risk_manager.risk_profile_for(
+                item.candidate.symbol
+            ),
+        )
+        for item in evaluated_candidates
+    ]
+
+
 def _slippage_percent(
     *,
     planned_entry_price: float,
@@ -267,18 +287,16 @@ def _evaluate_risk_manager(
 def _candidate_log_item(
     candidate: TradeCandidate,
     economics_by_id: dict[int, object],
-    feasibility_by_id: dict[int, object],
     effective_sl_tp_by_id: dict[int, EffectiveSlTp | None],
 ) -> dict:
     object_id = id(candidate)
     economics = economics_by_id.get(object_id)
-    feasibility = feasibility_by_id.get(object_id)
     effective_sl_tp = effective_sl_tp_by_id.get(object_id)
     return {
         'candidate_id': candidate.candidate_id,
         'symbol': candidate.symbol,
         'action': candidate.signal.action,
-        'score': candidate.score,
+        'probability_score': candidate.probability_score,
         'directional_score': candidate.directional_score,
         'market_context_score': candidate.market_context_score,
         'multi_timeframe_score': candidate.multi_timeframe_score,
@@ -312,21 +330,15 @@ def _candidate_log_item(
         'sl_tp_source': (
             effective_sl_tp.source if effective_sl_tp else None
         ),
-        'score_before_tp_feasibility': (
-            feasibility.score_before_tp_feasibility
-            if feasibility
-            else None
+        'touch_probability': candidate.touch_probability,
+        'direction_probability': candidate.direction_probability,
+        'tp_probability': candidate.tp_probability,
+        'sl_probability': candidate.sl_probability,
+        'neither_probability': candidate.neither_probability,
+        'direction_break_even_probability': (
+            candidate.direction_break_even_probability
         ),
-        'adjusted_score': (
-            feasibility.adjusted_score if feasibility else None
-        ),
-        'raw_tp_probability': candidate.raw_tp_before_sl_probability,
-        'tp_probability': candidate.tp_before_sl_probability,
-        'break_even_probability': candidate.break_even_probability,
-        'net_expected_value_percent': (
-            candidate.net_expected_value_percent
-        ),
-        'probability_edge': candidate.probability_edge,
+        'direction_edge': candidate.direction_edge,
         'reason': candidate.rank_reason,
     }
 
@@ -414,6 +426,19 @@ def execute_ranked_candidates(
         evaluated_candidates = attach_entry_decisions(
             evaluated_candidates
         )
+        evaluated_candidates = (
+            apply_outcome_probability_to_evaluated_candidates(
+                evaluated_candidates=evaluated_candidates,
+                risk_manager=risk_manager,
+            )
+        )
+        trade_journal.write(
+            'candidate_outcome_probability',
+            {
+                'equity': selection_equity,
+                'evaluated_candidates': evaluated_candidates,
+            },
+        )
         evaluated_selection = (
             EvaluatedCandidateSelectionResult(
                 rank_evaluated_trade_candidates(evaluated_candidates),
@@ -477,10 +502,6 @@ def execute_ranked_candidates(
         id(item.candidate): item.economics
         for item in selected_evaluated_candidates or []
     }
-    feasibility_by_id = {
-        id(item.candidate): item.tp_feasibility
-        for item in selected_evaluated_candidates or []
-    }
     effective_sl_tp_by_id = {
         id(item.candidate): item.effective_sl_tp
         for item in selected_evaluated_candidates or []
@@ -499,7 +520,6 @@ def execute_ranked_candidates(
             _candidate_log_item(
                 candidate,
                 economics_by_id,
-                feasibility_by_id,
                 effective_sl_tp_by_id,
             )
             for candidate in ranked_candidates
@@ -546,7 +566,7 @@ def execute_ranked_candidates(
                 'score=%s | error=%s',
                 candidate.symbol,
                 candidate.signal.action,
-                candidate.score,
+                candidate.probability_score,
                 exc,
             )
             trade_journal.write(

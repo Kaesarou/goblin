@@ -31,7 +31,6 @@ def make_candidate(action: str, metadata: dict | None = None) -> TradeCandidate:
         snapshot=snapshot,
         candle=candle,
         signal=Signal(action, 0.8, 'test_signal', metadata=metadata),
-        score=120.0,
         rank_reason='test',
         session_key=SESSION_KEY,
         directional_score=120.0,

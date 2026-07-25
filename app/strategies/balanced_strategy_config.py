@@ -19,6 +19,9 @@ BALANCED_TRADE_COOLDOWN = TradeCooldownConfig(
     stop_loss_symbol_lock_minutes=15,
 )
 
+PR5E_MINIMUM_TP_PROBABILITY = 0.125
+PR5E_MAXIMUM_TOUCH_PROBABILITY = 0.40
+
 BALANCED_CRYPTO_CONFIG = replace(
     CRYPTO_CONFIG,
     risk=replace(
@@ -46,15 +49,18 @@ def _selection_configs() -> dict[AssetClass, CandidateSelectionConfig]:
     return {
         AssetClass.CRYPTO: CandidateSelectionConfig(
             top_n=2,
-            min_score=115.0,
+            minimum_tp_probability=PR5E_MINIMUM_TP_PROBABILITY,
+            maximum_touch_probability=PR5E_MAXIMUM_TOUCH_PROBABILITY,
         ),
         AssetClass.EQUITY_US: CandidateSelectionConfig(
-            top_n=2,
-            min_score=115.0,
+            top_n=1,
+            minimum_tp_probability=PR5E_MINIMUM_TP_PROBABILITY,
+            maximum_touch_probability=PR5E_MAXIMUM_TOUCH_PROBABILITY,
         ),
         AssetClass.EQUITY_EU: CandidateSelectionConfig(
             top_n=1,
-            min_score=110.0,
+            minimum_tp_probability=PR5E_MINIMUM_TP_PROBABILITY,
+            maximum_touch_probability=PR5E_MAXIMUM_TOUCH_PROBABILITY,
         ),
     }
 

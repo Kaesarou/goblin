@@ -59,7 +59,6 @@ def candidate(
             reason='test',
             metadata=metadata,
         ),
-        score=120.0,
         rank_reason='test',
     )
 

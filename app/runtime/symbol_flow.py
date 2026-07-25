@@ -327,11 +327,11 @@ def process_closed_candle(
     )
     logger.info(
         'Trade candidate detected | candidate_id=%s | symbol=%s | '
-        'action=%s | score=%s | reason=%s',
+        'action=%s | directional_score=%s | reason=%s',
         candidate.candidate_id,
         symbol,
         signal.action,
-        candidate.score,
+        candidate.directional_score,
         candidate.rank_reason,
     )
     return candidate

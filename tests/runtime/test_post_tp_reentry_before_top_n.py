@@ -26,7 +26,6 @@ def candidate(symbol: str, side: str, score: float, price: float) -> TradeCandid
         snapshot=snapshot,
         candle=candle,
         signal=Signal(action=side, setup_quality=0.8, reason='test', metadata={}),
-        score=score,
         rank_reason='test',
     )
 
@@ -68,7 +67,7 @@ def test_post_tp_reentries_do_not_take_top_n_slots(tmp_path):
     )
     selection = select_trade_candidates(
         result.selected_candidates,
-        CandidateSelectionConfig(top_n=2, min_score=0.0),
+        CandidateSelectionConfig(top_n=2),
     )
 
     assert [candidate.symbol for candidate in selection.selected_candidates] == ['META', 'NVDA']

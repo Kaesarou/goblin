@@ -698,7 +698,9 @@ def _candidate_summary(candidate):
 
 
 def _candidate_score(candidate):
-    score = _attribute(candidate, 'score')
+    score = _attribute(candidate, 'probability_score')
+    if score is None:
+        score = _attribute(candidate, 'score')
     return None if score is None else float(score)
 
 

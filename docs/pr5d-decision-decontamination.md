@@ -163,12 +163,16 @@ The canonical roadmap remains:
 2. **PR5 — audit scores and features**: de-harden probabilistic signals,
    decontaminate live decisions, collect homogeneous evidence and determine
    which scores, contexts, timeframes and retests have real predictive value.
-3. **PR6 — calibrated probability and expected value**: use the PR5 evidence to
-   calibrate TP-before-SL probabilities and introduce EV-based decisions only
-   where out-of-sample evidence supports them.
+3. **PR5-E — monotone outcome probability challenger**: freeze the two-stage
+   `P_TOUCH × P_DIRECTION` model from the complete PR5-D cohort, replace the
+   PR5-D runtime policy and validate it on an equity-only watchlist.
+4. **PR6 — externally validated probability and expected value**: use new
+   untouched sessions to decide whether calibration, direction edge and
+   abstention are stable enough for broader deployment.
 
-PR6 must not be designed from one day or from executed trades alone. It follows
-the complete PR5-D cohort analysis.
+PR5-E is documented in
+`docs/pr5e-monotone-outcome-score.md`. PR6 must not be designed from one day or
+from executed trades alone.
 
 ## Non-goals
 

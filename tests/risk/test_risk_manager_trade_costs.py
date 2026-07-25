@@ -70,7 +70,6 @@ def evaluate(manager, signal, market_snapshot, equity):
         snapshot=market_snapshot,
         candle=candle,
         signal=signal,
-        score=120.0,
         rank_reason='test',
     )
     effective = EffectiveSlTpResolver().resolve(

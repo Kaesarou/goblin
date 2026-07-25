@@ -4,8 +4,7 @@ from enum import StrEnum
 
 from app.market.models import Candle, MarketSnapshot
 
-
-MARKET_DATA_MODEL_VERSION = 'market_data_v2_ws_clocked_1'
+MARKET_DATA_MODEL_VERSION = 'market_data_v2_ws_clocked_2'
 
 
 class MarketDataSource(StrEnum):

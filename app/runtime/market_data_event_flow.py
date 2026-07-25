@@ -3,6 +3,7 @@ from datetime import datetime
 from app.market.data_quality import MarketDataStatus
 from app.market_data.models import MarketDataEvent
 from app.runtime.pending_entry_flow import write_pending_events
+from app.runtime.session_runtime import session_timestamp_rejection_reason
 
 
 class MarketDataEventFlow:
@@ -70,14 +71,41 @@ class MarketDataEventFlow:
                 },
             )
 
-        session_decision = self.session_decisions.get(symbol)
+        position_session_decision = self.session_decisions.get(symbol)
         self.broker_operations.on_snapshot(
             snapshot=snapshot,
-            session_decision=session_decision,
+            session_decision=position_session_decision,
             source=event.source.value,
         )
 
-        if symbol not in self.active_symbols or session_decision is None:
+        session_decision = self._session_decision_for_market_data_symbol(symbol)
+        if session_decision is None:
+            return
+        rejection_reason = session_timestamp_rejection_reason(
+            decision=session_decision,
+            timestamp=snapshot.timestamp,
+        )
+        if rejection_reason is not None:
+            self.trade_journal.write(
+                'market_data_event_ignored',
+                {
+                    'symbol': symbol,
+                    'source': event.source.value,
+                    'reason': rejection_reason,
+                    'message_id': event.message_id,
+                    'snapshot_timestamp': snapshot.timestamp,
+                    'session_start_time': (
+                        session_decision.session_start_time
+                    ),
+                    'session_end_time': session_decision.session_end_time,
+                    'session_key': session_decision.session_key,
+                    'position_management_forwarded': True,
+                    'loop_id': self.loop_id,
+                },
+            )
+            return
+
+        if symbol not in self.active_symbols:
             return
         self.strategies[symbol].on_snapshot(snapshot)
         self._invalidate_pending_after_symbol_lock(symbol, snapshot.timestamp)

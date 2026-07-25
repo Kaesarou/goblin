@@ -41,13 +41,13 @@ def _evaluated(*, level=100.0):
         },
     )
     candidate = TradeCandidate(
-        'AMD',
-        MarketSnapshot('AMD', 99.95, 100.05, 100.0, NOW),
-        current_candle,
-        signal,
-        120.0,
-        'test',
-        'US',
+        symbol='AMD',
+        snapshot=MarketSnapshot('AMD', 99.95, 100.05, 100.0, NOW),
+        candle=current_candle,
+        signal=signal,
+        rank_reason='test',
+        session_key='US',
+        directional_score=120.0,
     )
     economics = CandidateEconomics(
         100, 1, 0.5, 0.5, 0.5, 0.5, 0.1, 0.1

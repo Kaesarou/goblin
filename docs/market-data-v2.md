@@ -1,7 +1,8 @@
 # Market Data V2 — WebSocket runtime
 
 Market Data V2 replaces the ten-second eToro rates polling loop with an
-event-driven transport while preserving the PR5-D decision model.
+event-driven transport. The transport contract is independent from the
+versioned scoring policy.
 
 ## Runtime sources
 
@@ -26,6 +27,11 @@ event-driven transport while preserving the PR5-D decision model.
   WebSocket timestamp watermark;
 - use fallback snapshots only for TP, SL, trailing stop and breakeven position
   management;
+- for a finite session, admit broker timestamps to candles, signals and market
+  context only inside the half-open interval `[session_start, session_end)`;
+- keep a cached snapshot outside that interval available to position
+  management, but journal and exclude it from the new session's decision
+  pipeline;
 - keep REST control snapshots diagnostic;
 - bound the transport queue and fail visibly on overflow;
 - coordinate candidates by closed M1 minute before applying cross-symbol
@@ -33,7 +39,8 @@ event-driven transport while preserving the PR5-D decision model.
 
 ## Deliberately unchanged
 
-- PR5-D scores, thresholds, profiles, top-N and risk constraints;
+- scoring thresholds, profiles, top-N and risk constraints are owned by the
+  active scoring model rather than the transport layer;
 - `LastExecution` remains the strategy and candle price;
 - portfolio reconciliation cadence and request semantics;
 - historical candle warm-up and gap repair;

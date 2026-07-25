@@ -17,8 +17,12 @@ class AnalysisReadySummaryAggregator(DailySummaryAggregator):
         self.tp_feasibility_score_buckets = Counter()
         self.tp_feasibility_contribution_buckets = Counter()
         self.entry_freshness_score_buckets = Counter()
-        self.net_expected_value_buckets = Counter()
-        self.calibration_profiles = Counter()
+        self.probability_score_buckets = Counter()
+        self.touch_probability_buckets = Counter()
+        self.direction_probability_buckets = Counter()
+        self.direction_edge_buckets = Counter()
+        self.outcome_probability_profiles = Counter()
+        self.outcome_probability_training_domain = Counter()
         self.entry_horizon_rejections_by_profile = Counter()
         self.entry_horizon_rejections_by_reason = Counter()
         self.managed_stop_updates_by_type = Counter()
@@ -38,6 +42,8 @@ class AnalysisReadySummaryAggregator(DailySummaryAggregator):
             self.validated_accepted_total += len(accepted)
         elif event_type == 'candidate_tp_feasibility':
             self._record_candidate_scores(payload)
+        elif event_type == 'candidate_outcome_probability':
+            self._record_outcome_probabilities(payload)
         elif event_type == 'entry_horizon_rejected':
             self.entry_horizon_rejections_by_reason[
                 str(payload.get('reason') or 'unknown')
@@ -64,7 +70,6 @@ class AnalysisReadySummaryAggregator(DailySummaryAggregator):
     def _record_candidate_scores(self, payload: dict[str, Any]) -> None:
         for item in _as_list(payload.get('evaluated_candidates')):
             analysis = _attribute(item, 'tp_feasibility')
-            probability = _attribute(item, 'tp_probability')
             candidate = _attribute(item, 'candidate')
             effective_sl_tp = _attribute(item, 'effective_sl_tp')
             for component in _as_list(
@@ -77,12 +82,6 @@ class AnalysisReadySummaryAggregator(DailySummaryAggregator):
             )
             if source:
                 self.effective_sl_tp_sources[str(source)] += 1
-            calibration_profile = _attribute(
-                probability,
-                'calibration_profile_key',
-            )
-            if calibration_profile:
-                self.calibration_profiles[str(calibration_profile)] += 1
             self._record_bucket(
                 self.market_context_score_buckets,
                 _attribute(candidate, 'market_context_score'),
@@ -108,10 +107,45 @@ class AnalysisReadySummaryAggregator(DailySummaryAggregator):
                 _attribute(analysis, 'entry_freshness_score'),
                 width=10.0,
             )
+
+    def _record_outcome_probabilities(
+        self,
+        payload: dict[str, Any],
+    ) -> None:
+        for item in _as_list(payload.get('evaluated_candidates')):
+            estimate = _attribute(item, 'outcome_probability')
+            candidate = _attribute(item, 'candidate')
+            profile = _attribute(estimate, 'profile_key')
+            if profile:
+                self.outcome_probability_profiles[str(profile)] += 1
+            in_training_domain = bool(
+                _attribute(estimate, 'in_training_domain')
+            )
+            domain_key = (
+                'in_training_domain'
+                if in_training_domain
+                else 'outside_training_domain'
+            )
+            self.outcome_probability_training_domain[domain_key] += 1
             self._record_bucket(
-                self.net_expected_value_buckets,
-                _attribute(candidate, 'net_expected_value_percent'),
-                width=0.25,
+                self.probability_score_buckets,
+                _attribute(candidate, 'probability_score'),
+                width=10.0,
+            )
+            self._record_bucket(
+                self.touch_probability_buckets,
+                _attribute(candidate, 'touch_probability'),
+                width=0.10,
+            )
+            self._record_bucket(
+                self.direction_probability_buckets,
+                _attribute(candidate, 'direction_probability'),
+                width=0.10,
+            )
+            self._record_bucket(
+                self.direction_edge_buckets,
+                _attribute(candidate, 'direction_edge'),
+                width=0.05,
             )
 
     def _record_bucket(
@@ -131,7 +165,7 @@ class AnalysisReadySummaryAggregator(DailySummaryAggregator):
 
     def to_dict(self) -> dict[str, Any]:
         summary = super().to_dict()
-        summary['schema_version'] = 11
+        summary['schema_version'] = 12
         market_data = summary['market_data']
         trading_snapshots = market_data.get('accepted', 0)
         market_data['trading_snapshots_processed'] = trading_snapshots
@@ -149,7 +183,12 @@ class AnalysisReadySummaryAggregator(DailySummaryAggregator):
                 self.tp_feasibility_contribution_buckets
             ),
             'entry_freshness_score': dict(self.entry_freshness_score_buckets),
-            'net_expected_value_percent': dict(self.net_expected_value_buckets),
+            'probability_score': dict(self.probability_score_buckets),
+            'touch_probability': dict(self.touch_probability_buckets),
+            'direction_probability': dict(
+                self.direction_probability_buckets
+            ),
+            'direction_edge': dict(self.direction_edge_buckets),
         }
         summary['tp_feasibility'] = {
             'hard_rejection_components': dict(
@@ -159,8 +198,11 @@ class AnalysisReadySummaryAggregator(DailySummaryAggregator):
         summary['effective_sl_tp'] = {
             'by_source': dict(self.effective_sl_tp_sources),
         }
-        summary['tp_probability'] = {
-            'by_calibration_profile': dict(self.calibration_profiles),
+        summary['outcome_probability'] = {
+            'by_profile': dict(self.outcome_probability_profiles),
+            'training_domain': dict(
+                self.outcome_probability_training_domain
+            ),
         }
         summary['entry_horizon'] = {
             'rejections_by_reason': dict(
