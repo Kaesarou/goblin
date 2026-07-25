@@ -277,7 +277,7 @@ The launcher runs Docker Compose in the foreground so an intentional stop can fi
 Local execution:
 
 ```bash
-python -m venv .venv
+python -m venv
 source .venv/bin/activate
 pip install -r requirements.txt
 python -m app.main
