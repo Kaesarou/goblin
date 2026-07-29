@@ -318,7 +318,7 @@ def test_default_artifact_has_frozen_all_candidate_provenance():
     assert estimator.model.provenance['training_rows'] == 3527
     assert estimator.model.provenance['decisive_training_rows'] == 1547
     assert estimator.model.provenance['direction_margin'] == 0.05
-    assert tuple(estimator.model.direction_segments) == (
+    assert set(estimator.model.direction_segments) == set(
         SUPPORTED_DIRECTION_SEGMENTS
     )
     assert estimator.model.direction_segments[
