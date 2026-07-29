@@ -26,9 +26,24 @@ Crypto is not silently routed to an equity model. Its artifact entries expose th
 
 ## Calibration
 
+The frozen coefficient artifact remains unchanged. Runtime calibration is defined by the explicit, versioned policy artifact `outcome_probability_calibration_v2.json`, which enumerates all six supported segments. There is no implicit default or fallback.
+
+Five segments retain the original calibration:
+
 ```text
 P_DIRECTION = 0.5 × P_DIRECTION_RAW + 0.5 × SEGMENT_PRIOR
 ```
+
+`EQUITY_EU_SELL` uses:
+
+```text
+P_DIRECTION_EU_SELL
+= 0.6 × P_DIRECTION_RAW + 0.4 × SEGMENT_PRIOR
+```
+
+The EU SELL prior is approximately 28.82%. Under 50/50 shrinkage, the maximum possible final probability was approximately 64.41%. Requiring five additional percentage points above the usual EU SELL break-even made almost every candidate mathematically ineligible, even with a perfect raw prediction. The 60/40 policy raises the ceiling to approximately 71.53% while retaining material shrinkage.
+
+This correction does not change the fitted coefficients, training cohort, features, `P_TOUCH`, direction margin or any other segment calibration.
 
 Then:
 
@@ -49,7 +64,7 @@ The edge gate is applied before top-N. Eligible candidates rank by edge, then `P
 
 ## Validation
 
-Cross-day direction validation: AUC 0.643, Brier 0.202. A stricter historical/external split yielded approximately AUC 0.588 and Brier 0.217. The threshold remains experimental and is frozen for the three-session demo run.
+Cross-day direction validation: AUC 0.643, Brier 0.202. A stricter historical/external split yielded approximately AUC 0.588 and Brier 0.217. Those figures describe the frozen coefficients. The EU SELL calibration correction fixes selection reachability and must be evaluated on new sessions.
 
 ## Observability
 
@@ -57,9 +72,11 @@ Every outcome estimate retains:
 
 - `P_TOUCH`;
 - raw direction probability;
-- segment prior and calibration weights;
+- segment prior and effective calibration weights;
 - final `P_DIRECTION`;
 - `P_TP`, `P_SL`, `P_NEITHER`;
 - break-even and direction edge;
 - segment, feature family, training status and transfer source;
 - exact activity and direction feature maps.
+
+The run manifest records the effective weights for every segment, while the code fingerprint and policy artifact hash identify the exact calibration policy used.
