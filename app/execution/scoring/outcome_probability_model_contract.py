@@ -2,6 +2,9 @@ OUTCOME_PROBABILITY_MODEL_VERSION = 'outcome_probability_v2'
 OUTCOME_PROBABILITY_FEATURE_CONTRACT_VERSION = (
     'outcome_probability_features_v2'
 )
+OUTCOME_PROBABILITY_CALIBRATION_POLICY_VERSION = (
+    'outcome_probability_calibration_v2'
+)
 PROBABILITY_SCORE_SCALE = 200.0
 MINIMUM_DIRECTION_EDGE = 0.05
 
@@ -116,8 +119,8 @@ FULL_DIRECTION_CATEGORICAL_FEATURES = (
     'm30_maturity',
     'm30_alignment',
     'h1_maturity',
-    'market_regime_context',
     'context_alignment',
+    'market_regime_context',
     'm5_direction',
     'm15_direction',
     'm30_direction',
