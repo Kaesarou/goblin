@@ -5,10 +5,14 @@ import gzip
 import json
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from importlib.resources import files
 from typing import Any
+
+from app.execution.scoring.outcome_probability_model_contract import (
+    OUTCOME_PROBABILITY_CALIBRATION_POLICY_VERSION,
+)
 
 
 @dataclass(frozen=True)
@@ -111,15 +115,11 @@ class FrozenDirectionSegmentModel:
     ) -> FrozenDirectionSegmentModel:
         model_weight = float(value['model_weight'])
         prior_weight = float(value['segment_prior_weight'])
-        if not math.isclose(
-            model_weight + prior_weight,
-            1.0,
-            abs_tol=1e-12,
-        ):
-            raise RuntimeError(
-                f'Direction calibration weights do not sum to one for '
-                f'{segment}.'
-            )
+        _validate_calibration_weights(
+            segment=segment,
+            model_weight=model_weight,
+            prior_weight=prior_weight,
+        )
         return cls(
             segment=segment,
             feature_family=str(value['feature_family']),
@@ -134,6 +134,23 @@ class FrozenDirectionSegmentModel:
             model_weight=model_weight,
             segment_prior_weight=prior_weight,
             model=FrozenLogisticModel.from_dict(value['model']),
+        )
+
+    def with_calibration(
+        self,
+        *,
+        model_weight: float,
+        segment_prior_weight: float,
+    ) -> FrozenDirectionSegmentModel:
+        _validate_calibration_weights(
+            segment=self.segment,
+            model_weight=model_weight,
+            prior_weight=segment_prior_weight,
+        )
+        return replace(
+            self,
+            model_weight=model_weight,
+            segment_prior_weight=segment_prior_weight,
         )
 
     def predict(self, features: Mapping[str, Any]) -> tuple[float, float]:
@@ -155,10 +172,13 @@ class FrozenOutcomeProbabilityModel:
     direction_segments: Mapping[str, FrozenDirectionSegmentModel]
     provenance: Mapping[str, Any]
     artifact_sha256: str | None = None
+    calibration_policy_version: str | None = None
+    calibration_policy_sha256: str | None = None
 
     @classmethod
     def load(cls) -> FrozenOutcomeProbabilityModel:
-        model_path = files('app.execution.scoring').joinpath(
+        scoring_files = files('app.execution.scoring')
+        model_path = scoring_files.joinpath(
             'models/outcome_probability_v2.json'
         )
         raw = model_path.read_bytes()
@@ -170,6 +190,9 @@ class FrozenOutcomeProbabilityModel:
             value = json.loads(decoded)
         else:
             value = wrapper
+        supported_segments = tuple(
+            str(item) for item in value['supported_segments']
+        )
         direction_segments = {
             str(segment): FrozenDirectionSegmentModel.from_dict(
                 str(segment),
@@ -177,6 +200,19 @@ class FrozenOutcomeProbabilityModel:
             )
             for segment, segment_value
             in value['direction_segments'].items()
+        }
+        policy_version, policy_sha256, calibration = (
+            _load_calibration_policy(
+                scoring_files=scoring_files,
+                supported_segments=supported_segments,
+            )
+        )
+        effective_segments = {
+            segment: direction_segments[segment].with_calibration(
+                model_weight=calibration[segment][0],
+                segment_prior_weight=calibration[segment][1],
+            )
+            for segment in supported_segments
         }
         return cls(
             version=str(value['version']),
@@ -187,13 +223,13 @@ class FrozenOutcomeProbabilityModel:
                 str(item)
                 for item in value['training_asset_classes']
             ),
-            supported_segments=tuple(
-                str(item) for item in value['supported_segments']
-            ),
+            supported_segments=supported_segments,
             activity=FrozenLogisticModel.from_dict(value['activity']),
-            direction_segments=direction_segments,
+            direction_segments=effective_segments,
             provenance=value['provenance'],
             artifact_sha256=sha256(raw).hexdigest(),
+            calibration_policy_version=policy_version,
+            calibration_policy_sha256=policy_sha256,
         )
 
     def direction_for(
@@ -209,6 +245,74 @@ class FrozenOutcomeProbabilityModel:
             raise RuntimeError(
                 f'No frozen direction model for segment {segment}.'
             ) from exc
+
+
+def _load_calibration_policy(
+    *,
+    scoring_files: Any,
+    supported_segments: tuple[str, ...],
+) -> tuple[str, str, dict[str, tuple[float, float]]]:
+    policy_path = scoring_files.joinpath(
+        'models/outcome_probability_calibration_v2.json'
+    )
+    raw = policy_path.read_bytes()
+    value = json.loads(raw)
+    version = str(value.get('version', ''))
+    if version != OUTCOME_PROBABILITY_CALIBRATION_POLICY_VERSION:
+        raise RuntimeError(
+            'Outcome probability calibration policy version does not match '
+            'code.'
+        )
+    raw_segments = value.get('segments')
+    if not isinstance(raw_segments, Mapping):
+        raise RuntimeError(
+            'Outcome probability calibration policy has no segment mapping.'
+        )
+    configured_segments = {str(item) for item in raw_segments}
+    expected_segments = set(supported_segments)
+    if configured_segments != expected_segments:
+        raise RuntimeError(
+            'Outcome probability calibration policy segments do not match '
+            'the frozen model.'
+        )
+    calibration: dict[str, tuple[float, float]] = {}
+    for segment in supported_segments:
+        segment_value = raw_segments[segment]
+        if not isinstance(segment_value, Mapping):
+            raise RuntimeError(
+                f'Invalid calibration policy entry for {segment}.'
+            )
+        model_weight = float(segment_value['model_weight'])
+        prior_weight = float(segment_value['segment_prior_weight'])
+        _validate_calibration_weights(
+            segment=segment,
+            model_weight=model_weight,
+            prior_weight=prior_weight,
+        )
+        calibration[segment] = (model_weight, prior_weight)
+    return version, sha256(raw).hexdigest(), calibration
+
+
+def _validate_calibration_weights(
+    *,
+    segment: str,
+    model_weight: float,
+    prior_weight: float,
+) -> None:
+    if model_weight < 0.0 or prior_weight < 0.0:
+        raise RuntimeError(
+            f'Direction calibration weights must be non-negative for '
+            f'{segment}.'
+        )
+    if not math.isclose(
+        model_weight + prior_weight,
+        1.0,
+        abs_tol=1e-12,
+    ):
+        raise RuntimeError(
+            f'Direction calibration weights do not sum to one for '
+            f'{segment}.'
+        )
 
 
 def _is_missing(value: Any) -> bool:
