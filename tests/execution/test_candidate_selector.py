@@ -107,6 +107,35 @@ def evaluated(
     )
 
 
+def evaluated_candidate_with_profit(
+    item: TradeCandidate,
+) -> EvaluatedTradeCandidate:
+    return EvaluatedTradeCandidate(
+        candidate=replace(
+            item,
+            probability_score=40.0,
+            touch_probability=0.40,
+            direction_probability=0.50,
+            tp_probability=0.20,
+            sl_probability=0.20,
+            neither_probability=0.60,
+            direction_break_even_probability=0.40,
+            direction_edge=0.10,
+            outcome_probability_model_version='outcome_probability_v2',
+        ),
+        economics=CandidateEconomics(
+            position_value=100.0,
+            expected_gross_profit=1.0,
+            expected_net_profit=0.5,
+            expected_net_profit_percent=0.5,
+            estimated_total_cost=0.5,
+            estimated_total_cost_percent=0.5,
+            min_expected_net_profit_percent=0.10,
+            required_min_expected_net_profit_amount=0.10,
+        ),
+    )
+
+
 def test_raw_candidate_selector_keeps_only_top_n_candidates():
     candidates = [
         candidate('ONE', 180),
