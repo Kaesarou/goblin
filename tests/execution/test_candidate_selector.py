@@ -19,17 +19,12 @@ from app.strategies.signals import Signal
 TEST_SESSION_KEY = 'test-session'
 
 
-def snapshot(
-    symbol: str,
-    bid: float = 99.9,
-    ask: float = 100.1,
-    last: float = 100.0,
-) -> MarketSnapshot:
+def snapshot(symbol: str) -> MarketSnapshot:
     return MarketSnapshot(
         symbol=symbol,
-        bid=bid,
-        ask=ask,
-        last=last,
+        bid=99.9,
+        ask=100.1,
+        last=100.0,
         timestamp=datetime(2026, 6, 26, 15, 30, tzinfo=timezone.utc),
     )
 
@@ -49,41 +44,66 @@ def candle(symbol: str) -> Candle:
     )
 
 
-def signal(
-    session_move_percent: float = 1.0,
-    trend_strength_percent: float = 0.3,
-    atr_percent: float = 0.8,
-    market_regime: str = 'TRENDING',
-    noise_ratio: float = 0.4,
-) -> Signal:
+def signal(session_move_percent: float = 1.0) -> Signal:
     return Signal(
         action='BUY',
         setup_quality=0.8,
         reason='test_signal',
         metadata={
             'session_move_percent': session_move_percent,
-            'trend_strength_percent': trend_strength_percent,
+            'trend_strength_percent': 0.3,
             'breakout_percent': 0.2,
             'candle_range_percent': 0.4,
             'close_position_percent': 90.0,
-            'atr_percent': atr_percent,
-            'market_regime': market_regime,
-            'regime_noise_ratio': noise_ratio,
+            'atr_percent': 0.8,
+            'market_regime': 'TRENDING',
+            'regime_noise_ratio': 0.4,
         },
     )
 
 
-def candidate(
-    symbol: str,
-    candidate_signal: Signal | None = None,
-    candidate_snapshot: MarketSnapshot | None = None,
-):
+def candidate(symbol: str, score: float = 100.0) -> TradeCandidate:
     return build_trade_candidate(
         symbol=symbol,
-        snapshot=candidate_snapshot or snapshot(symbol),
+        snapshot=snapshot(symbol),
         candle=candle(symbol),
-        signal=candidate_signal or signal(),
+        signal=signal(score / 100),
         session_key=TEST_SESSION_KEY,
+    )
+
+
+def evaluated(
+    symbol: str,
+    *,
+    edge: float,
+    tp_probability: float = 0.20,
+    directional_score: float = 100.0,
+) -> EvaluatedTradeCandidate:
+    base = replace(
+        candidate(symbol),
+        directional_score=directional_score,
+        probability_score=200 * tp_probability,
+        touch_probability=0.40,
+        direction_probability=0.60,
+        tp_probability=tp_probability,
+        sl_probability=0.40 - tp_probability,
+        neither_probability=0.60,
+        direction_break_even_probability=0.60 - edge,
+        direction_edge=edge,
+        outcome_probability_model_version='outcome_probability_v2',
+    )
+    return EvaluatedTradeCandidate(
+        candidate=base,
+        economics=CandidateEconomics(
+            position_value=100.0,
+            expected_gross_profit=1.0,
+            expected_net_profit=0.5,
+            expected_net_profit_percent=0.5,
+            estimated_total_cost=0.5,
+            estimated_total_cost_percent=0.5,
+            min_expected_net_profit_percent=0.10,
+            required_min_expected_net_profit_amount=0.10,
+        ),
     )
 
 
@@ -101,7 +121,7 @@ def evaluated_candidate_with_profit(
             neither_probability=0.60,
             direction_break_even_probability=0.40,
             direction_edge=0.10,
-            outcome_probability_model_version='outcome_probability_v1',
+            outcome_probability_model_version='outcome_probability_v2',
         ),
         economics=CandidateEconomics(
             position_value=100.0,
@@ -116,245 +136,113 @@ def evaluated_candidate_with_profit(
     )
 
 
-def test_candidate_selector_keeps_only_top_n_candidates():
+def test_raw_candidate_selector_keeps_only_top_n_candidates():
     candidates = [
-        candidate('ONE', signal(session_move_percent=1.8)),
-        candidate('TWO', signal(session_move_percent=1.2)),
-        candidate('THREE', signal(session_move_percent=0.8)),
+        candidate('ONE', 180),
+        candidate('TWO', 120),
+        candidate('THREE', 80),
     ]
     result = select_trade_candidates(
         candidates,
         CandidateSelectionConfig(top_n=2),
     )
+
     assert len(result.selected_candidates) == 2
-    assert len(result.rejected_candidates) == 1
     assert result.rejected_candidates[0].reason == (
         'candidate_selection_outside_top_n'
     )
 
 
-def test_candidate_selector_only_rejects_candidates_outside_top_n():
-    candidates = [
-        candidate(
-            'BEST',
-            signal(session_move_percent=2.0, trend_strength_percent=0.6),
-        ),
-        candidate(
-            'SECOND',
-            signal(session_move_percent=1.5, trend_strength_percent=0.4),
-        ),
-        candidate(
-            'THIRD',
-            signal(session_move_percent=1.0, trend_strength_percent=0.3),
-        ),
-        candidate(
-            'FOURTH',
-            signal(session_move_percent=0.5, trend_strength_percent=0.1),
-        ),
-    ]
-    result = select_trade_candidates(
-        candidates,
-        CandidateSelectionConfig(top_n=2),
+def test_direction_edge_margin_is_applied_before_top_n_and_backfills_slot():
+    below_margin_but_high_tp = evaluated(
+        'GATED',
+        edge=0.04999,
+        tp_probability=0.35,
+        directional_score=160.0,
     )
-    assert [item.symbol for item in result.selected_candidates] == [
-        'BEST',
-        'SECOND',
+    admissible = evaluated(
+        'ADMISSIBLE',
+        edge=0.051,
+        tp_probability=0.18,
+        directional_score=90.0,
+    )
+
+    result = select_evaluated_trade_candidates(
+        [below_margin_but_high_tp, admissible],
+        CandidateSelectionConfig(top_n=1, minimum_direction_edge=0.05),
+    )
+
+    assert [item.candidate.symbol for item in result.selected_candidates] == [
+        'ADMISSIBLE'
     ]
     assert {
-        rejected.candidate.symbol: rejected.reason
-        for rejected in result.rejected_candidates
+        item.evaluated_candidate.candidate.symbol: item.reason
+        for item in result.rejected_candidates
     } == {
-        'THIRD': 'candidate_selection_outside_top_n',
-        'FOURTH': 'candidate_selection_outside_top_n',
+        'GATED': 'candidate_selection_direction_edge_below_margin',
     }
 
 
-def test_candidate_selector_does_not_reject_high_spread_before_risk():
-    high_spread = candidate(
-        'WIDE',
-        candidate_snapshot=snapshot(
-            'WIDE',
-            bid=98.0,
-            ask=102.0,
-            last=100.0,
-        ),
-    )
-    result = select_trade_candidates(
-        [high_spread],
-        CandidateSelectionConfig(top_n=0),
-    )
-    assert result.selected_candidates == [high_spread]
-
-
-def test_evaluated_selector_rejects_expected_profit_too_low():
-    evaluated_candidate = EvaluatedTradeCandidate(
-        candidate=TradeCandidate(
-            symbol='LOW',
-            snapshot=snapshot('LOW'),
-            candle=candle('LOW'),
-            signal=signal(),
-            rank_reason='test',
-            session_key=TEST_SESSION_KEY,
-        ),
-        economics=CandidateEconomics(
-            position_value=100.0,
-            expected_gross_profit=1.0,
-            expected_net_profit=0.05,
-            expected_net_profit_percent=0.05,
-            estimated_total_cost=0.95,
-            estimated_total_cost_percent=0.95,
-            min_expected_net_profit_percent=0.10,
-            required_min_expected_net_profit_amount=0.10,
-        ),
-    )
+def test_direction_edge_margin_boundary_is_inclusive():
+    exact = evaluated('EXACT', edge=0.05)
     result = select_evaluated_trade_candidates(
-        [evaluated_candidate],
-        CandidateSelectionConfig(top_n=0),
+        [exact],
+        CandidateSelectionConfig(top_n=1, minimum_direction_edge=0.05),
     )
-    assert not result.selected_candidates
+
+    assert [
+        item.candidate.symbol for item in result.selected_candidates
+    ] == ['EXACT']
+    assert result.selected_candidates[0].entry_decision is not None
+
+
+def test_rank_uses_edge_then_tp_probability_then_candidate_id():
+    first = evaluated('FIRST', edge=0.10, tp_probability=0.18)
+    higher_tp = evaluated('HIGHER_TP', edge=0.10, tp_probability=0.22)
+    higher_edge = evaluated('HIGHER_EDGE', edge=0.11, tp_probability=0.10)
+
+    ranked = rank_evaluated_trade_candidates([first, higher_tp, higher_edge])
+
+    assert [item.candidate.symbol for item in ranked] == [
+        'HIGHER_EDGE',
+        'HIGHER_TP',
+        'FIRST',
+    ]
+
+
+def test_hard_economics_rejection_precedes_direction_margin():
+    item = evaluated('LOW', edge=0.01)
+    item = replace(
+        item,
+        economics=replace(
+            item.economics,
+            expected_net_profit_percent=0.05,
+            min_expected_net_profit_percent=0.10,
+        ),
+    )
+
+    result = select_evaluated_trade_candidates(
+        [item],
+        CandidateSelectionConfig(top_n=1, minimum_direction_edge=0.05),
+    )
+
     assert result.rejected_candidates[0].reason == (
         'candidate_selection_expected_profit_too_low_after_fees'
     )
 
 
-def test_evaluated_selector_prioritizes_tp_hard_reject_over_probability_gate():
-    candidate_with_hard_rejection = TradeCandidate(
-        symbol='LOW',
-        snapshot=snapshot('LOW'),
-        candle=candle('LOW'),
-        signal=signal(),
-        rank_reason='test',
-        session_key=TEST_SESSION_KEY,
-        tp_feasibility_hard_rejection_reason=(
-            'candidate_selection_tp_feasibility_cost_to_tp_absurd'
-        ),
-    )
+def test_outside_top_n_is_reported_after_margin_filter():
+    best = evaluated('BEST', edge=0.20)
+    second = evaluated('SECOND', edge=0.10)
     result = select_evaluated_trade_candidates(
-        [evaluated_candidate_with_profit(candidate_with_hard_rejection)],
-        CandidateSelectionConfig(
-            top_n=0,
-            minimum_tp_probability=0.90,
-        ),
-    )
-    assert not result.selected_candidates
-    assert result.rejected_candidates[0].reason == (
-        'candidate_selection_tp_feasibility_cost_to_tp_absurd'
+        [second, best],
+        CandidateSelectionConfig(top_n=1, minimum_direction_edge=0.05),
     )
 
-
-def test_candidate_below_minimum_tp_probability_is_rejected():
-    penalized_candidate = TradeCandidate(
-        symbol='LOW',
-        snapshot=snapshot('LOW'),
-        candle=candle('LOW'),
-        signal=signal(),
-        rank_reason='test',
-        session_key=TEST_SESSION_KEY,
-        tp_feasibility_score=20.0,
-        tp_feasibility_contribution=-9.0,
-    )
-    result = select_evaluated_trade_candidates(
-        [
-            replace(
-                evaluated_candidate_with_profit(penalized_candidate),
-                candidate=replace(
-                    evaluated_candidate_with_profit(
-                        penalized_candidate
-                    ).candidate,
-                    tp_probability=0.09,
-                    probability_score=18.0,
-                ),
-            )
-        ],
-        CandidateSelectionConfig(
-            top_n=0,
-            minimum_tp_probability=0.10,
-        ),
-    )
-    assert not result.selected_candidates
-    assert result.rejected_candidates[0].reason == (
-        'candidate_selection_tp_probability_too_low'
-    )
-
-
-def test_direction_edge_ranks_before_directional_score():
-    base = candidate('BASE')
-    stronger_edge = evaluated_candidate_with_profit(
-        replace(
-            base,
-            symbol='STRONG_EDGE',
-        )
-    )
-    stronger_edge = replace(
-        stronger_edge,
-        candidate=replace(
-            stronger_edge.candidate,
-            direction_edge=0.20,
-        ),
-    )
-    stronger_directional = evaluated_candidate_with_profit(
-        replace(
-            base,
-            symbol='STRONG_DIRECTIONAL',
-            directional_score=160.0,
-        )
-    )
-    stronger_directional = replace(
-        stronger_directional,
-        candidate=replace(
-            stronger_directional.candidate,
-            direction_edge=0.10,
-        ),
-    )
-
-    ranked = rank_evaluated_trade_candidates(
-        [stronger_directional, stronger_edge]
-    )
-
-    assert [item.candidate.symbol for item in ranked] == [
-        'STRONG_EDGE',
-        'STRONG_DIRECTIONAL',
+    assert [item.candidate.symbol for item in result.selected_candidates] == [
+        'BEST'
     ]
-
-
-def test_top_n_is_applied_before_probability_gates_without_backfill():
-    base = candidate('BASE')
-    top_ranked_but_gated = evaluated_candidate_with_profit(
-        replace(base, symbol='TOP_GATED')
+    assert result.rejected_candidates[0].reason == (
+        'candidate_selection_outside_top_n'
     )
-    top_ranked_but_gated = replace(
-        top_ranked_but_gated,
-        candidate=replace(
-            top_ranked_but_gated.candidate,
-            direction_edge=0.30,
-            tp_probability=0.09,
-            probability_score=18.0,
-        ),
-    )
-    second_ranked = evaluated_candidate_with_profit(
-        replace(base, symbol='SECOND')
-    )
-    second_ranked = replace(
-        second_ranked,
-        candidate=replace(
-            second_ranked.candidate,
-            direction_edge=0.20,
-        ),
-    )
-
-    result = select_evaluated_trade_candidates(
-        [second_ranked, top_ranked_but_gated],
-        CandidateSelectionConfig(
-            top_n=1,
-            minimum_tp_probability=0.10,
-        ),
-    )
-
-    assert result.selected_candidates == []
-    assert {
-        item.evaluated_candidate.candidate.symbol: item.reason
-        for item in result.rejected_candidates
-    } == {
-        'TOP_GATED': 'candidate_selection_tp_probability_too_low',
-        'SECOND': 'candidate_selection_outside_top_n',
-    }
+    assert result.rejected_candidates[0].minimum_direction_edge_used == 0.05

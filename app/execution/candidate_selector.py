@@ -4,6 +4,9 @@ from app.execution.candidate_economics import EvaluatedTradeCandidate
 from app.execution.candidate_ranking import rank_trade_candidates
 from app.execution.candidate_readiness import CandidateReadiness
 from app.execution.entry_decision import EntryAction, EntryDecisionEngine
+from app.execution.scoring.outcome_probability_model_contract import (
+    MINIMUM_DIRECTION_EDGE,
+)
 from app.execution.trade_candidate import TradeCandidate
 from app.instruments.models import EntryDecisionConfig
 
@@ -11,8 +14,7 @@ from app.instruments.models import EntryDecisionConfig
 @dataclass(frozen=True)
 class CandidateSelectionConfig:
     top_n: int
-    minimum_tp_probability: float = 0.0
-    maximum_touch_probability: float | None = None
+    minimum_direction_edge: float = MINIMUM_DIRECTION_EDGE
 
 
 @dataclass(frozen=True)
@@ -25,8 +27,7 @@ class RejectedCandidateSelection:
 class RejectedEvaluatedCandidateSelection:
     evaluated_candidate: EvaluatedTradeCandidate
     reason: str
-    minimum_tp_probability_used: float | None = None
-    maximum_touch_probability_used: float | None = None
+    minimum_direction_edge_used: float | None = None
     selection_threshold_source: str | None = None
 
 
@@ -73,7 +74,7 @@ def select_evaluated_trade_candidates(
     rejected_candidates: list[RejectedEvaluatedCandidateSelection] = []
     decision_engine = EntryDecisionEngine()
 
-    for original in rank_evaluated_trade_candidates(evaluated_candidates):
+    for original in evaluated_candidates:
         decision_config = (
             original.candidate.entry_decision_config
             or EntryDecisionConfig()
@@ -119,8 +120,8 @@ def select_evaluated_trade_candidates(
         if candidate.tp_feasibility_hard_rejection_reason is not None:
             rejected_candidates.append(
                 RejectedEvaluatedCandidateSelection(
-                    evaluated_candidate,
-                    candidate.tp_feasibility_hard_rejection_reason,
+                    evaluated_candidate=evaluated_candidate,
+                    reason=candidate.tp_feasibility_hard_rejection_reason,
                     selection_threshold_source='tp_feasibility',
                 )
             )
@@ -128,12 +129,13 @@ def select_evaluated_trade_candidates(
         if (
             candidate.tp_probability is None
             or candidate.touch_probability is None
+            or candidate.direction_probability is None
             or candidate.direction_edge is None
         ):
             rejected_candidates.append(
                 RejectedEvaluatedCandidateSelection(
-                    evaluated_candidate,
-                    'candidate_selection_outcome_probability_missing',
+                    evaluated_candidate=evaluated_candidate,
+                    reason='candidate_selection_outcome_probability_missing',
                     selection_threshold_source='outcome_probability',
                 )
             )
@@ -144,9 +146,25 @@ def select_evaluated_trade_candidates(
         ):
             rejected_candidates.append(
                 RejectedEvaluatedCandidateSelection(
-                    evaluated_candidate,
-                    'candidate_selection_expected_profit_too_low_after_fees',
+                    evaluated_candidate=evaluated_candidate,
+                    reason=(
+                        'candidate_selection_expected_profit_too_low_after_fees'
+                    ),
                     selection_threshold_source='hard_economics',
+                )
+            )
+            continue
+        if candidate.direction_edge < config.minimum_direction_edge:
+            rejected_candidates.append(
+                RejectedEvaluatedCandidateSelection(
+                    evaluated_candidate=evaluated_candidate,
+                    reason=(
+                        'candidate_selection_direction_edge_below_margin'
+                    ),
+                    minimum_direction_edge_used=(
+                        config.minimum_direction_edge
+                    ),
+                    selection_threshold_source='direction_edge_gate',
                 )
             )
             continue
@@ -162,11 +180,8 @@ def select_evaluated_trade_candidates(
             RejectedEvaluatedCandidateSelection(
                 evaluated_candidate=item,
                 reason='candidate_selection_outside_top_n',
-                minimum_tp_probability_used=(
-                    config.minimum_tp_probability
-                ),
-                maximum_touch_probability_used=(
-                    config.maximum_touch_probability
+                minimum_direction_edge_used=(
+                    config.minimum_direction_edge
                 ),
                 selection_threshold_source='direction_edge_top_n',
             )
@@ -175,58 +190,8 @@ def select_evaluated_trade_candidates(
     else:
         kept_candidates = ranked_eligible
 
-    selected_candidates: list[EvaluatedTradeCandidate] = []
-    for item in kept_candidates:
-        candidate = item.candidate
-        if (
-            candidate.tp_probability is None
-            or candidate.tp_probability
-            < config.minimum_tp_probability
-        ):
-            rejected_candidates.append(
-                RejectedEvaluatedCandidateSelection(
-                    evaluated_candidate=item,
-                    reason=(
-                        'candidate_selection_tp_probability_too_low'
-                    ),
-                    minimum_tp_probability_used=(
-                        config.minimum_tp_probability
-                    ),
-                    maximum_touch_probability_used=(
-                        config.maximum_touch_probability
-                    ),
-                    selection_threshold_source='tp_probability_gate',
-                )
-            )
-            continue
-        if (
-            config.maximum_touch_probability is not None
-            and (
-                candidate.touch_probability is None
-                or candidate.touch_probability
-                >= config.maximum_touch_probability
-            )
-        ):
-            rejected_candidates.append(
-                RejectedEvaluatedCandidateSelection(
-                    evaluated_candidate=item,
-                    reason=(
-                        'candidate_selection_touch_probability_too_high'
-                    ),
-                    minimum_tp_probability_used=(
-                        config.minimum_tp_probability
-                    ),
-                    maximum_touch_probability_used=(
-                        config.maximum_touch_probability
-                    ),
-                    selection_threshold_source='touch_probability_gate',
-                )
-            )
-            continue
-        selected_candidates.append(item)
-
     return EvaluatedCandidateSelectionResult(
-        selected_candidates,
+        kept_candidates,
         rejected_candidates,
     )
 
@@ -246,7 +211,7 @@ def _evaluated_candidate_ranking_key(
     candidate = evaluated_candidate.candidate
     return (
         -_ranking_value(candidate.direction_edge),
-        -candidate.directional_score,
+        -_ranking_value(candidate.tp_probability),
         candidate.candidate_id,
     )
 
