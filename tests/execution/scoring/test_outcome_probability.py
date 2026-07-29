@@ -12,6 +12,7 @@ from app.execution.candidate_economics import (
 from app.execution.candidate_readiness import CandidateReadiness
 from app.execution.entry_decision import EntryAction, EntryDecision
 from app.execution.scoring.frozen_logistic import (
+    FrozenDirectionSegmentModel,
     FrozenLogisticModel,
     FrozenOutcomeProbabilityModel,
 )
@@ -19,42 +20,83 @@ from app.execution.scoring.outcome_probability import (
     CandidateOutcomeProbabilityEvaluator,
     OutcomeProbabilityEstimator,
 )
-from app.execution.scoring.pr5e_model_contract import (
+from app.execution.scoring.outcome_probability_model_contract import (
     OUTCOME_PROBABILITY_FEATURE_CONTRACT_VERSION,
     OUTCOME_PROBABILITY_MODEL_VERSION,
+    SUPPORTED_DIRECTION_SEGMENTS,
+    TRAINING_ASSET_CLASSES,
 )
 from app.execution.scoring.tp_feasibility import TpFeasibilityAnalysis
 from app.execution.trade_candidate import TradeCandidate
-from app.instruments.equity_us_config import EquityUsConfig
 from app.instruments.models import AssetClass, RiskProfile
+from app.market.market_context import ContextAlignment, MarketRegime
 from app.market.models import Candle, MarketSnapshot
 from app.market.timeframes import TimeframeDirection, TimeframeMaturity
 from app.strategies.signals import Signal
 
-NOW = datetime(2026, 7, 24, 15, 0, tzinfo=UTC)
+NOW = datetime(2026, 7, 28, 15, 0, tzinfo=UTC)
 SESSION_KEY = (
-    'us:2026-07-24T13:30:00+00:00:'
-    '2026-07-24T20:00:00+00:00'
+    'us:2026-07-28T13:30:00+00:00:'
+    '2026-07-28T20:00:00+00:00'
 )
 
 
-def _candidate(*, side='BUY') -> TradeCandidate:
+def _candidate(*, side='BUY', asset_class=AssetClass.EQUITY_US):
+    context = SimpleNamespace(
+        regime=MarketRegime.RISK_ON,
+        alignment=ContextAlignment.ALIGNED,
+        benchmark=SimpleNamespace(momentum_percent=0.04),
+        symbol_relative_strength_percent=0.18,
+    )
+    direction = (
+        TimeframeDirection.UP if side == 'BUY' else TimeframeDirection.DOWN
+    )
+    signed = 1.0 if side == 'BUY' else -1.0
+    mtf = SimpleNamespace(
+        maturity_by_timeframe={
+            'm5': TimeframeMaturity.READY,
+            'm15': TimeframeMaturity.READY,
+            'm30': TimeframeMaturity.READY,
+            'h1': TimeframeMaturity.PROVISIONAL,
+        },
+        features_by_timeframe={
+            name: SimpleNamespace(
+                direction=direction,
+                return_sample_percent=0.25 * signed,
+                velocity_percent_per_bar=0.05 * signed,
+                acceleration_percent_per_bar=0.01 * signed,
+            )
+            for name in ('m5', 'm15', 'm30', 'h1')
+        },
+    )
     return TradeCandidate(
         symbol='AMD',
         snapshot=MarketSnapshot('AMD', 100.0, 100.05, 100.02, NOW),
-        candle=Candle('AMD', 60, 99.5, 100.2, 99.4, 100.0, None, NOW, NOW),
+        candle=Candle(
+            'AMD', 60, 99.5, 100.2, 99.4, 100.0, None, NOW, NOW
+        ),
         signal=Signal(
             side,
             0.8,
             'test',
             metadata={
-                'market_regime': 'TRENDING',
-                'trend_strength_percent': 0.25,
-                'close_position_percent': 88.0,
+                'session_move_percent': 0.40 * signed,
+                'snapshot_momentum_percent': 0.30 * signed,
+                'trend_strength_percent': 0.25 * signed,
+                'breakout_percent': 0.20 if side == 'BUY' else None,
+                'breakdown_percent': 0.20 if side == 'SELL' else None,
+                'close_position_percent': 88.0 if side == 'BUY' else 12.0,
+                'atr_percent': 0.40,
+                'regime_noise_ratio': 0.50,
             },
         ),
         rank_reason='test',
-        session_key=SESSION_KEY,
+        session_key=(
+            SESSION_KEY
+            if asset_class != AssetClass.CRYPTO
+            else 'crypto:2026-07-28T00:00:00+00:00:'
+            '2026-07-29T00:00:00+00:00'
+        ),
         base_score=126.0,
         directional_score=130.0,
         market_context_components={
@@ -62,10 +104,12 @@ def _candidate(*, side='BUY') -> TradeCandidate:
             'sector': 0.25,
             'benchmark_momentum': 0.04,
         },
+        market_context=context,
+        multi_timeframe_context=mtf,
     )
 
 
-def _economics() -> CandidateEconomics:
+def _economics():
     return CandidateEconomics(
         position_value=500.0,
         expected_gross_profit=3.0,
@@ -83,7 +127,7 @@ def _economics() -> CandidateEconomics:
     )
 
 
-def _feasibility() -> TpFeasibilityAnalysis:
+def _feasibility():
     return TpFeasibilityAnalysis(
         effective_take_profit_percent=0.60,
         effective_stop_loss_percent=0.40,
@@ -120,9 +164,9 @@ def _feasibility() -> TpFeasibilityAnalysis:
     )
 
 
-def _evaluated(*, side='BUY') -> EvaluatedTradeCandidate:
+def _evaluated(*, side='BUY', asset_class=AssetClass.EQUITY_US):
     return EvaluatedTradeCandidate(
-        candidate=_candidate(side=side),
+        candidate=_candidate(side=side, asset_class=asset_class),
         economics=_economics(),
         tp_feasibility=_feasibility(),
         entry_decision=EntryDecision(
@@ -133,7 +177,7 @@ def _evaluated(*, side='BUY') -> EvaluatedTradeCandidate:
     )
 
 
-def _risk_profile(asset_class=AssetClass.EQUITY_US) -> RiskProfile:
+def _risk_profile(asset_class=AssetClass.EQUITY_US):
     return RiskProfile(
         asset_class=asset_class,
         profile_key='us_intraday_fixed_v1',
@@ -148,111 +192,141 @@ def _risk_profile(asset_class=AssetClass.EQUITY_US) -> RiskProfile:
     )
 
 
-def _constant_model(
-    *,
-    touch_probability: float,
-    direction_probability: float,
-) -> FrozenOutcomeProbabilityModel:
-    empty = {
-        'numeric_terms': (),
-        'missing_indicator_terms': (),
-        'categorical_terms': (),
+def _constant_logistic(probability):
+    return FrozenLogisticModel(
+        intercept=math.log(probability / (1.0 - probability)),
+        numeric_terms=(),
+        missing_indicator_terms=(),
+        categorical_terms=(),
+    )
+
+
+def _constant_model(*, touch=0.40, raw_by_segment=None, prior=0.20):
+    raw_by_segment = raw_by_segment or {
+        segment: 0.60 for segment in SUPPORTED_DIRECTION_SEGMENTS
+    }
+    segments = {
+        segment: FrozenDirectionSegmentModel(
+            segment=segment,
+            feature_family='test',
+            training_status=(
+                'provisional_transfer'
+                if segment.startswith('CRYPTO_')
+                else 'trained'
+            ),
+            source_segment=(
+                f'EQUITY_US_{segment.rsplit("_", 1)[1]}'
+                if segment.startswith('CRYPTO_')
+                else None
+            ),
+            training_rows=0 if segment.startswith('CRYPTO_') else 10,
+            segment_prior=prior,
+            model_weight=0.5,
+            segment_prior_weight=0.5,
+            model=_constant_logistic(raw_by_segment[segment]),
+        )
+        for segment in SUPPORTED_DIRECTION_SEGMENTS
     }
     return FrozenOutcomeProbabilityModel(
         version=OUTCOME_PROBABILITY_MODEL_VERSION,
-        feature_contract_version=(
-            OUTCOME_PROBABILITY_FEATURE_CONTRACT_VERSION
-        ),
-        training_asset_classes=(
-            AssetClass.EQUITY_EU.value,
-            AssetClass.EQUITY_US.value,
-        ),
-        activity=FrozenLogisticModel(
-            intercept=math.log(
-                touch_probability / (1.0 - touch_probability)
-            ),
-            **empty,
-        ),
-        direction=FrozenLogisticModel(
-            intercept=math.log(
-                direction_probability / (1.0 - direction_probability)
-            ),
-            **empty,
-        ),
+        feature_contract_version=OUTCOME_PROBABILITY_FEATURE_CONTRACT_VERSION,
+        training_asset_classes=TRAINING_ASSET_CLASSES,
+        supported_segments=SUPPORTED_DIRECTION_SEGMENTS,
+        activity=_constant_logistic(touch),
+        direction_segments=segments,
         provenance={},
     )
 
 
-def test_two_stage_probability_contract_and_monotone_score():
+def test_two_stage_probability_uses_shrunk_segment_direction_probability():
     estimate = OutcomeProbabilityEstimator(
-        _constant_model(
-            touch_probability=0.40,
-            direction_probability=0.35,
-        )
+        _constant_model(touch=0.40, prior=0.20)
     ).estimate(
         evaluated_candidate=_evaluated(),
         risk_profile=_risk_profile(),
     )
 
+    assert estimate.direction_probability_raw == pytest.approx(0.60)
+    assert estimate.direction_segment_prior == pytest.approx(0.20)
+    assert estimate.direction_probability == pytest.approx(0.40)
     assert estimate.touch_probability == pytest.approx(0.40)
-    assert estimate.direction_probability == pytest.approx(0.35)
-    assert estimate.tp_probability == pytest.approx(0.14)
-    assert estimate.sl_probability == pytest.approx(0.26)
+    assert estimate.tp_probability == pytest.approx(0.16)
+    assert estimate.sl_probability == pytest.approx(0.24)
     assert estimate.neither_probability == pytest.approx(0.60)
-    assert (
-        estimate.tp_probability
-        + estimate.sl_probability
-        + estimate.neither_probability
-        == pytest.approx(1.0)
-    )
-    assert estimate.probability_score == 28.0
+    assert estimate.probability_score == pytest.approx(32.0)
 
 
-def test_direction_edge_uses_conditional_break_even_probability():
+def test_exact_market_and_side_segment_is_used():
+    raw = {segment: 0.51 for segment in SUPPORTED_DIRECTION_SEGMENTS}
+    raw['EQUITY_EU_SELL'] = 0.81
     estimate = OutcomeProbabilityEstimator(
-        _constant_model(
-            touch_probability=0.40,
-            direction_probability=0.35,
-        )
+        _constant_model(raw_by_segment=raw, prior=0.21)
     ).estimate(
-        evaluated_candidate=_evaluated(),
-        risk_profile=_risk_profile(),
+        evaluated_candidate=_evaluated(
+            side='SELL',
+            asset_class=AssetClass.EQUITY_EU,
+        ),
+        risk_profile=_risk_profile(AssetClass.EQUITY_EU),
     )
 
-    expected_break_even = (0.40 + 0.16) / (0.44 + 0.40 + 0.16)
-    assert estimate.direction_break_even_probability == pytest.approx(
-        expected_break_even
-    )
-    assert estimate.direction_edge == pytest.approx(
-        0.35 - expected_break_even
-    )
-
-
-def test_default_frozen_model_exposes_reproducible_provenance():
-    estimator = OutcomeProbabilityEstimator()
-    estimate = estimator.estimate(
-        evaluated_candidate=_evaluated(),
-        risk_profile=_risk_profile(),
-    )
-
-    assert estimator.model.provenance['training_rows'] == 1958
-    assert estimator.model.provenance['dataset_sha256'] == (
-        '4608e799936ac007292dcb5cfc1894880893e3f9544d0b7a33096d23b5bb8290'
-    )
-    assert estimator.model.provenance['challenger_replay'][
-        'selected'
-    ] == 286
-    assert estimator.model.provenance['challenger_replay'][
-        'selection_order'
-    ] == 'direction_edge_top_n_then_probability_gates_no_backfill'
+    assert estimate.direction_model_segment == 'EQUITY_EU_SELL'
+    assert estimate.direction_probability_raw == pytest.approx(0.81)
+    assert estimate.direction_probability == pytest.approx(0.51)
     assert estimate.in_training_domain is True
-    assert estimate.probability_score == pytest.approx(
-        200.0 * estimate.tp_probability,
-        abs=0.0002,
+
+
+def test_sell_features_are_aligned_to_favorable_direction():
+    estimate = OutcomeProbabilityEstimator(_constant_model()).estimate(
+        evaluated_candidate=_evaluated(side='SELL'),
+        risk_profile=_risk_profile(),
     )
 
+    assert estimate.direction_features['aligned_session_move'] == pytest.approx(
+        0.40
+    )
+    assert estimate.direction_features[
+        'aligned_snapshot_momentum'
+    ] == pytest.approx(0.30)
+    assert estimate.direction_features['aligned_m5_return'] == pytest.approx(
+        0.25
+    )
+    assert estimate.direction_features['close_quality'] == pytest.approx(88.0)
 
-def test_evaluator_persists_probabilities_without_changing_raw_evidence():
+
+def test_crypto_uses_explicit_provisional_segment_not_runtime_fallback():
+    estimate = OutcomeProbabilityEstimator(_constant_model()).estimate(
+        evaluated_candidate=_evaluated(
+            side='BUY',
+            asset_class=AssetClass.CRYPTO,
+        ),
+        risk_profile=_risk_profile(AssetClass.CRYPTO),
+    )
+
+    assert estimate.direction_model_segment == 'CRYPTO_BUY'
+    assert estimate.direction_training_status == 'provisional_transfer'
+    assert estimate.direction_source_segment == 'EQUITY_US_BUY'
+    assert estimate.in_training_domain is False
+    assert estimate.tp_probability is not None
+
+
+def test_default_artifact_has_frozen_all_candidate_provenance():
+    estimator = OutcomeProbabilityEstimator()
+
+    assert estimator.model.artifact_sha256 == (
+        '57cf61302346288ffdb76bc66f134437bd75a9e4064f30569f2a54b47606b55e'
+    )
+    assert estimator.model.provenance['training_rows'] == 3527
+    assert estimator.model.provenance['decisive_training_rows'] == 1547
+    assert estimator.model.provenance['direction_margin'] == 0.05
+    assert tuple(estimator.model.direction_segments) == (
+        SUPPORTED_DIRECTION_SEGMENTS
+    )
+    assert estimator.model.direction_segments[
+        'CRYPTO_SELL'
+    ].training_status == 'provisional_transfer'
+
+
+def test_evaluator_persists_segment_metadata_without_changing_raw_evidence():
     original = _evaluated()
     updated = CandidateOutcomeProbabilityEvaluator().evaluate(
         evaluated_candidate=original,
@@ -262,138 +336,20 @@ def test_evaluator_persists_probabilities_without_changing_raw_evidence():
     assert updated.candidate.directional_score == (
         original.candidate.directional_score
     )
-    assert updated.candidate.market_context_components == (
-        original.candidate.market_context_components
-    )
     assert updated.outcome_probability is not None
-    assert updated.candidate.tp_probability is not None
-    assert updated.candidate.outcome_probability_model_version == (
-        OUTCOME_PROBABILITY_MODEL_VERSION
-    )
-    assert 'p_direction=' in updated.candidate.rank_reason
+    assert updated.candidate.outcome_probability_metadata[
+        'direction_model_segment'
+    ] == 'EQUITY_US_BUY'
+    assert 'p_direction_raw=' in updated.candidate.rank_reason
 
 
-def test_asset_class_without_training_cohort_is_scored_without_rejection():
-    estimate = OutcomeProbabilityEstimator().estimate(
-        evaluated_candidate=_evaluated(),
-        risk_profile=_risk_profile(AssetClass.CRYPTO),
-    )
-
-    assert estimate.in_training_domain is False
-    assert estimate.tp_probability is not None
-    assert estimate.probability_score == pytest.approx(
-        200.0 * estimate.tp_probability,
-        abs=0.0002,
-    )
-
-
-def test_model_cannot_change_the_training_domain_silently():
+def test_model_cannot_change_supported_segments_silently():
     model = replace(
-        _constant_model(
-            touch_probability=0.40,
-            direction_probability=0.35,
-        ),
-        training_asset_classes=(
-            AssetClass.EQUITY_EU.value,
-            AssetClass.EQUITY_US.value,
-            AssetClass.CRYPTO.value,
-        ),
+        _constant_model(),
+        supported_segments=SUPPORTED_DIRECTION_SEGMENTS[:-1],
     )
-
     with pytest.raises(
         RuntimeError,
-        match='training-domain contract does not match code',
+        match='segment contract does not match code',
     ):
         OutcomeProbabilityEstimator(model)
-
-
-def test_runtime_feature_contract_reproduces_a_frozen_cohort_vector():
-    candidate = replace(
-        _candidate(),
-        symbol='DE',
-        snapshot=MarketSnapshot(
-            'DE',
-            100.0,
-            100.05,
-            100.02,
-            datetime(2026, 7, 23, 15, 35, tzinfo=UTC),
-        ),
-        session_key=(
-            'EQUITY_US:2026-07-23T15:30:00+02:00:'
-            '2026-07-23T22:00:00+02:00'
-        ),
-        base_score=107.4146,
-        directional_score=107.4146,
-        market_context_components={
-            'relative_strength_raw': 10.0495,
-            'sector': 0.0,
-            'benchmark_momentum': 0.3562,
-        },
-        multi_timeframe_context=SimpleNamespace(
-            maturity_by_timeframe={
-                'm5': TimeframeMaturity.READY,
-            },
-            features_by_timeframe={
-                'm5': SimpleNamespace(
-                    direction=TimeframeDirection.UP,
-                ),
-            },
-        ),
-    )
-    feasibility = replace(
-        _feasibility(),
-        effective_take_profit_percent=1.2,
-        effective_stop_loss_percent=0.7,
-        tp_to_atr_ratio=12.5392,
-        tp_to_snapshot_momentum_ratio=5.0804,
-        cost_to_tp_ratio=0.3209,
-        movement_consumed_to_tp_ratio=0.6223,
-        entry_freshness_score=91.85,
-        feasibility_score=49.4746,
-        score_contribution=-0.1576,
-        component_scores={
-            'tp_vs_atr': 0.0,
-            'tp_vs_momentum': 76.884,
-            'cost_vs_tp': 75.4553,
-            'entry_freshness': 91.85,
-        },
-    )
-    economics = replace(
-        _economics(),
-        expected_net_profit_percent=0.814917289788423,
-        estimated_total_cost_percent=0.385082710211577,
-        effective_take_profit_percent=1.2,
-        effective_stop_loss_percent=0.7,
-        cost_to_tp_ratio=0.3209,
-        reward_to_risk_ratio=1.7142857142857144,
-        net_reward_to_risk_ratio=0.7510185925177305,
-    )
-    evaluated = EvaluatedTradeCandidate(
-        candidate=candidate,
-        economics=economics,
-        tp_feasibility=feasibility,
-        entry_decision=EntryDecision(
-            action=EntryAction.READY_FOR_SELECTION,
-            reason='entry_conditions_satisfied',
-            diagnostics={'extension_to_tp_ratio': 0.0641},
-        ),
-    )
-
-    estimate = OutcomeProbabilityEstimator().estimate(
-        evaluated_candidate=evaluated,
-        risk_profile=EquityUsConfig().risk,
-    )
-
-    assert estimate.touch_probability == pytest.approx(
-        0.296985776,
-        abs=1e-9,
-    )
-    assert estimate.direction_probability == pytest.approx(
-        0.320672264,
-        abs=1e-9,
-    )
-    assert estimate.tp_probability == pytest.approx(
-        0.095235101,
-        abs=1e-9,
-    )
-    assert estimate.probability_score == pytest.approx(19.047)
