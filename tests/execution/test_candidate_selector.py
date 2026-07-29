@@ -190,7 +190,10 @@ def test_direction_edge_margin_boundary_is_inclusive():
         CandidateSelectionConfig(top_n=1, minimum_direction_edge=0.05),
     )
 
-    assert result.selected_candidates == [exact]
+    assert [
+        item.candidate.symbol for item in result.selected_candidates
+    ] == ['EXACT']
+    assert result.selected_candidates[0].entry_decision is not None
 
 
 def test_rank_uses_edge_then_tp_probability_then_candidate_id():
