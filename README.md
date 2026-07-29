@@ -2,7 +2,7 @@
 
 > A deterministic intraday trading bot that lives in a cave, watches markets all day, and refuses to confuse activity with opportunity.
 
-**Goblin!** is an experimental and auditable trading engine written in Python. It validates broker data, builds deterministic market structure, detects directional setups, estimates trading costs, scores the probability of reaching a fixed target, then applies explicit risk controls before an order can reach the broker.
+**Goblin!** is an experimental and auditable trading engine written in Python. It validates broker data, builds deterministic market structure, detects directional setups, estimates trading costs, models the race between take profit and stop loss, then applies explicit risk controls before an order can reach the broker.
 
 > [!WARNING]
 > Goblin is research software, not financial advice. Use `paper` or `etoro_demo` while the strategy is being calibrated. Real-money trading can lose capital.
@@ -12,13 +12,10 @@
 - **Deterministic execution** — the same accepted data and versioned configuration must produce the same decision.
 - **Demo first** — an edge is never assumed from a handful of trades.
 - **Validated data only** — rejected or quarantined snapshots cannot create candles or entries.
-- **Calibrated outcome evidence** — the live score is a direct scale of the
-  estimated `TP_FIRST` probability.
-- **Costs are part of the trade** — fees and spread are evaluated before selection and in net expectancy.
-- **Explicit probabilistic gates** — probability and activity gates are named,
-  versioned and journalled.
-- **Hard constraints remain explicit** — invalid data, impossible economics, incompatible session horizon, invalid structure and risk limits may reject.
-- **Every decision leaves evidence** — raw data, bars, candidates, contributions, routes, summaries and manifests are retained.
+- **Activity and direction remain separate** — `P_TOUCH` estimates whether a barrier will be reached; segmented `P_DIRECTION` estimates which barrier wins.
+- **Costs are part of the trade** — the conditional break-even probability uses net TP gain and net SL loss.
+- **One active policy** — no shadow selector, legacy score, hidden fallback or compatibility shim participates in runtime decisions.
+- **Every decision leaves evidence** — raw data, bars, candidates, model inputs, routes, summaries and manifests are retained.
 - **Doing nothing is valid** — zero trades can still be the correct outcome.
 
 ## Current capabilities
@@ -28,22 +25,15 @@ Goblin currently includes:
 - one active, code-versioned `BalancedStrategyConfig`;
 - local paper, eToro demo and eToro live broker adapters;
 - crypto, US-equity and European-equity support;
-- timezone-aware trading sessions and force-close windows;
-- stateful market-data validation with jump quarantine;
-- canonical fixed M1 candles and deterministic M5/M15/M30/H1 bars;
-- explicit timeframe maturity: `UNAVAILABLE`, `PROVISIONAL`, `READY`;
-- context-only benchmark instruments: `Crypto10`, `SPX500`, `FRA40`;
-- benchmark, breadth, sector and compressed relative-strength scoring;
-- deterministic BUY and SELL trend/breakout signals;
-- three-factor TP feasibility with diagnostic entry freshness;
-- frozen two-stage `TP_FIRST` / `SL_FIRST` / `NEITHER` probability model
-  trained on US and European equities;
-- structural retest pending entries with deterministic lineage;
-- fixed named SL/TP profiles and structural pending stops;
-- net breakeven and trailing-stop management;
-- cooldown, account and session risk limits;
-- SQLite position and cooldown persistence;
-- JSONL journals, schema-v12 summaries and versioned run manifests;
+- canonical M1 candles and deterministic M5/M15/M30/H1 bars;
+- benchmark, breadth, sector and relative-strength context;
+- deterministic BUY and SELL trend/breakout candidates;
+- named fixed TP/SL profiles, structural pending stops and TP feasibility;
+- a frozen two-stage outcome model;
+- four trained equity direction segments and two explicit provisional crypto segments;
+- a five-point conditional direction-edge gate applied before top-N;
+- net breakeven, trailing stop, stale exit, cooldown and session controls;
+- SQLite position/cooldown persistence and JSONL audit journals;
 - a broad pytest suite validated by GitHub Actions.
 
 ## Decision pipeline
@@ -55,106 +45,28 @@ flowchart TD
     B --> D[Market context]
     C --> E[TrendStrategy]
     C --> F[MTF aggregation]
-    F --> G[READY M5 / M15 / M30]
-    E --> H[TradeCandidate]
-    D --> H
-    G --> H
-    H --> I[Named fixed TP/SL profile]
-    I --> J[TP-aware freshness and feasibility]
-    J --> K[EntryDecisionEngine]
-    K -->|READY_FOR_SELECTION| L[Two-stage outcome model]
-    K -->|WAIT_FOR_RETEST| O[PendingEntryManager]
-    K -->|SKIP hard constraint| P[Counterfactual journal]
-    L --> M[Direction-edge ranking]
-    M --> N[Top-N then probability gates]
-    O --> H
-    N --> Q[RiskManager]
+    E --> G[TradeCandidate BUY or SELL]
+    D --> G
+    F --> G
+    G --> H[Named TP/SL and costs]
+    H --> I[TP feasibility and entry route]
+    I -->|READY| J[P_TOUCH frozen activity model]
+    I -->|WAIT| K[PendingEntryManager]
+    I -->|SKIP| L[Counterfactual journal]
+    J --> M[Segmented P_DIRECTION]
+    M --> N[50/50 shrinkage to segment prior]
+    N --> O[direction_edge >= 5 points]
+    O --> P[Rank eligible then top-N]
+    K --> G
+    P --> Q[RiskManager]
     Q --> R[TradeExecutor]
     R --> S[Managed position lifecycle]
-    S --> P
+    S --> L
 ```
 
-## Canonical PR5-E score
+## Two-stage outcome probabilities
 
-```text
-P_TP = P_TOUCH × P_DIRECTION
-probability_score = round(200 × P_TP, 4)
-```
-
-The mapping is monotone by construction: a score of 20 means an estimated
-`P(TP_FIRST)` of 10%, 40 means 20%, and 120 would mean 60%. The model does not
-manufacture high scores when the evidence does not support them. Its maximum
-leave-one-day-out score on the PR5-D cohort was 83, or 41.5%.
-
-The former combined PR5-D score is removed from the runtime. Its raw
-directional, context, timeframe and feasibility evidence remains journalled
-and feeds the frozen probability features where applicable; it is no longer
-reassembled into a legacy score or evaluated as a shadow policy.
-
-### TP-aware entry freshness
-
-Goblin measures how much directional session movement has already occurred relative to the target still requested:
-
-```text
-movement_consumed_to_tp_ratio
-= directional session move / effective TP
-```
-
-The ratio becomes a continuous `entry_freshness_score` from 0 to 100. It no
-longer adds points to the live score; it is one of the frozen `P_TOUCH`
-features.
-
-### Market context
-
-The context model first calculates the market background from:
-
-- benchmark session return;
-- benchmark rolling momentum;
-- same-market breadth;
-- sector participation.
-
-Directional relative strength then compensates that background. Its adjustment is multiplied by entry freshness:
-
-```text
-strong relative strength + fresh entry
-→ meaningful compensation
-
-strong relative strength + consumed move
-→ limited compensation
-```
-
-A contrary benchmark is never a standalone veto. Relative strength, sector
-participation and benchmark momentum are inputs to `P_DIRECTION`.
-
-### Multi-timeframe contribution
-
-PR5-E does not add fixed timeframe points to the live score. Maturity and
-alignment are frozen model features for `P_TOUCH`; `P_DIRECTION` uses M5
-maturity and the interaction between an aligned M5 and movement already
-consumed.
-
-### TP feasibility
-
-`tp_feasibility_score_v4` combines:
-
-| Component | Weight |
-|---|---:|
-| TP versus ATR | 35% |
-| TP versus recent momentum | 30% |
-| Estimated costs versus TP | 35% |
-| TP-aware entry freshness | 0% — diagnostic only |
-
-Its normalized score and former contribution transform remain explicit
-features of `P_TOUCH`, but they are never added to the probability score. The
-only feasibility hard reject is:
-
-```text
-estimated total costs >= gross TP distance
-```
-
-## Two-stage probability and ranking
-
-`outcome_probability_v1` separates activity from direction:
+For a candidate whose side, TP, SL and horizon already exist:
 
 ```text
 P_TOUCH     = P(TP_FIRST or SL_FIRST)
@@ -163,18 +75,48 @@ P_DIRECTION = P(TP_FIRST | one barrier is touched)
 P_TP      = P_TOUCH × P_DIRECTION
 P_SL      = P_TOUCH × (1 - P_DIRECTION)
 P_NEITHER = 1 - P_TOUCH
+
+probability_score = round(200 × P_TP, 4)
 ```
 
-For example, `P_TOUCH = 40%` and `P_DIRECTION = 35%` produce:
+`P_DIRECTION` is not the probability that the next candle rises. It is the conditional probability that the candidate's TP beats its SL among decisive paths.
+
+### Frozen `P_TOUCH`
+
+The activity component is unchanged from the previous probability model. It was fitted on 1,958 usable US/EU candidates from 22–24 July 2026 and is reproduced byte-for-byte by the V2 fitting script. This isolates the direction experiment from changes in activity calibration.
+
+### Segmented `P_DIRECTION`
+
+The direction component uses an exact segment selected from market and side:
+
+| Segment | Status | Feature family |
+|---|---|---|
+| `EQUITY_EU_BUY` | trained | core movement/context |
+| `EQUITY_EU_SELL` | trained | multi-timeframe |
+| `EQUITY_US_BUY` | trained | plan geometry/feasibility |
+| `EQUITY_US_SELL` | trained | multi-timeframe |
+| `CRYPTO_BUY` | provisional transfer | US BUY geometry |
+| `CRYPTO_SELL` | provisional transfer | US SELL multi-timeframe |
+
+There is no generic runtime fallback. Crypto models are explicit artifact entries with `training_status=provisional_transfer`, zero crypto training rows and a named US source segment. They can be replaced later without changing the runtime contract.
+
+Signed market variables are aligned to the candidate side: a negative return favorable to a SELL becomes a positive aligned feature.
+
+### Conservative calibration
+
+Each raw direction prediction is shrunk toward its segment's observed decisive TP rate:
 
 ```text
-P_TP = 14%, P_SL = 26%, P_NEITHER = 60%
+P_DIRECTION final
+= 0.50 × raw model probability
++ 0.50 × segment prior
 ```
 
-`P_DIRECTION` is therefore not the overall chance of a TP. It answers:
-“among decisive paths, which barrier is more likely to be first?”
+The journal retains the raw probability, prior, final probability, segment, feature family, training status and source segment.
 
-The selector compares it with the conditional break-even probability:
+## Economic gate and selection
+
+The conditional probability needed to break even is:
 
 ```text
 direction_break_even
@@ -184,17 +126,38 @@ direction_edge
 = P_DIRECTION - direction_break_even
 ```
 
-Candidates rank by `direction_edge`, then directional score, then deterministic
-candidate ID. This reproduces the simulated challenger. It is separate from
-the existing hard economics check that a reached TP must leave the configured
-minimum net profit after costs.
+The active policy requires:
 
-The frozen model was fitted on 1,958 usable US/EU candidates from 22–24 July
-2026. Leave-one-day-out validation produced TP/rest AUC 0.667, Brier 0.101 and
-calibration error 1.8%. Direction discrimination remains weaker: TP/SL AUC
-0.575. These are challenger results, not proof of profitability.
+```text
+direction_edge >= 0.05
+```
 
-## Fixed V1 profiles
+This means five **percentage points**, not a relative five-percent increase.
+
+Selection order:
+
+1. apply entry route, readiness, feasibility and hard economics;
+2. reject candidates below the five-point direction margin;
+3. rank the eligible candidates by `direction_edge`, then `P_TP`, then deterministic candidate ID;
+4. keep the asset-specific top-N: two crypto, one US equity, one EU equity;
+5. apply RiskManager and execute.
+
+The former minimum-`P_TP` and maximum-`P_TOUCH` gates do not exist. A rejected top candidate cannot consume a slot and block the next eligible candidate.
+
+## Evidence behind V2
+
+The direction dataset contains all 3,527 labelled candidates from 22, 23, 24, 27 and 28 July 2026, including selected and rejected candidates. It contains 1,547 decisive paths: 475 `TP_FIRST` and 1,072 `SL_FIRST`.
+
+Cross-day validation of the segmented direction architecture produced:
+
+```text
+P_DIRECTION AUC:   0.643
+P_DIRECTION Brier: 0.202
+```
+
+A stricter train-22–24/test-27–28 check produced approximately AUC 0.588 and Brier 0.217. These figures justify a demo experiment, not a profitability claim. The five-point margin was exploratory and must remain frozen during the next three complete demo sessions.
+
+## Fixed profiles and managed exits
 
 | Profile | Side | TP | SL | Stale horizon |
 |---|---|---:|---:|---:|
@@ -203,65 +166,7 @@ calibration error 1.8%. Direction discrimination remains weaker: TP/SL AUC
 | `eu_intraday_fixed_v1` | SELL/base | 1.00% | 0.70% | 75 min |
 | `crypto_intraday_fixed_v1` | BUY/SELL | 3.00% | 1.50% | 60 min |
 
-The former US ATR-based TP/SL mode and missing-ATR fallback do not exist. A future attainable-target V2 is deliberately deferred until the fixed profiles and probability model are calibrated.
-
-A confirmed pending setup may use a structural SL while retaining the named baseline target and probability calibration profile.
-
-## Selection
-
-| Asset class | `P_TP` gate | `P_TOUCH` gate | Top N |
-|---|---:|---:|---:|
-| Crypto | ≥ 12.5% | < 40% | 2 |
-| US equity | ≥ 12.5% | < 40% | 1 |
-| EU equity | ≥ 12.5% | < 40% | 1 |
-
-The order is intentional:
-
-1. apply route, readiness, structural and hard-economic checks;
-2. rank by direction edge;
-3. keep the asset-specific top N;
-4. apply the `P_TP` and `P_TOUCH` gates without backfilling a rejected slot.
-
-The strict policy is the initial live PR5-E policy. On the historical
-leave-one-day-out replay it retained 28 candidates: 8 `TP_FIRST`, 2 `SL_FIRST`
-and 18 `NEITHER`, for a mean counterfactual net result of +0.150%. Those
-thresholds were selected after observing the three-day cohort, so the next
-five complete sessions are an external frozen-policy validation rather than
-proof of profitability.
-
-Crypto was absent from that cohort. The runtime does not reject crypto as an
-asset class, but marks predictions outside the training domain in probability
-metadata. The next validation runs keep crypto out of `WATCHLIST`; the crypto
-instrument and risk profiles remain available for a future dedicated cohort.
-
-## Session horizon
-
-Finite-session entries must have enough time remaining for:
-
-```text
-profile stale horizon + force-close buffer
-```
-
-This hard constraint applies to both new signals and pending confirmations. It prevents, for example, opening a 180-minute European profile shortly before the mandatory close.
-
-## Managed stops
-
-Breakeven protection is net of estimated costs:
-
-```text
-locked gross move = estimated total costs + configured net buffer
-```
-
-Trailing protection remains cost-aware and activates only when its candidate stop locks the configured minimum net gain. Every stop change emits `managed_stop_updated` and is persisted before the next snapshot.
-
-## Market-data and timeframe invariants
-
-- M1 is the only snapshot-built timeframe.
-- Higher bars derive only from complete closed M1 bars.
-- Missing prices are never fabricated.
-- Candidate features obey no-lookahead boundaries.
-- Live timestamp validation uses actual receipt/validation time.
-- Historical replay keeps its supplied deterministic clock.
+Breakeven protection is net of estimated costs. Trailing protection activates only when the candidate stop locks the configured minimum net gain. Finite-session entries must have enough time for the stale horizon plus force-close buffer.
 
 ## Running
 
@@ -271,8 +176,6 @@ Python 3.12 or newer is required.
 cp .env.example .env
 bash scripts/start_goblin.sh
 ```
-
-The launcher runs Docker Compose in the foreground so an intentional stop can finalize the summary and manifest.
 
 Local execution:
 
@@ -285,31 +188,17 @@ python -m app.main
 
 ## Analysis contract
 
-PR5-E uses summary schema **v12** and run-manifest schema **v10**. Standalone
-`entry_decision` records include:
+Run-manifest schema V11 records:
 
-- deterministic candidate/pending lineage;
-- named profile and effective SL/TP;
-- probability score;
-- directional, context, MTF and feasibility evidence;
-- `movement_consumed_to_tp_ratio` and `entry_freshness_score`;
-- `P_TOUCH`, `P_DIRECTION`, `P_TP`, `P_SL` and `P_NEITHER`;
-- conditional direction break-even and direction edge;
-- route and selection outcome.
+- model and feature-contract versions;
+- activity and direction dataset hashes;
+- all six direction segments and their provenance;
+- the five-point margin and 50/50 calibration weights;
+- the packaged artifact SHA-256;
+- code fingerprint, watchlist, profiles and runtime settings.
 
-The summary also exposes probability buckets, training-domain coverage,
-profile horizon rejections, managed-stop updates and corrected risk-stage
-counts.
+Standalone `entry_decision` records include the complete nested outcome estimate, so raw/final direction probabilities and segment metadata remain auditable without duplicate shadow decisions.
 
 ## Pre-live status
 
-Goblin remains **demo-only**. Before real capital, the project still requires:
-
-- real broker exit fills;
-- broker-side catastrophe protection for BUY positions;
-- broker-to-local position reconciliation;
-- daily-loss, drawdown and kill-switch controls;
-- watchdogs and failure alerts;
-- controlled price precision and rounding.
-
-The current objective is repeatable calibration, not a claim of profitability.
+Goblin remains **demo-only**. Before real capital, the project still requires verified broker exits, catastrophe protection, reconciliation, drawdown/kill-switch controls, watchdogs and controlled price precision. The current objective is repeatable calibration, not a claim of profitability.
