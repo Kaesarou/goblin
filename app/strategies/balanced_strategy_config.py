@@ -1,6 +1,9 @@
 from dataclasses import dataclass, field, replace
 
 from app.execution.candidate_selector import CandidateSelectionConfig
+from app.execution.scoring.outcome_probability_model_contract import (
+    MINIMUM_DIRECTION_EDGE,
+)
 from app.instruments.base_configs import (
     CRYPTO_CONFIG,
     EQUITY_EU_CONFIG,
@@ -18,9 +21,6 @@ BALANCED_TRADE_COOLDOWN = TradeCooldownConfig(
     after_unknown_close_minutes=15,
     stop_loss_symbol_lock_minutes=15,
 )
-
-PR5E_MINIMUM_TP_PROBABILITY = 0.125
-PR5E_MAXIMUM_TOUCH_PROBABILITY = 0.40
 
 BALANCED_CRYPTO_CONFIG = replace(
     CRYPTO_CONFIG,
@@ -49,18 +49,15 @@ def _selection_configs() -> dict[AssetClass, CandidateSelectionConfig]:
     return {
         AssetClass.CRYPTO: CandidateSelectionConfig(
             top_n=2,
-            minimum_tp_probability=PR5E_MINIMUM_TP_PROBABILITY,
-            maximum_touch_probability=PR5E_MAXIMUM_TOUCH_PROBABILITY,
+            minimum_direction_edge=MINIMUM_DIRECTION_EDGE,
         ),
         AssetClass.EQUITY_US: CandidateSelectionConfig(
             top_n=1,
-            minimum_tp_probability=PR5E_MINIMUM_TP_PROBABILITY,
-            maximum_touch_probability=PR5E_MAXIMUM_TOUCH_PROBABILITY,
+            minimum_direction_edge=MINIMUM_DIRECTION_EDGE,
         ),
         AssetClass.EQUITY_EU: CandidateSelectionConfig(
             top_n=1,
-            minimum_tp_probability=PR5E_MINIMUM_TP_PROBABILITY,
-            maximum_touch_probability=PR5E_MAXIMUM_TOUCH_PROBABILITY,
+            minimum_direction_edge=MINIMUM_DIRECTION_EDGE,
         ),
     }
 

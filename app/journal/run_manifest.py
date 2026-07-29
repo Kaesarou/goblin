@@ -18,7 +18,8 @@ from app.execution.scoring.market_context_scorer import (
 from app.execution.scoring.multi_timeframe_scorer import (
     MULTI_TIMEFRAME_SCORER_VERSION,
 )
-from app.execution.scoring.pr5e_model_contract import (
+from app.execution.scoring.outcome_probability_model_contract import (
+    MINIMUM_DIRECTION_EDGE,
     OUTCOME_PROBABILITY_FEATURE_CONTRACT_VERSION,
     OUTCOME_PROBABILITY_MODEL_VERSION,
 )
@@ -112,8 +113,21 @@ def build_run_manifest(
     actual_manifest_path = manifest_path or settings.run_manifest_path
     actual_summary_path = summary_path or settings.daily_summary_path
     outcome_probability_model = FrozenOutcomeProbabilityModel.load()
+    direction_segments = {
+        name: {
+            'feature_family': segment.feature_family,
+            'training_status': segment.training_status,
+            'source_segment': segment.source_segment,
+            'training_rows': segment.training_rows,
+            'segment_prior': segment.segment_prior,
+            'model_weight': segment.model_weight,
+            'segment_prior_weight': segment.segment_prior_weight,
+        }
+        for name, segment
+        in outcome_probability_model.direction_segments.items()
+    }
     return {
-        'schema_version': 10,
+        'schema_version': 11,
         'run_id': run_id,
         'status': 'running',
         'started_at': started_at,
@@ -137,14 +151,26 @@ def build_run_manifest(
             'outcome_probability_artifact_sha256': (
                 outcome_probability_model.artifact_sha256
             ),
-            'outcome_probability_training_dataset_sha256': (
+            'outcome_probability_direction_dataset_sha256': (
                 outcome_probability_model.provenance.get(
                     'dataset_sha256'
+                )
+            ),
+            'outcome_probability_activity_dataset_sha256': (
+                outcome_probability_model.provenance.get(
+                    'activity_dataset_sha256'
                 )
             ),
             'outcome_probability_training_asset_classes': list(
                 outcome_probability_model.training_asset_classes
             ),
+            'outcome_probability_supported_segments': list(
+                outcome_probability_model.supported_segments
+            ),
+            'outcome_probability_direction_margin': (
+                MINIMUM_DIRECTION_EDGE
+            ),
+            'outcome_probability_direction_segments': direction_segments,
         },
         'strategy': {
             'name': 'TrendStrategy',
@@ -227,6 +253,7 @@ def build_run_manifest(
                 'neither_probability',
                 'direction_break_even_probability',
                 'direction_edge',
+                'outcome_probability',
                 'outcome_probability_model_version',
             ],
         },
