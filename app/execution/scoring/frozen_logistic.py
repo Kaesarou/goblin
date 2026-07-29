@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import gzip
 import json
 import math
 from collections.abc import Mapping
@@ -160,7 +162,14 @@ class FrozenOutcomeProbabilityModel:
             'models/outcome_probability_v2.json'
         )
         raw = model_path.read_bytes()
-        value = json.loads(raw)
+        wrapper = json.loads(raw)
+        if wrapper.get('encoding') == 'gzip+base64':
+            decoded = gzip.decompress(
+                base64.b64decode(wrapper['payload'])
+            )
+            value = json.loads(decoded)
+        else:
+            value = wrapper
         direction_segments = {
             str(segment): FrozenDirectionSegmentModel.from_dict(
                 str(segment),
