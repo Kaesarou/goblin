@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 import pytest
 
 from app.config.settings import Settings
@@ -25,14 +27,7 @@ def test_manifest_records_effective_eu_sell_calibration_weights():
         instrument_registry=registry,
         symbols=['AAPL'],
         run_id='run-calibration-test',
-        started_at=__import__('datetime').datetime(
-            2026,
-            7,
-            29,
-            8,
-            0,
-            tzinfo=__import__('datetime').UTC,
-        ),
+        started_at=datetime(2026, 7, 29, 8, 0, tzinfo=UTC),
     )
 
     segments = manifest['models'][
