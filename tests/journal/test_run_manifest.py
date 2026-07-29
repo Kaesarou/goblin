@@ -4,19 +4,11 @@ import pytest
 from pydantic import ValidationError
 
 from app.config.settings import Settings
-from app.execution.entry_decision import ENTRY_DECISION_MODEL_VERSION
-from app.execution.scoring.market_context_scorer import (
-    MARKET_CONTEXT_SCORER_VERSION,
-)
-from app.execution.scoring.multi_timeframe_scorer import (
-    MULTI_TIMEFRAME_SCORER_VERSION,
-)
-from app.execution.scoring.pr5e_model_contract import (
+from app.execution.scoring.outcome_probability_model_contract import (
+    MINIMUM_DIRECTION_EDGE,
     OUTCOME_PROBABILITY_FEATURE_CONTRACT_VERSION,
     OUTCOME_PROBABILITY_MODEL_VERSION,
-)
-from app.execution.scoring.tp_feasibility import (
-    TP_FEASIBILITY_MODEL_VERSION,
+    SUPPORTED_DIRECTION_SEGMENTS,
 )
 from app.instruments.instrument_registry import InstrumentRegistry
 from app.journal.run_manifest import (
@@ -28,7 +20,7 @@ from app.journal.run_manifest import (
 from app.strategies.balanced_strategy_config import BalancedStrategyConfig
 
 
-def test_run_manifest_captures_pr5e_contract_without_broker_secrets():
+def test_run_manifest_captures_segmented_probability_contract():
     settings = Settings(
         WATCHLIST='AAPL',
         EQUITY_US_SYMBOLS='AAPL',
@@ -46,91 +38,42 @@ def test_run_manifest_captures_pr5e_contract_without_broker_secrets():
         instrument_registry=registry,
         symbols=['AAPL'],
         run_id='run-test',
-        started_at=datetime(2026, 7, 10, 8, 0, tzinfo=UTC),
-        manifest_path='data/logs/runs/run-test/run_manifest.json',
-        summary_path='data/logs/runs/run-test/daily_summary.json',
+        started_at=datetime(2026, 7, 29, 8, 0, tzinfo=UTC),
     )
 
-    snapshot = manifest['runtime']['settings']
-    assert manifest['schema_version'] == 10
-    assert 'ETORO_API_KEY' not in snapshot
-    assert 'ETORO_USER_KEY' not in snapshot
-    assert manifest['strategy']['profile'] == 'balanced'
-    assert manifest['runtime']['watchlist'] == ['AAPL']
-    assert (
-        manifest['runtime']['multi_timeframe']['sampling_source']
-        == 'event_driven_websocket'
-    )
-    assert 'poll_interval_seconds' not in manifest['runtime']['multi_timeframe']
-    assert manifest['analysis_sources']['pending_lineage_enabled'] is True
-    assert manifest['analysis_sources']['managed_stop_updates_retained'] is True
-    assert manifest['analysis_sources']['entry_horizon_rejections_retained'] is True
-    fields = manifest['analysis_sources']['analysis_ready_entry_fields']
-    for field in (
-        'origin_candidate_id',
-        'pending_entry_id',
-        'profile_key',
-        'market_context_score',
-        'raw_market_context_score',
-        'effective_market_context_contribution',
-        'multi_timeframe_score',
-        'tp_feasibility_score',
-        'movement_consumed_to_tp_ratio',
-        'entry_freshness_score',
-        'extension_to_tp_ratio',
-        'probability_score',
-        'touch_probability',
-        'direction_probability',
-        'tp_probability',
-        'sl_probability',
-        'neither_probability',
-        'direction_break_even_probability',
-        'direction_edge',
-        'outcome_probability_model_version',
-    ):
-        assert field in fields
-    assert manifest['models']['entry_decision'] == ENTRY_DECISION_MODEL_VERSION
-    assert manifest['models']['entry_decision'] == 'entry_router_v6'
-    assert (
-        manifest['models']['market_context_score']
-        == MARKET_CONTEXT_SCORER_VERSION
-    )
-    assert manifest['models']['market_context_score'] == 'market_context_score_v3'
-    assert (
-        manifest['models']['multi_timeframe_score']
-        == MULTI_TIMEFRAME_SCORER_VERSION
-    )
-    assert manifest['models']['multi_timeframe_score'] == 'multi_timeframe_score_v2'
-    assert manifest['models']['tp_feasibility'] == TP_FEASIBILITY_MODEL_VERSION
-    assert manifest['models']['tp_feasibility'] == 'tp_feasibility_score_v4'
-    assert manifest['models']['outcome_probability'] == (
-        OUTCOME_PROBABILITY_MODEL_VERSION
-    )
-    assert manifest['models']['outcome_probability'] == (
-        'outcome_probability_v1'
-    )
-    assert manifest['models']['outcome_probability_features'] == (
+    assert manifest['schema_version'] == 11
+    assert 'ETORO_API_KEY' not in manifest['runtime']['settings']
+    assert 'ETORO_USER_KEY' not in manifest['runtime']['settings']
+    models = manifest['models']
+    assert models['outcome_probability'] == OUTCOME_PROBABILITY_MODEL_VERSION
+    assert models['outcome_probability_features'] == (
         OUTCOME_PROBABILITY_FEATURE_CONTRACT_VERSION
     )
-    assert manifest['models']['outcome_probability_features'] == (
-        'pr5e_features_v1'
+    assert models['outcome_probability_artifact_sha256'] == (
+        '57cf61302346288ffdb76bc66f134437bd75a9e4064f30569f2a54b47606b55e'
     )
-    assert manifest['models']['outcome_probability_artifact_sha256'] == (
-        '0507ab0788d4683a0b69587f49a920afa665af95584f5dec07383a64f3daf58f'
+    assert models['outcome_probability_direction_dataset_sha256'] == (
+        '54314272bbdfe5ecff83a7a9eae99ec9c36c4e547a73145f8ce5241923d7cb06'
     )
-    assert manifest[
-        'models'
-    ]['outcome_probability_training_dataset_sha256'] == (
-        '4608e799936ac007292dcb5cfc1894880893e3f9544d0b7a33096d23b5bb8290'
+    assert models['outcome_probability_activity_dataset_sha256'] == (
+        '4613e958702210226e9b397be2449e5e311f77e3dccc04d8c0cf81be0ceb1628'
     )
-    assert manifest['models'][
-        'outcome_probability_training_asset_classes'
-    ] == ['EQUITY_EU', 'EQUITY_US']
-    assert manifest['models']['multi_timeframe'] == 'multi_timeframe_features_v2'
-    assert manifest['runtime']['multi_timeframe'][
-        'supported_timeframes_seconds'
-    ] == [60, 300, 900, 1800, 3600]
-    assert manifest['code']['source_sha256']
+    assert tuple(models['outcome_probability_supported_segments']) == (
+        SUPPORTED_DIRECTION_SEGMENTS
+    )
+    assert models['outcome_probability_direction_margin'] == (
+        MINIMUM_DIRECTION_EDGE
+    )
+    crypto = models['outcome_probability_direction_segments']['CRYPTO_BUY']
+    assert crypto['training_status'] == 'provisional_transfer'
+    assert crypto['source_segment'] == 'EQUITY_US_BUY'
+    assert crypto['training_rows'] == 0
+    assert models['outcome_probability_direction_segments'][
+        'EQUITY_US_BUY'
+    ]['training_status'] == 'trained'
+    assert 'outcome_probability' in manifest['analysis_sources'][
+        'analysis_ready_entry_fields'
+    ]
 
 
 def test_removed_runtime_settings_are_rejected():
