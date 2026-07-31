@@ -1,6 +1,8 @@
 from dataclasses import replace
 from datetime import datetime, timezone
 
+import pytest
+
 from app.execution.candidate_economics import (
     CandidateEconomics,
     EvaluatedTradeCandidate,
@@ -20,27 +22,22 @@ TEST_SESSION_KEY = 'test-session'
 
 
 def snapshot(symbol: str) -> MarketSnapshot:
-    return MarketSnapshot(
-        symbol=symbol,
-        bid=99.9,
-        ask=100.1,
-        last=100.0,
-        timestamp=datetime(2026, 6, 26, 15, 30, tzinfo=timezone.utc),
-    )
+    now = datetime(2026, 6, 26, 15, 30, tzinfo=timezone.utc)
+    return MarketSnapshot(symbol, 99.9, 100.1, 100.0, now)
 
 
 def candle(symbol: str) -> Candle:
-    timestamp = datetime(2026, 6, 26, 15, 30, tzinfo=timezone.utc)
+    now = datetime(2026, 6, 26, 15, 30, tzinfo=timezone.utc)
     return Candle(
-        symbol=symbol,
-        timeframe_seconds=60,
-        open=99.0,
-        high=101.0,
-        low=98.5,
-        close=100.0,
-        volume=None,
-        opened_at=timestamp,
-        closed_at=timestamp,
+        symbol,
+        60,
+        99.0,
+        101.0,
+        98.5,
+        100.0,
+        None,
+        now,
+        now,
     )
 
 
@@ -75,25 +72,35 @@ def candidate(symbol: str, score: float = 100.0) -> TradeCandidate:
 def evaluated(
     symbol: str,
     *,
-    edge: float,
-    tp_probability: float = 0.20,
-    directional_score: float = 100.0,
+    edge: float = 0.10,
+    protection: float = 0.60,
+    positive: float = 0.50,
+    direction_edge: float = 0.05,
 ) -> EvaluatedTradeCandidate:
-    base = replace(
+    item = replace(
         candidate(symbol),
-        directional_score=directional_score,
-        probability_score=200 * tp_probability,
+        probability_score=20.0,
         touch_probability=0.40,
-        direction_probability=0.60,
-        tp_probability=tp_probability,
-        sl_probability=0.40 - tp_probability,
+        direction_probability=0.50,
+        tp_probability=0.20,
+        sl_probability=0.20,
         neither_probability=0.60,
-        direction_break_even_probability=0.60 - edge,
-        direction_edge=edge,
+        direction_break_even_probability=0.50 - direction_edge,
+        direction_edge=direction_edge,
         outcome_probability_model_version='outcome_probability_v2',
+        managed_protection_probability=protection,
+        managed_positive_probability=positive,
+        managed_expected_net_return_percent=edge + 0.05,
+        managed_edge=edge,
+        managed_outcome_model_version='managed_outcome_v1',
+        managed_outcome_metadata={
+            'minimum_protection_probability': 0.40,
+            'minimum_positive_probability': 0.30,
+            'minimum_expected_net_return_percent': 0.05,
+        },
     )
     return EvaluatedTradeCandidate(
-        candidate=base,
+        candidate=item,
         economics=CandidateEconomics(
             position_value=100.0,
             expected_gross_profit=1.0,
@@ -110,40 +117,24 @@ def evaluated(
 def evaluated_candidate_with_profit(
     item: TradeCandidate,
 ) -> EvaluatedTradeCandidate:
-    return EvaluatedTradeCandidate(
+    result = evaluated(item.symbol)
+    return replace(
+        result,
         candidate=replace(
-            item,
-            probability_score=40.0,
-            touch_probability=0.40,
-            direction_probability=0.50,
-            tp_probability=0.20,
-            sl_probability=0.20,
-            neither_probability=0.60,
-            direction_break_even_probability=0.40,
-            direction_edge=0.10,
-            outcome_probability_model_version='outcome_probability_v2',
-        ),
-        economics=CandidateEconomics(
-            position_value=100.0,
-            expected_gross_profit=1.0,
-            expected_net_profit=0.5,
-            expected_net_profit_percent=0.5,
-            estimated_total_cost=0.5,
-            estimated_total_cost_percent=0.5,
-            min_expected_net_profit_percent=0.10,
-            required_min_expected_net_profit_amount=0.10,
+            result.candidate,
+            snapshot=item.snapshot,
+            candle=item.candle,
+            signal=item.signal,
+            rank_reason=item.rank_reason,
+            session_key=item.session_key,
+            candidate_id=item.candidate_id,
         ),
     )
 
 
-def test_raw_candidate_selector_keeps_only_top_n_candidates():
-    candidates = [
-        candidate('ONE', 180),
-        candidate('TWO', 120),
-        candidate('THREE', 80),
-    ]
+def test_raw_selector_keeps_top_n():
     result = select_trade_candidates(
-        candidates,
+        [candidate('ONE', 180), candidate('TWO', 120), candidate('THREE', 80)],
         CandidateSelectionConfig(top_n=2),
     )
 
@@ -153,65 +144,60 @@ def test_raw_candidate_selector_keeps_only_top_n_candidates():
     )
 
 
-def test_direction_edge_margin_is_applied_before_top_n_and_backfills_slot():
-    below_margin_but_high_tp = evaluated(
-        'GATED',
-        edge=0.04999,
-        tp_probability=0.35,
-        directional_score=160.0,
-    )
-    admissible = evaluated(
-        'ADMISSIBLE',
-        edge=0.051,
-        tp_probability=0.18,
-        directional_score=90.0,
-    )
-
+def test_direction_edge_is_retained_but_is_not_a_gate():
     result = select_evaluated_trade_candidates(
-        [below_margin_but_high_tp, admissible],
-        CandidateSelectionConfig(top_n=1, minimum_direction_edge=0.05),
+        [evaluated('MANAGED', direction_edge=-0.20)],
+        CandidateSelectionConfig(top_n=1),
     )
 
     assert [item.candidate.symbol for item in result.selected_candidates] == [
-        'ADMISSIBLE'
+        'MANAGED'
     ]
-    assert {
-        item.evaluated_candidate.candidate.symbol: item.reason
-        for item in result.rejected_candidates
-    } == {
-        'GATED': 'candidate_selection_direction_edge_below_margin',
-    }
 
 
-def test_direction_edge_margin_boundary_is_inclusive():
-    exact = evaluated('EXACT', edge=0.05)
+@pytest.mark.parametrize(
+    ('protection', 'positive', 'edge', 'reason'),
+    [
+        (0.39, 0.50, 0.10, 'candidate_selection_managed_protection_below_floor'),
+        (0.60, 0.29, 0.10, 'candidate_selection_managed_positive_below_floor'),
+        (0.60, 0.50, -0.001, 'candidate_selection_managed_edge_below_margin'),
+    ],
+)
+def test_managed_gates_run_before_top_n(protection, positive, edge, reason):
     result = select_evaluated_trade_candidates(
-        [exact],
-        CandidateSelectionConfig(top_n=1, minimum_direction_edge=0.05),
+        [
+            evaluated(
+                'GATED',
+                protection=protection,
+                positive=positive,
+                edge=edge,
+            )
+        ],
+        CandidateSelectionConfig(top_n=1),
     )
 
-    assert [
-        item.candidate.symbol for item in result.selected_candidates
-    ] == ['EXACT']
-    assert result.selected_candidates[0].entry_decision is not None
+    assert result.selected_candidates == []
+    assert result.rejected_candidates[0].reason == reason
 
 
-def test_rank_uses_edge_then_tp_probability_then_candidate_id():
-    first = evaluated('FIRST', edge=0.10, tp_probability=0.18)
-    higher_tp = evaluated('HIGHER_TP', edge=0.10, tp_probability=0.22)
-    higher_edge = evaluated('HIGHER_EDGE', edge=0.11, tp_probability=0.10)
-
-    ranked = rank_evaluated_trade_candidates([first, higher_tp, higher_edge])
+def test_rank_uses_managed_edge_then_protection():
+    ranked = rank_evaluated_trade_candidates(
+        [
+            evaluated('FIRST', edge=0.10, protection=0.60),
+            evaluated('PROTECTED', edge=0.10, protection=0.70),
+            evaluated('HIGHER_EDGE', edge=0.11),
+        ]
+    )
 
     assert [item.candidate.symbol for item in ranked] == [
         'HIGHER_EDGE',
-        'HIGHER_TP',
+        'PROTECTED',
         'FIRST',
     ]
 
 
-def test_hard_economics_rejection_precedes_direction_margin():
-    item = evaluated('LOW', edge=0.01)
+def test_hard_economics_precedes_managed_gate():
+    item = evaluated('LOW', edge=-1.0)
     item = replace(
         item,
         economics=replace(
@@ -220,10 +206,9 @@ def test_hard_economics_rejection_precedes_direction_margin():
             min_expected_net_profit_percent=0.10,
         ),
     )
-
     result = select_evaluated_trade_candidates(
         [item],
-        CandidateSelectionConfig(top_n=1, minimum_direction_edge=0.05),
+        CandidateSelectionConfig(top_n=1),
     )
 
     assert result.rejected_candidates[0].reason == (
@@ -231,12 +216,10 @@ def test_hard_economics_rejection_precedes_direction_margin():
     )
 
 
-def test_outside_top_n_is_reported_after_margin_filter():
-    best = evaluated('BEST', edge=0.20)
-    second = evaluated('SECOND', edge=0.10)
+def test_overflow_is_reported_after_managed_ranking():
     result = select_evaluated_trade_candidates(
-        [second, best],
-        CandidateSelectionConfig(top_n=1, minimum_direction_edge=0.05),
+        [evaluated('SECOND', edge=0.10), evaluated('BEST', edge=0.20)],
+        CandidateSelectionConfig(top_n=1),
     )
 
     assert [item.candidate.symbol for item in result.selected_candidates] == [
@@ -245,4 +228,6 @@ def test_outside_top_n_is_reported_after_margin_filter():
     assert result.rejected_candidates[0].reason == (
         'candidate_selection_outside_top_n'
     )
-    assert result.rejected_candidates[0].minimum_direction_edge_used == 0.05
+    assert result.rejected_candidates[0].selection_threshold_source == (
+        'managed_edge_top_n'
+    )

@@ -2,7 +2,10 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 from app.config.settings import Settings
-from app.execution.candidate_economics import CandidateEconomics, EvaluatedTradeCandidate
+from app.execution.candidate_economics import (
+    CandidateEconomics,
+    EvaluatedTradeCandidate,
+)
 from app.execution.candidate_selector import CandidateSelectionConfig
 from app.execution.trade_candidate import TradeCandidate
 from app.instruments.instrument_registry import InstrumentRegistry
@@ -63,7 +66,17 @@ def make_evaluated_candidate(symbol: str, score: float) -> EvaluatedTradeCandida
             neither_probability=0.60,
             direction_break_even_probability=0.40,
             direction_edge=score / 1000,
-            outcome_probability_model_version='outcome_probability_v1',
+            outcome_probability_model_version='outcome_probability_v2',
+            managed_protection_probability=0.60,
+            managed_positive_probability=0.50,
+            managed_expected_net_return_percent=score / 1000 + 0.05,
+            managed_edge=score / 1000,
+            managed_outcome_model_version='managed_outcome_v1',
+            managed_outcome_metadata={
+                'minimum_protection_probability': 0.40,
+                'minimum_positive_probability': 0.30,
+                'minimum_expected_net_return_percent': 0.05,
+            },
         ),
         economics=CandidateEconomics(
             position_value=100.0,
@@ -95,15 +108,9 @@ def build_strategy_profile() -> BalancedStrategyConfig:
     return replace(
         profile,
         candidate_selection_configs={
-            AssetClass.CRYPTO: CandidateSelectionConfig(
-                top_n=2,
-            ),
-            AssetClass.EQUITY_US: CandidateSelectionConfig(
-                top_n=2,
-            ),
-            AssetClass.EQUITY_EU: CandidateSelectionConfig(
-                top_n=1,
-            ),
+            AssetClass.CRYPTO: CandidateSelectionConfig(top_n=2),
+            AssetClass.EQUITY_US: CandidateSelectionConfig(top_n=2),
+            AssetClass.EQUITY_EU: CandidateSelectionConfig(top_n=1),
         },
     )
 
