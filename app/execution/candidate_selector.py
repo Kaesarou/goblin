@@ -77,7 +77,7 @@ def select_evaluated_trade_candidates(
     eligible_candidates: list[EvaluatedTradeCandidate] = []
     rejected_candidates: list[RejectedEvaluatedCandidateSelection] = []
     decision_engine = EntryDecisionEngine()
-    managed_evaluator = CandidateManagedOutcomeEvaluator()
+    managed_evaluator: CandidateManagedOutcomeEvaluator | None = None
 
     for original in evaluated_candidates:
         decision_config = (
@@ -169,6 +169,8 @@ def select_evaluated_trade_candidates(
             or candidate.managed_edge is None
             or not candidate.managed_outcome_metadata
         ):
+            if managed_evaluator is None:
+                managed_evaluator = CandidateManagedOutcomeEvaluator()
             evaluated_candidate = managed_evaluator.evaluate(
                 evaluated_candidate=evaluated_candidate,
             )
