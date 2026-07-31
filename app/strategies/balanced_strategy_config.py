@@ -1,9 +1,6 @@
 from dataclasses import dataclass, field, replace
 
 from app.execution.candidate_selector import CandidateSelectionConfig
-from app.execution.scoring.outcome_probability_model_contract import (
-    MINIMUM_DIRECTION_EDGE,
-)
 from app.instruments.base_configs import (
     CRYPTO_CONFIG,
     EQUITY_EU_CONFIG,
@@ -47,18 +44,9 @@ BALANCED_EQUITY_EU_CONFIG = replace(
 
 def _selection_configs() -> dict[AssetClass, CandidateSelectionConfig]:
     return {
-        AssetClass.CRYPTO: CandidateSelectionConfig(
-            top_n=2,
-            minimum_direction_edge=MINIMUM_DIRECTION_EDGE,
-        ),
-        AssetClass.EQUITY_US: CandidateSelectionConfig(
-            top_n=1,
-            minimum_direction_edge=MINIMUM_DIRECTION_EDGE,
-        ),
-        AssetClass.EQUITY_EU: CandidateSelectionConfig(
-            top_n=1,
-            minimum_direction_edge=MINIMUM_DIRECTION_EDGE,
-        ),
+        AssetClass.CRYPTO: CandidateSelectionConfig(top_n=2),
+        AssetClass.EQUITY_US: CandidateSelectionConfig(top_n=1),
+        AssetClass.EQUITY_EU: CandidateSelectionConfig(top_n=1),
     }
 
 

@@ -51,6 +51,12 @@ class TradeCandidate:
     outcome_probability_metadata: dict[str, Any] = field(
         default_factory=dict
     )
+    managed_protection_probability: float | None = None
+    managed_positive_probability: float | None = None
+    managed_expected_net_return_percent: float | None = None
+    managed_edge: float | None = None
+    managed_outcome_model_version: str | None = None
+    managed_outcome_metadata: dict[str, Any] = field(default_factory=dict)
     candidate_id: str = ''
     origin_candidate_id: str = ''
     pending_entry_id: str | None = None
