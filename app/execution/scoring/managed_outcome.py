@@ -101,20 +101,15 @@ class FrozenManagedOutcomeModel:
 
     @classmethod
     def load(cls) -> FrozenManagedOutcomeModel:
-        path = files('app.execution.scoring').joinpath(
-            'models/managed_outcome_v1.json'
+        model_root = files('app.execution.scoring').joinpath(
+            'models/managed_outcome_v1'
         )
-        raw = path.read_bytes()
-        wrapper = json.loads(raw)
-        value = (
-            json.loads(gzip.decompress(base64.b64decode(wrapper['payload'])))
-            if wrapper.get('encoding') == 'gzip+base64'
-            else wrapper
-        )
-        version = str(value['version'])
-        feature_contract = str(value['feature_contract_version'])
-        training_assets = tuple(value['training_asset_classes'])
-        supported = tuple(value['supported_segments'])
+        manifest_raw = model_root.joinpath('manifest.json').read_bytes()
+        manifest = json.loads(manifest_raw)
+        version = str(manifest['version'])
+        feature_contract = str(manifest['feature_contract_version'])
+        training_assets = tuple(manifest['training_asset_classes'])
+        supported = tuple(manifest['supported_segments'])
         if version != MANAGED_OUTCOME_MODEL_VERSION:
             raise RuntimeError('Managed outcome model version mismatch.')
         if feature_contract != MANAGED_OUTCOME_FEATURE_CONTRACT_VERSION:
@@ -123,18 +118,37 @@ class FrozenManagedOutcomeModel:
             raise RuntimeError('Managed outcome training domain mismatch.')
         if supported != SUPPORTED_MANAGED_SEGMENTS:
             raise RuntimeError('Managed outcome segment contract mismatch.')
-        segments = {
-            name: ManagedSegmentModel.from_dict(name, value['segments'][name])
-            for name in supported
-        }
+        segment_files = manifest.get('segment_files')
+        if not isinstance(segment_files, Mapping):
+            raise RuntimeError('Managed outcome segment file map is missing.')
+        if set(segment_files) != set(supported):
+            raise RuntimeError('Managed outcome segment file map is incomplete.')
+
+        digest = sha256()
+        digest.update(manifest_raw)
+        segments: dict[str, ManagedSegmentModel] = {}
+        for name in supported:
+            segment_raw = model_root.joinpath(
+                str(segment_files[name])
+            ).read_bytes()
+            digest.update(segment_raw)
+            wrapper = json.loads(segment_raw)
+            value = (
+                json.loads(
+                    gzip.decompress(base64.b64decode(wrapper['payload']))
+                )
+                if wrapper.get('encoding') == 'gzip+base64'
+                else wrapper
+            )
+            segments[name] = ManagedSegmentModel.from_dict(name, value)
         return cls(
             version=version,
             feature_contract_version=feature_contract,
             training_asset_classes=training_assets,
             supported_segments=supported,
             segments=segments,
-            provenance=value['provenance'],
-            artifact_sha256=sha256(raw).hexdigest(),
+            provenance=manifest['provenance'],
+            artifact_sha256=digest.hexdigest(),
         )
 
     def segment_for(self, asset_class: str, side: str) -> ManagedSegmentModel:
