@@ -1,8 +1,5 @@
 import pytest
 
-from app.execution.scoring.outcome_probability_model_contract import (
-    MINIMUM_DIRECTION_EDGE,
-)
 from app.instruments.models import AssetClass
 from app.strategies.balanced_strategy_config import BalancedStrategyConfig
 
@@ -19,18 +16,10 @@ def test_strategy_profile_resolves_asset_specific_selection_configs():
         AssetClass.EQUITY_EU
     )
 
-    assert (crypto.top_n, crypto.minimum_direction_edge) == (
-        2,
-        MINIMUM_DIRECTION_EDGE,
-    )
-    assert (us.top_n, us.minimum_direction_edge) == (
-        1,
-        MINIMUM_DIRECTION_EDGE,
-    )
-    assert (eu.top_n, eu.minimum_direction_edge) == (
-        1,
-        MINIMUM_DIRECTION_EDGE,
-    )
+    assert crypto.top_n == 2
+    assert us.top_n == 1
+    assert eu.top_n == 1
+    assert not hasattr(us, 'minimum_direction_edge')
     assert not hasattr(us, 'minimum_tp_probability')
     assert not hasattr(us, 'maximum_touch_probability')
 
