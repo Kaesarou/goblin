@@ -7,6 +7,7 @@ import requests
 
 from app.brokers.base import (
     BrokerClient,
+    BrokerCloseExecution,
     ClosePositionRejectedError,
     ClosePositionSubmission,
     ClosePositionSubmissionUnknownError,
@@ -15,8 +16,12 @@ from app.brokers.base import (
 from app.brokers.etoro.account_equity_mapper import extract_account_equity
 from app.brokers.etoro.attempt_delay import delay_seconds_for_attempt
 from app.brokers.etoro.broker_environment import broker_environment_from_name
+from app.brokers.etoro.close_order_details_parser import (
+    extract_close_execution,
+)
 from app.brokers.etoro.close_order_payload_builder import build_close_order_payload
 from app.brokers.etoro.endpoint_paths import (
+    close_order_lookup_path,
     close_position_path,
     demo_portfolio_path,
     instrument_search_path,
@@ -249,6 +254,20 @@ class EtoroClient(BrokerClient):
         return self._get(
             self._order_lookup_path(),
             params={'orderId': order_id},
+        )
+
+    def get_close_execution(
+        self,
+        close_order_id: str,
+        position_id: str,
+    ) -> BrokerCloseExecution | None:
+        payload = self._get(
+            close_order_lookup_path(self.env, close_order_id),
+        )
+        return extract_close_execution(
+            payload,
+            close_order_id=close_order_id,
+            position_id=position_id,
         )
 
     def get_portfolio(self) -> dict:

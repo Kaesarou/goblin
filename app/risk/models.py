@@ -15,10 +15,11 @@ class TradePlan:
     expected_net_profit_percent: float | None = None
     required_min_expected_net_profit_amount: float | None = None
     min_expected_net_profit_percent: float | None = None
-    estimated_fees: float | None = None
     estimated_open_fee: float | None = None
     estimated_close_fee: float | None = None
     estimated_fixed_fees: float | None = None
+    estimated_explicit_cost: float | None = None
+    estimated_explicit_cost_percent: float | None = None
     estimated_spread_cost: float | None = None
     estimated_total_cost: float | None = None
     estimated_total_cost_percent: float | None = None

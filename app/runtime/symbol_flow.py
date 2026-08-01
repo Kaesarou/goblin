@@ -1,12 +1,8 @@
 import logging
 
-from app.brokers.base import BrokerClient
 from app.execution.candidate_ranking import build_trade_candidate
-from app.execution.position_tracker import PositionTracker
 from app.execution.trade_candidate import TradeCandidate
-from app.execution.trade_executor import TradeExecutor
 from app.journal.jsonl_journal import JsonlJournal
-from app.market.candle_builder import CandleBuilder
 from app.market.market_context import CandidateMarketContext, MarketContextService
 from app.market.models import Candle, MarketSnapshot
 from app.market.multi_timeframe import (
@@ -16,118 +12,15 @@ from app.market.multi_timeframe import (
 )
 from app.market.session_rules import TradingSessionDecision
 from app.market.timeframes import BASE_TIMEFRAME, BarCompleteness
-from app.persistence.position_store import PositionStore
-from app.persistence.trade_cooldown_store import TradeCooldownStore
 from app.risk.models import TradePlan
 from app.risk.risk_manager import RiskManager
 from app.risk.trade_cooldown_guard import TradeCooldownGuard
 from app.runtime.entry_horizon import evaluate_entry_horizon
 from app.runtime.pending_entry import PendingEntryManager
-from app.runtime.pending_entry_flow import advance_pending_entry, write_pending_events
-from app.runtime.position_lifecycle import (
-    BrokerAuthorizationErrorChecker,
-    close_positions_triggered_by_snapshot,
-)
-from app.runtime.session_position_lifecycle import close_positions_before_session_end
+from app.runtime.pending_entry_flow import advance_pending_entry
 from app.strategies.strategy import TrendStrategy
 
-
 logger = logging.getLogger(__name__)
-
-
-def process_symbol(
-    symbol: str,
-    broker: BrokerClient,
-    strategy: TrendStrategy,
-    risk_manager: RiskManager,
-    executor: TradeExecutor,
-    position_tracker: PositionTracker,
-    candle_builder: CandleBuilder,
-    trade_journal: JsonlJournal,
-    market_journal: JsonlJournal,
-    candle_journal: JsonlJournal,
-    is_broker_authorization_error: BrokerAuthorizationErrorChecker,
-    position_store: PositionStore | None = None,
-    cooldown_store: TradeCooldownStore | None = None,
-    snapshot: MarketSnapshot | None = None,
-    session_decision: TradingSessionDecision | None = None,
-    loop_id: int | None = None,
-    pending_entry_manager: PendingEntryManager | None = None,
-    cooldown_guard: TradeCooldownGuard | None = None,
-    market_context_service: MarketContextService | None = None,
-    multi_timeframe_service: MultiTimeframeService | None = None,
-    run_id: str = '',
-) -> TradeCandidate | None:
-    snapshot = snapshot or broker.get_market_snapshot(symbol)
-    market_journal.write(
-        'market_snapshot',
-        {'symbol': symbol, 'snapshot': snapshot, 'loop_id': loop_id},
-    )
-    strategy.on_snapshot(snapshot)
-
-    close_positions_triggered_by_snapshot(
-        symbol=symbol,
-        snapshot=snapshot,
-        executor=executor,
-        position_tracker=position_tracker,
-        risk_manager=risk_manager,
-        trade_journal=trade_journal,
-        position_store=position_store,
-        cooldown_store=cooldown_store,
-        is_broker_authorization_error=is_broker_authorization_error,
-    )
-    if pending_entry_manager is not None and cooldown_store is not None:
-        latest_stop_loss = cooldown_store.find_latest_stop_loss(symbol=symbol)
-        if latest_stop_loss is not None:
-            config = risk_manager.risk_profile_for(symbol).trade_cooldown
-            if (
-                latest_stop_loss.symbol_lock_remaining_seconds(
-                    config=config,
-                    now=snapshot.timestamp,
-                )
-                > 0
-            ):
-                write_pending_events(
-                    trade_journal,
-                    pending_entry_manager.invalidate_symbol(
-                        symbol,
-                        'stop_loss_symbol_lock_registered',
-                    ),
-                )
-
-    if session_decision is not None:
-        close_positions_before_session_end(
-            symbol=symbol,
-            snapshot=snapshot,
-            session_decision=session_decision,
-            executor=executor,
-            position_tracker=position_tracker,
-            risk_manager=risk_manager,
-            trade_journal=trade_journal,
-            position_store=position_store,
-            cooldown_store=cooldown_store,
-            is_broker_authorization_error=is_broker_authorization_error,
-        )
-
-    closed_candle = candle_builder.on_snapshot(snapshot)
-    if closed_candle is None:
-        return None
-    return process_closed_candle(
-        symbol=symbol,
-        snapshot=snapshot,
-        closed_candle=closed_candle,
-        strategy=strategy,
-        risk_manager=risk_manager,
-        trade_journal=trade_journal,
-        candle_journal=candle_journal,
-        session_decision=session_decision,
-        loop_id=loop_id,
-        pending_entry_manager=pending_entry_manager,
-        cooldown_guard=cooldown_guard,
-        market_context_service=market_context_service,
-        multi_timeframe_service=multi_timeframe_service,
-        run_id=run_id,
-    )
 
 
 def process_closed_candle(

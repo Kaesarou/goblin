@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+from app.execution.position_close_reason import PositionCloseReason
+from app.execution.position_models import ExitPriceSource
 from app.execution.entry_decision import EntryAction
 from app.journal.daily_summary import DailySummaryAggregator
 from app.market.timeframes import (
@@ -68,7 +70,7 @@ def test_summary_separates_entry_route_selection_and_risk():
     )
 
     data = summary.to_dict()
-    assert data['schema_version'] == 9
+    assert data['schema_version'] == 10
     assert data['entry_routing']['ready_for_selection'] == 1
     assert data['entry_routing']['wait_for_retest'] == 1
     assert data['decision_pipeline']['unique_candidates'] == 2
@@ -185,14 +187,20 @@ def test_summary_tracks_orders_and_pnl_from_pending():
         },
     )
     summary.record(
-        'position_closed',
+        'position_close_confirmed',
         {
             'closed_position': SimpleNamespace(
                 position_id='position-1',
+                symbol='AMAT',
+                side='BUY',
                 amount=1_000.0,
                 gross_pnl=12.0,
-                estimated_total_cost=3.5,
-                net_pnl_estimated=8.5,
+                explicit_costs_deducted=3.5,
+                net_pnl=8.5,
+                close_reason=PositionCloseReason.PROTECTED_BREAKEVEN,
+                exit_price_source=ExitPriceSource.EXECUTABLE_ESTIMATE,
+                mfe_percent=0.7,
+                mae_percent=0.2,
             )
         },
     )
@@ -200,12 +208,31 @@ def test_summary_tracks_orders_and_pnl_from_pending():
     data = summary.to_dict()
     assert data['orders']['from_pending'] == 1
     assert data['pnl']['from_pending'] == 8.5
+    assert data['pnl']['gross_total'] == 12.0
+    assert data['pnl']['explicit_costs_deducted'] == 3.5
+    assert data['pnl']['net_total'] == 8.5
+    assert data['pnl']['by_exit_price_source'] == {
+        'executable_estimate': {
+            'count': 1,
+            'gross': 12.0,
+            'explicit_costs': 3.5,
+            'net': 8.5,
+        }
+    }
+    assert data['pnl']['by_close_reason'] == {
+        'protected_breakeven': {
+            'count': 1,
+            'gross': 12.0,
+            'explicit_costs': 3.5,
+            'net': 8.5,
+        }
+    }
 
 
 def test_summary_does_not_fake_net_pnl_when_costs_are_unavailable():
     summary = DailySummaryAggregator(journal_detail_level='normal')
     summary.record(
-        'position_closed',
+        'position_close_confirmed',
         {
             'closed_position': SimpleNamespace(
                 amount=1_000.0,
@@ -214,6 +241,9 @@ def test_summary_does_not_fake_net_pnl_when_costs_are_unavailable():
         },
     )
     pnl = summary.to_dict()['pnl']
-    assert pnl['estimated_costs'] is None
-    assert pnl['net_estimated'] is None
-    assert pnl['net_estimated_available'] is False
+    assert pnl['gross_total'] == 12.0
+    assert pnl['explicit_costs_deducted'] == 0.0
+    assert pnl['net_total'] is None
+    assert pnl['economics_complete'] is False
+    assert 'estimated_costs' not in pnl
+    assert 'net_estimated' not in pnl

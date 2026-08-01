@@ -1,212 +1,365 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
-from app.execution.position_tracker import (
+import pytest
+
+from app.brokers.base import BrokerCloseExecution
+from app.execution.managed_stop import ManagedProtectionType
+from app.execution.position_close_reason import PositionCloseReason
+from app.execution.position_models import (
+    EntryPriceSource,
+    ExitPriceSource,
     PositionCloseSignal,
-    PositionTracker,
     TrackedPosition,
 )
+from app.execution.position_tracker import PositionTracker
 from app.market.models import MarketSnapshot
 from app.risk.models import TradePlan
 
 
-OPENED_AT = datetime(2026, 6, 25, 12, 0, tzinfo=timezone.utc)
-
-
-def buy_plan() -> TradePlan:
-    return TradePlan(
-        approved=True,
-        reason='test_buy',
-        symbol='BTC',
-        side='BUY',
-        amount=10.0,
-        stop_loss=95.0,
-        take_profit=110.0,
-    )
-
-
-def managed_buy_plan() -> TradePlan:
-    return TradePlan(
-        approved=True,
-        reason='test_buy',
-        symbol='BTC',
-        side='BUY',
-        amount=10.0,
-        stop_loss=95.0,
-        take_profit=120.0,
-        breakeven_stop_enabled=True,
-        breakeven_trigger_percent=2.0,
-        breakeven_buffer_percent=0.1,
-        trailing_stop_enabled=True,
-        trailing_stop_trigger_percent=4.0,
-        trailing_stop_distance_percent=1.0,
-        trailing_stop_net_buffer_percent=0.1,
-        estimated_total_cost_percent=0.0,
-    )
-
-
-def net_aware_buy_plan() -> TradePlan:
-    return TradePlan(
-        approved=True,
-        reason='test_buy',
-        symbol='BTC',
-        side='BUY',
-        amount=10.0,
-        stop_loss=98.0,
-        take_profit=103.0,
-        breakeven_stop_enabled=True,
-        breakeven_trigger_percent=0.9,
-        breakeven_buffer_percent=0.05,
-        trailing_stop_enabled=True,
-        trailing_stop_trigger_percent=1.0,
-        trailing_stop_distance_percent=0.8,
-        trailing_stop_net_buffer_percent=0.1,
-        estimated_total_cost_percent=0.35,
-    )
-
-
-def net_aware_sell_plan() -> TradePlan:
-    return TradePlan(
-        approved=True,
-        reason='test_sell',
-        symbol='BTC',
-        side='SELL',
-        amount=10.0,
-        stop_loss=102.0,
-        take_profit=97.0,
-        breakeven_stop_enabled=True,
-        breakeven_trigger_percent=0.9,
-        breakeven_buffer_percent=0.05,
-        trailing_stop_enabled=True,
-        trailing_stop_trigger_percent=1.0,
-        trailing_stop_distance_percent=0.8,
-        trailing_stop_net_buffer_percent=0.1,
-        estimated_total_cost_percent=0.35,
-    )
+OPENED_AT = datetime(2026, 7, 31, 15, 0, tzinfo=UTC)
 
 
 def snapshot(
-    symbol: str = 'BTC',
-    last: float = 100.0,
-    timestamp: datetime | None = None,
+    *,
+    bid: float,
+    ask: float,
+    last: float | None = None,
+    at: datetime = OPENED_AT,
 ) -> MarketSnapshot:
     return MarketSnapshot(
-        symbol=symbol,
-        bid=last - 0.5,
-        ask=last + 0.5,
-        last=last,
-        timestamp=timestamp or OPENED_AT,
+        symbol='AMD',
+        bid=bid,
+        ask=ask,
+        last=bid if last is None else last,
+        timestamp=at,
     )
 
 
-def test_position_tracker_keeps_positions_inside_range_and_ignores_other_symbols():
-    tracker = PositionTracker()
-    tracker.record_open_position('paper-1', buy_plan(), 100.0)
-    assert tracker.evaluate_snapshot(snapshot(last=100.0)) == []
-    assert tracker.evaluate_snapshot(snapshot(symbol='ETH', last=94.5)) == []
+def plan(
+    side: str,
+    *,
+    stop_loss: float | None = None,
+    take_profit: float | None = None,
+    explicit_cost: float = 0.0,
+    explicit_cost_percent: float = 0.0,
+    breakeven_trigger: float = 0.0,
+    trailing_trigger: float = 0.0,
+    stale: bool = False,
+) -> TradePlan:
+    return TradePlan(
+        approved=True,
+        reason='test',
+        symbol='AMD',
+        side=side,
+        amount=1_000.0,
+        stop_loss=(
+            stop_loss
+            if stop_loss is not None
+            else (99.0 if side == 'BUY' else 101.0)
+        ),
+        take_profit=(
+            take_profit
+            if take_profit is not None
+            else (102.0 if side == 'BUY' else 98.0)
+        ),
+        estimated_explicit_cost=explicit_cost,
+        estimated_explicit_cost_percent=explicit_cost_percent,
+        estimated_spread_cost=2.0,
+        estimated_total_cost=2.0 + explicit_cost,
+        estimated_total_cost_percent=0.2 + explicit_cost_percent,
+        breakeven_stop_enabled=breakeven_trigger > 0,
+        breakeven_trigger_percent=breakeven_trigger,
+        breakeven_buffer_percent=0.05,
+        trailing_stop_enabled=trailing_trigger > 0,
+        trailing_stop_trigger_percent=trailing_trigger,
+        trailing_stop_distance_percent=0.4,
+        trailing_stop_net_buffer_percent=0.05,
+        stale_position_enabled=stale,
+        stale_position_max_age_minutes=60,
+        stale_position_min_favorable_move_percent=0.5,
+        stale_position_buffer_percent=0.1,
+    )
 
 
-def test_position_tracker_closes_buy_at_stop_or_take_profit():
-    stop_tracker = PositionTracker()
-    stop_tracker.record_open_position('stop', buy_plan(), 100.0)
-    stop = stop_tracker.evaluate_snapshot(snapshot(last=94.5))[0]
-    assert stop.reason == 'stop_loss_hit'
-
-    tp_tracker = PositionTracker()
-    tp_tracker.record_open_position('tp', buy_plan(), 100.0)
-    take_profit = tp_tracker.evaluate_snapshot(snapshot(last=110.5))[0]
-    assert take_profit.reason == 'take_profit_hit'
-
-
-def test_position_tracker_moves_buy_stop_to_net_breakeven_and_exposes_update():
-    tracker = PositionTracker()
-    tracker.record_open_position('paper-1', managed_buy_plan(), 100.0)
-    assert tracker.evaluate_snapshot(snapshot(last=102.5)) == []
-    position = tracker.open_positions_snapshot()[0]
-    assert position.stop_loss == 100.1
-    assert position.managed_stop_protection_type == 'net_breakeven'
-    updates = tracker.consume_managed_stop_updates()
-    assert len(updates) == 1
-    assert updates[0].previous_position.stop_loss == 95.0
-    assert updates[0].position.stop_loss == 100.1
-    assert tracker.consume_managed_stop_updates() == ()
-
-    close = tracker.evaluate_snapshot(snapshot(last=100.05))[0]
-    assert close.reason == 'net_breakeven_stop_hit'
-    assert close.metadata['managed_stop_protection_type'] == 'net_breakeven'
-
-
-def test_position_tracker_trails_buy_and_sell_stops_after_net_trigger():
-    buy_tracker = PositionTracker()
-    buy_tracker.record_open_position('buy', managed_buy_plan(), 100.0)
-    assert buy_tracker.evaluate_snapshot(snapshot(last=105.0)) == []
-    buy = buy_tracker.open_positions_snapshot()[0]
-    assert buy.stop_loss == 103.95
-    assert buy.managed_stop_protection_type == 'trailing'
-    assert buy_tracker.evaluate_snapshot(snapshot(last=103.90))[0].reason == 'trailing_stop_hit'
-
-    sell_tracker = PositionTracker()
-    sell_tracker.record_open_position('sell', net_aware_sell_plan(), 100.0)
-    assert sell_tracker.evaluate_snapshot(snapshot(last=98.0)) == []
-    sell = sell_tracker.open_positions_snapshot()[0]
-    assert sell.stop_loss == 98.784
-    assert sell.managed_stop_protection_type == 'trailing'
-    assert sell_tracker.evaluate_snapshot(snapshot(last=98.9))[0].reason == 'trailing_stop_hit'
-
-
-def test_non_protective_trailing_keeps_net_breakeven():
-    tracker = PositionTracker()
-    tracker.record_open_position('paper-1', net_aware_buy_plan(), 100.0)
-    assert tracker.evaluate_snapshot(snapshot(last=101.0)) == []
-    position = tracker.open_positions_snapshot()[0]
-    assert position.stop_loss == 100.4
-    assert position.managed_stop_protection_type == 'net_breakeven'
-
-
-def test_restore_preserves_managed_stop_state():
-    tracker = PositionTracker()
-    persisted = TrackedPosition(
-        position_id='paper-1',
-        symbol='BTC',
-        side='BUY',
-        amount=10.0,
-        entry_price=100.0,
-        stop_loss=100.4,
-        take_profit=110.0,
+def open_position(
+    tracker: PositionTracker,
+    side: str,
+    *,
+    position_id: str = 'position-1',
+    broker_fill: float | None = 100.0,
+    executable_estimate: float | None = None,
+    trade_plan: TradePlan | None = None,
+) -> TrackedPosition:
+    estimate = (
+        executable_estimate
+        if executable_estimate is not None
+        else (100.1 if side == 'BUY' else 99.9)
+    )
+    return tracker.record_open_position(
+        position_id=position_id,
+        trade_plan=trade_plan or plan(side),
+        signal_price=100.0,
+        executable_entry_estimate=estimate,
+        broker_entry_fill_price=broker_fill,
         opened_at=OPENED_AT,
-        trailing_stop_net_buffer_percent=0.2,
-        managed_stop_protection_type='net_breakeven',
     )
-    tracker.restore_open_position(persisted)
-    restored = tracker.open_positions_snapshot()[0]
-    assert restored.initial_stop_loss == 100.4
-    assert restored.highest_price == 100.0
-    assert restored.lowest_price == 100.0
-    assert restored.managed_stop_protection_type == 'net_breakeven'
 
 
-def test_closed_position_pnl_and_unknown_close_behavior():
+@pytest.mark.parametrize(
+    ('side', 'before', 'hit', 'reason'),
+    [
+        ('BUY', (101.99, 102.20), (102.0, 102.20), PositionCloseReason.TAKE_PROFIT),
+        ('SELL', (97.80, 98.01), (97.80, 98.0), PositionCloseReason.TAKE_PROFIT),
+        ('BUY', (99.01, 99.20), (99.0, 99.20), PositionCloseReason.INITIAL_STOP),
+        ('SELL', (100.80, 100.99), (100.80, 101.0), PositionCloseReason.INITIAL_STOP),
+    ],
+)
+def test_tp_and_initial_stop_use_executable_side(
+    side: str,
+    before: tuple[float, float],
+    hit: tuple[float, float],
+    reason: PositionCloseReason,
+):
     tracker = PositionTracker()
-    tracker.record_open_position('paper-1', buy_plan(), 100.0, opened_at=OPENED_AT)
-    signal = PositionCloseSignal(
-        position_id='paper-1',
-        symbol='BTC',
-        side='BUY',
-        exit_price=110.0,
-        reason='take_profit_hit',
-        detected_at=OPENED_AT + timedelta(minutes=5),
-    )
-    closed = tracker.record_closed_position(signal)
-    assert closed.gross_pnl_percent == 10.0
-    assert closed.gross_pnl == 1.0
-    assert closed.duration_seconds == 300.0
-    assert not tracker.has_open_positions()
+    open_position(tracker, side)
 
-    missing = PositionCloseSignal(
-        position_id='missing',
-        symbol='BTC',
-        side='BUY',
-        exit_price=100.0,
-        reason='stop_loss_hit',
-        detected_at=OPENED_AT,
+    assert tracker.evaluate_snapshot(snapshot(bid=before[0], ask=before[1])) == []
+    signal = tracker.evaluate_snapshot(snapshot(bid=hit[0], ask=hit[1]))[0]
+
+    assert signal.reason is reason
+    assert signal.executable_estimate == (hit[0] if side == 'BUY' else hit[1])
+
+
+def test_buy_ignores_last_and_ask_until_bid_reaches_tp():
+    tracker = PositionTracker()
+    open_position(tracker, 'BUY')
+
+    assert tracker.evaluate_snapshot(
+        snapshot(bid=101.8, ask=102.2, last=102.1)
+    ) == []
+
+
+def test_sell_ignores_last_and_bid_until_ask_reaches_tp():
+    tracker = PositionTracker()
+    open_position(tracker, 'SELL')
+
+    assert tracker.evaluate_snapshot(
+        snapshot(bid=97.7, ask=98.2, last=97.7)
+    ) == []
+
+
+@pytest.mark.parametrize('side', ['BUY', 'SELL'])
+def test_breakeven_activation_and_trigger_are_side_aware(side: str):
+    tracker = PositionTracker()
+    open_position(
+        tracker,
+        side,
+        trade_plan=plan(
+            side,
+            explicit_cost_percent=0.10,
+            breakeven_trigger=0.55,
+        ),
     )
-    assert tracker.record_closed_position(missing) is None
+    activating = (
+        snapshot(bid=100.56, ask=100.76)
+        if side == 'BUY'
+        else snapshot(bid=99.24, ask=99.44)
+    )
+
+    assert tracker.evaluate_snapshot(activating) == []
+    position = tracker.open_positions_snapshot()[0]
+    assert position.managed_stop_protection_type is ManagedProtectionType.BREAKEVEN
+    assert position.stop_loss == pytest.approx(100.15 if side == 'BUY' else 99.85)
+
+    trigger = (
+        snapshot(bid=100.15, ask=100.35)
+        if side == 'BUY'
+        else snapshot(bid=99.65, ask=99.85)
+    )
+    signal = tracker.evaluate_snapshot(trigger)[0]
+    assert signal.reason is PositionCloseReason.PROTECTED_BREAKEVEN
+
+
+@pytest.mark.parametrize('side', ['BUY', 'SELL'])
+def test_trailing_activation_move_and_trigger_are_side_aware(side: str):
+    tracker = PositionTracker()
+    open_position(
+        tracker,
+        side,
+        trade_plan=plan(side, trailing_trigger=1.0),
+    )
+    first = (
+        snapshot(bid=101.2, ask=101.4)
+        if side == 'BUY'
+        else snapshot(bid=98.6, ask=98.8)
+    )
+    tracker.evaluate_snapshot(first)
+    first_stop = tracker.open_positions_snapshot()[0].stop_loss
+    assert first_stop == pytest.approx(100.7952 if side == 'BUY' else 99.1952)
+
+    farther = (
+        snapshot(bid=101.5, ask=101.7)
+        if side == 'BUY'
+        else snapshot(bid=98.3, ask=98.5)
+    )
+    tracker.evaluate_snapshot(farther)
+    position = tracker.open_positions_snapshot()[0]
+    assert position.managed_stop_protection_type is ManagedProtectionType.TRAILING
+    assert position.stop_loss != first_stop
+
+    trigger = (
+        snapshot(bid=position.stop_loss, ask=position.stop_loss + 0.2)
+        if side == 'BUY'
+        else snapshot(bid=position.stop_loss - 0.2, ask=position.stop_loss)
+    )
+    assert tracker.evaluate_snapshot(trigger)[0].reason is (
+        PositionCloseReason.PROTECTED_TRAILING
+    )
+
+
+def test_stale_and_force_close_use_executable_price_and_canonical_taxonomy():
+    stale_tracker = PositionTracker()
+    open_position(stale_tracker, 'SELL', trade_plan=plan('SELL', stale=True))
+    stale = stale_tracker.evaluate_snapshot(
+        snapshot(
+            bid=99.2,
+            ask=99.8,
+            at=OPENED_AT + timedelta(minutes=61),
+        )
+    )[0]
+    assert stale.reason is PositionCloseReason.STALE_EXIT
+    assert stale.executable_estimate == 99.8
+
+    force_tracker = PositionTracker()
+    open_position(force_tracker, 'SELL')
+    forced = force_tracker.evaluate_snapshot(
+        snapshot(bid=99.0, ask=99.4),
+        force_close=True,
+    )[0]
+    assert forced.reason is PositionCloseReason.SESSION_FORCE_CLOSE
+    assert forced.executable_estimate == 99.4
+
+
+def test_mfe_and_mae_are_calculated_from_executable_prices():
+    tracker = PositionTracker()
+    open_position(
+        tracker,
+        'SELL',
+        trade_plan=plan('SELL', stop_loss=105.0, take_profit=95.0),
+    )
+    tracker.evaluate_snapshot(snapshot(bid=98.0, ask=98.5, last=98.0))
+    tracker.evaluate_snapshot(snapshot(bid=100.5, ask=101.0, last=100.5))
+    signal = PositionCloseSignal(
+        position_id='position-1',
+        symbol='AMD',
+        side='SELL',
+        reason=PositionCloseReason.MANUAL_OR_BROKER_CLOSE,
+        detected_at=OPENED_AT + timedelta(minutes=2),
+        last_execution_price=100.5,
+        executable_estimate=101.0,
+        bid_at_detection=100.5,
+        ask_at_detection=101.0,
+        observed_spread_percent=0.5,
+    )
+
+    closed = tracker.record_closed_position(signal)
+
+    assert closed is not None
+    assert closed.mfe_percent == pytest.approx(1.5)
+    assert closed.mae_percent == pytest.approx(1.0)
+
+
+def test_executable_prices_capture_spread_without_second_deduction():
+    tracker = PositionTracker()
+    open_position(
+        tracker,
+        'BUY',
+        broker_fill=None,
+        executable_estimate=100.1,
+        trade_plan=plan(
+            'BUY',
+            explicit_cost=1.0,
+            explicit_cost_percent=0.1,
+        ),
+    )
+    signal = PositionCloseSignal(
+        position_id='position-1',
+        symbol='AMD',
+        side='BUY',
+        reason=PositionCloseReason.MANUAL_OR_BROKER_CLOSE,
+        detected_at=OPENED_AT + timedelta(minutes=5),
+        last_execution_price=100.9,
+        executable_estimate=100.9,
+        bid_at_detection=100.9,
+        ask_at_detection=101.1,
+        observed_spread_percent=0.198,
+    )
+
+    closed = tracker.record_closed_position(signal)
+
+    assert closed is not None
+    assert closed.entry_price_source is EntryPriceSource.EXECUTABLE_ESTIMATE
+    assert closed.exit_price_source is ExitPriceSource.EXECUTABLE_ESTIMATE
+    assert closed.pretrade_estimated_spread_cost == 2.0
+    assert closed.explicit_costs_deducted == 1.0
+    assert closed.net_pnl == pytest.approx(closed.gross_pnl - 1.0)
+
+
+def test_broker_close_fill_has_priority_over_detection_estimate():
+    tracker = PositionTracker()
+    open_position(tracker, 'BUY', broker_fill=100.0)
+    signal = PositionCloseSignal(
+        position_id='position-1',
+        symbol='AMD',
+        side='BUY',
+        reason=PositionCloseReason.TAKE_PROFIT,
+        detected_at=OPENED_AT + timedelta(minutes=5),
+        last_execution_price=102.0,
+        executable_estimate=101.9,
+        bid_at_detection=101.9,
+        ask_at_detection=102.1,
+        observed_spread_percent=0.196,
+    )
+    execution = BrokerCloseExecution(
+        position_id='position-1',
+        close_order_id='close-1',
+        executed_exit_price=101.7,
+        executed_at=OPENED_AT + timedelta(minutes=5, seconds=1),
+        units=10.0,
+        conversion_rate=1.0,
+        amount=1_017.0,
+        broker_response={'positions': []},
+    )
+
+    closed = tracker.record_closed_position(signal, broker_execution=execution)
+
+    assert closed is not None
+    assert closed.broker_exit_fill_price == 101.7
+    assert closed.pnl_exit_price == 101.7
+    assert closed.exit_price_source is ExitPriceSource.BROKER_FILL
+    assert closed.executable_exit_estimate == 101.9
+
+
+def test_restore_preserves_explicit_price_provenance():
+    tracker = PositionTracker()
+    position = TrackedPosition(
+        position_id='position-1',
+        symbol='AMD',
+        side='BUY',
+        amount=1_000.0,
+        signal_price=100.0,
+        executable_entry_estimate=100.1,
+        broker_entry_fill_price=None,
+        pnl_entry_price=100.1,
+        entry_price_source=EntryPriceSource.EXECUTABLE_ESTIMATE,
+        stop_loss=99.0,
+        take_profit=102.0,
+        opened_at=OPENED_AT,
+    )
+
+    tracker.restore_open_position(position)
+    restored = tracker.open_positions_snapshot()[0]
+
+    assert restored.highest_executable_price == 100.1
+    assert restored.highest_last_execution_price == 100.0
+    assert restored.broker_entry_fill_price is None

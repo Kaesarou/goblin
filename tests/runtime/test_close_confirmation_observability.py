@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
-from app.execution.position_tracker import PositionCloseSignal
+from app.execution.position_close_reason import PositionCloseReason
+from app.execution.position_models import PositionCloseSignal
 from app.runtime.async_broker_operations import AsyncBrokerOperationsCoordinator
 from app.runtime.pending_close import CloseState, PendingClose
 from app.runtime.resilient_broker_operations import (
@@ -19,9 +20,13 @@ def pending_close(*, confirmation_checks: int = 0) -> PendingClose:
             position_id='position-1',
             symbol='AIR.PA',
             side='BUY',
-            exit_price=99.0,
-            reason='stop_loss',
+            reason=PositionCloseReason.INITIAL_STOP,
             detected_at=NOW,
+            last_execution_price=99.0,
+            executable_estimate=98.9,
+            bid_at_detection=98.9,
+            ask_at_detection=99.1,
+            observed_spread_percent=0.2,
         ),
         source='websocket_position_guard',
         state=CloseState.PENDING_CONFIRMATION,
@@ -41,10 +46,12 @@ def test_confirming_absence_is_counted_as_a_confirmation_check(monkeypatch):
         *,
         closed_at,
         source,
+        broker_execution=None,
     ):
         captured['pending'] = pending
         captured['closed_at'] = closed_at
         captured['source'] = source
+        captured['broker_execution'] = broker_execution
 
     monkeypatch.setattr(
         AsyncBrokerOperationsCoordinator,

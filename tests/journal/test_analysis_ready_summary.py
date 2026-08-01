@@ -17,7 +17,7 @@ def test_analysis_ready_summary_distinguishes_context_and_trading_snapshots():
     summary.record('market_snapshot', {'symbol': 'MSFT'})
 
     data = summary.to_dict()
-    assert data['schema_version'] == 12
+    assert data['schema_version'] == 13
     assert data['market_data']['accepted'] == 3
     assert data['market_data']['trading_snapshots_processed'] == 2
     assert data['market_data']['context_snapshots_accepted'] == 1

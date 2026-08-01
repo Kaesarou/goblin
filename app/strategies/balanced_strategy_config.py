@@ -1,5 +1,9 @@
 from dataclasses import dataclass, field, replace
 
+from app.execution.breakeven_profile import (
+    BreakevenProfileName,
+    resolve_breakeven_profile,
+)
 from app.execution.candidate_selector import CandidateSelectionConfig
 from app.instruments.base_configs import (
     CRYPTO_CONFIG,
@@ -10,13 +14,16 @@ from app.instruments.models import AssetClass, InstrumentConfig
 from app.risk.trade_cooldown import TradeCooldownConfig
 from app.strategies.models import StrategyProfileConfig
 
-
 BALANCED_TRADE_COOLDOWN = TradeCooldownConfig(
     after_take_profit_minutes=30,
-    after_stop_loss_minutes=45,
-    after_manual_close_minutes=15,
-    after_unknown_close_minutes=15,
-    stop_loss_symbol_lock_minutes=15,
+    after_initial_stop_minutes=45,
+    after_protected_breakeven_minutes=15,
+    after_protected_trailing_minutes=15,
+    after_stale_exit_minutes=15,
+    after_session_force_close_minutes=15,
+    after_manual_or_broker_close_minutes=15,
+    after_unknown_confirmed_close_minutes=15,
+    initial_stop_symbol_lock_minutes=15,
 )
 
 BALANCED_CRYPTO_CONFIG = replace(
@@ -60,3 +67,46 @@ class BalancedStrategyConfig(StrategyProfileConfig):
         AssetClass,
         CandidateSelectionConfig,
     ] = field(default_factory=_selection_configs)
+    breakeven_profile_name: BreakevenProfileName = (
+        BreakevenProfileName.CORRECTED_BASELINE_V1
+    )
+
+    def __post_init__(self) -> None:
+        profile = resolve_breakeven_profile(self.breakeven_profile_name)
+        object.__setattr__(
+            self,
+            'crypto',
+            self._with_breakeven_trigger(
+                self.crypto,
+                profile.trigger_percent_for(AssetClass.CRYPTO),
+            ),
+        )
+        object.__setattr__(
+            self,
+            'equity_eu',
+            self._with_breakeven_trigger(
+                self.equity_eu,
+                profile.trigger_percent_for(AssetClass.EQUITY_EU),
+            ),
+        )
+        object.__setattr__(
+            self,
+            'equity_us',
+            self._with_breakeven_trigger(
+                self.equity_us,
+                profile.trigger_percent_for(AssetClass.EQUITY_US),
+            ),
+        )
+
+    @staticmethod
+    def _with_breakeven_trigger(
+        config: InstrumentConfig,
+        trigger_percent: float,
+    ) -> InstrumentConfig:
+        return replace(
+            config,
+            risk=replace(
+                config.risk,
+                breakeven_trigger_percent=trigger_percent,
+            ),
+        )

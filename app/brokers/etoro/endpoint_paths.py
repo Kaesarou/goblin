@@ -19,6 +19,13 @@ def order_lookup_path(env: str) -> str:
     return '/api/v2/trading/info/orders:lookup'
 
 
+def close_order_lookup_path(env: str, close_order_id: str) -> str:
+    if env == 'demo':
+        return f'/api/v1/trading/info/demo/close-orders/{close_order_id}'
+
+    return f'/api/v1/trading/info/close-orders/{close_order_id}'
+
+
 def demo_portfolio_path() -> str:
     return '/api/v1/trading/info/demo/portfolio'
 

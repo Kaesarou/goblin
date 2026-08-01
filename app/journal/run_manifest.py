@@ -8,9 +8,21 @@ from pathlib import Path
 from typing import Any
 
 from app.config.settings import Settings
+from app.execution.breakeven_profile import BREAKEVEN_PROFILE_CONTRACT_VERSION
 from app.execution.entry_decision import ENTRY_DECISION_MODEL_VERSION
+from app.execution.position_close_reason import POSITION_CLOSE_TAXONOMY_VERSION
+from app.execution.position_lifecycle_engine import (
+    POSITION_LIFECYCLE_CONTRACT_VERSION,
+)
+from app.execution.position_models import POSITION_ECONOMICS_CONTRACT_VERSION
 from app.execution.scoring.frozen_logistic import (
     FrozenOutcomeProbabilityModel,
+)
+from app.execution.scoring.managed_outcome import FrozenManagedOutcomeModel
+from app.execution.scoring.managed_outcome_model_contract import (
+    MANAGED_OUTCOME_FEATURE_CONTRACT_VERSION,
+    MANAGED_OUTCOME_MODEL_VERSION,
+    MANAGED_SELECTION_POLICY_VERSION,
 )
 from app.execution.scoring.market_context_scorer import (
     MARKET_CONTEXT_SCORER_VERSION,
@@ -29,13 +41,17 @@ from app.execution.scoring.tp_feasibility import (
 from app.instruments.instrument_registry import InstrumentRegistry
 from app.journal.serialization import serialize_value
 from app.market.market_context import MARKET_CONTEXT_VERSION
+from app.market.models import EXECUTABLE_PRICE_CONTRACT_VERSION
 from app.market.timeframes import (
     BASE_TIMEFRAME,
     MULTI_TIMEFRAME_MODEL_VERSION,
     SUPPORTED_TIMEFRAMES,
 )
+from app.risk.trade_cooldown import TRADE_COOLDOWN_CONTRACT_VERSION
+from app.risk.trade_cost_model import TRADE_COST_CONTRACT_VERSION
 
 _SENSITIVE_SETTINGS = {'ETORO_API_KEY', 'ETORO_USER_KEY'}
+RUN_MANIFEST_SCHEMA_VERSION = 12
 
 
 def build_run_id(started_at: datetime | None = None) -> str:
@@ -113,6 +129,7 @@ def build_run_manifest(
     actual_manifest_path = manifest_path or settings.run_manifest_path
     actual_summary_path = summary_path or settings.daily_summary_path
     outcome_probability_model = FrozenOutcomeProbabilityModel.load()
+    managed_outcome_model = FrozenManagedOutcomeModel.load()
     direction_segments = {
         name: {
             'feature_family': segment.feature_family,
@@ -127,7 +144,7 @@ def build_run_manifest(
         in outcome_probability_model.direction_segments.items()
     }
     return {
-        'schema_version': 11,
+        'schema_version': RUN_MANIFEST_SCHEMA_VERSION,
         'run_id': run_id,
         'status': 'running',
         'started_at': started_at,
@@ -171,13 +188,57 @@ def build_run_manifest(
                 MINIMUM_DIRECTION_EDGE
             ),
             'outcome_probability_direction_segments': direction_segments,
+            'managed_outcome': MANAGED_OUTCOME_MODEL_VERSION,
+            'managed_outcome_features': (
+                MANAGED_OUTCOME_FEATURE_CONTRACT_VERSION
+            ),
+            'managed_outcome_artifact_sha256': (
+                managed_outcome_model.artifact_sha256
+            ),
+            'managed_outcome_training_asset_classes': list(
+                managed_outcome_model.training_asset_classes
+            ),
+            'managed_outcome_supported_segments': list(
+                managed_outcome_model.supported_segments
+            ),
+            'managed_outcome_provenance': dict(
+                managed_outcome_model.provenance
+            ),
         },
         'strategy': {
             'name': 'TrendStrategy',
             'profile': strategy_profile.name,
             'profile_config': strategy_profile,
+            'selection_policy': MANAGED_SELECTION_POLICY_VERSION,
+            'breakeven_profile_contract': (
+                BREAKEVEN_PROFILE_CONTRACT_VERSION
+            ),
+            'breakeven_profile': strategy_profile.breakeven_profile_name,
+            'breakeven_trigger_percent': {
+                asset_class.value: config.risk.breakeven_trigger_percent
+                for asset_class, config
+                in strategy_profile.instrument_configs.items()
+            },
         },
         'runtime': {
+            'contracts': {
+                'executable_prices': EXECUTABLE_PRICE_CONTRACT_VERSION,
+                'position_lifecycle': POSITION_LIFECYCLE_CONTRACT_VERSION,
+                'position_economics': POSITION_ECONOMICS_CONTRACT_VERSION,
+                'trade_costs': TRADE_COST_CONTRACT_VERSION,
+                'position_close_taxonomy': (
+                    POSITION_CLOSE_TAXONOMY_VERSION
+                ),
+                'trade_cooldown': TRADE_COOLDOWN_CONTRACT_VERSION,
+            },
+            'economic_convention': {
+                'signal_and_candle_price': 'last_execution',
+                'buy_executable_exit_price': 'bid',
+                'sell_executable_exit_price': 'ask',
+                'post_trade_spread_deduction': False,
+                'post_trade_deducted_costs': 'explicit_only',
+                'broker_close_fill_priority': True,
+            },
             'watchlist': symbols,
             'context_benchmarks': benchmark_symbols,
             'symbol_profiles': symbol_profiles,
@@ -222,12 +283,19 @@ def build_run_manifest(
                 'candidate_timestamp',
                 'symbol',
                 'side',
-                'entry_reference_price',
+                'signal_price',
+                'executable_entry_estimate',
+                'broker_entry_fill_price',
+                'pnl_entry_price',
+                'bid',
+                'ask',
+                'observed_spread_percent',
                 'profile_key',
                 'sl_tp_source',
                 'effective_stop_loss_percent',
                 'effective_take_profit_percent',
                 'estimated_total_cost_percent',
+                'estimated_explicit_cost_percent',
                 'probability_score',
                 'base_score',
                 'directional_score',

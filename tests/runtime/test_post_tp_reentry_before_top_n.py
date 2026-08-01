@@ -1,10 +1,11 @@
 from datetime import datetime, timedelta, timezone
 
 from app.execution.candidate_selector import CandidateSelectionConfig, select_trade_candidates
+from app.execution.position_close_reason import PositionCloseReason
 from app.execution.trade_candidate import TradeCandidate
 from app.market.models import Candle, MarketSnapshot
 from app.persistence.trade_cooldown_store import TradeCooldownStore
-from app.risk.trade_cooldown import CloseReason, ClosedTradeMemoryEntry
+from app.risk.trade_cooldown import ClosedTradeMemoryEntry
 from app.risk.trade_cooldown_guard import TradeCooldownGuard
 from app.strategies.signals import Signal
 
@@ -36,16 +37,15 @@ def save_consumed_sell(store: TradeCooldownStore, symbol: str) -> None:
         ClosedTradeMemoryEntry(
             symbol=symbol,
             side='SELL',
-            close_reason=CloseReason.TAKE_PROFIT,
-            raw_close_reason='take_profit_hit',
+            close_reason=PositionCloseReason.TAKE_PROFIT,
             opened_at=closed_at - timedelta(minutes=5),
             closed_at=closed_at,
             cooldown_expires_at=closed_at - timedelta(minutes=5),
             position_id=f'{symbol}-1',
-            entry_price=100.0,
-            exit_price=99.0,
+            pnl_entry_price=100.0,
+            pnl_exit_price=99.0,
             take_profit=99.0,
-            lowest_price=98.8,
+            lowest_executable_price=98.8,
         )
     )
 

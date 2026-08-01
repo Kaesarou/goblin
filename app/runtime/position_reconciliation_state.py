@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from app.execution.position_tracker import TrackedPosition
+from app.execution.position_models import TrackedPosition
 
 
 @dataclass(frozen=True)

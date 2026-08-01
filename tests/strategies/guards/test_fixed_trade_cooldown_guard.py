@@ -1,7 +1,8 @@
 from datetime import datetime, timedelta, timezone
 
 from app.persistence.closed_trade_memory_store import ClosedTradeMemoryStore
-from app.risk.trade_cooldown import CloseReason, ClosedTradeMemoryEntry, TradeCooldownConfig
+from app.execution.position_close_reason import PositionCloseReason
+from app.risk.trade_cooldown import ClosedTradeMemoryEntry, TradeCooldownConfig
 from app.strategies.guards.fixed_trade_cooldown_guard import FixedTradeCooldownGuard
 
 
@@ -10,14 +11,13 @@ def save_tp(store: ClosedTradeMemoryStore) -> ClosedTradeMemoryEntry:
     entry = ClosedTradeMemoryEntry(
         symbol='AMD',
         side='SELL',
-        close_reason=CloseReason.TAKE_PROFIT,
-        raw_close_reason='take_profit_hit',
+        close_reason=PositionCloseReason.TAKE_PROFIT,
         opened_at=closed_at - timedelta(minutes=5),
         closed_at=closed_at,
         cooldown_expires_at=closed_at + timedelta(minutes=30),
         position_id='position-1',
-        entry_price=100.0,
-        exit_price=99.0,
+        pnl_entry_price=100.0,
+        pnl_exit_price=99.0,
         take_profit=99.0,
         created_at=closed_at,
     )

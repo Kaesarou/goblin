@@ -53,6 +53,7 @@ from app.runtime.pending_candidate_lifecycle import (
 )
 from app.runtime.pending_entry import PendingEntryManager
 from app.strategies.models import StrategyProfileConfig
+from app.utils.commons import spread_percent
 
 logger = logging.getLogger(__name__)
 
@@ -579,21 +580,26 @@ class AsyncCandidateExecutionCoordinator:
                 'trade_plan': plan,
             },
         )
-        planned_entry_price = candidate.snapshot.last
+        signal_price = candidate.snapshot.last
         executed_entry_price = result.executed_entry_price
-        effective_entry_price = (
+        executable_entry_estimate = candidate.snapshot.executable_entry_price(
+            candidate.signal.action
+        )
+        pnl_entry_price = (
             executed_entry_price
             if executed_entry_price is not None
-            else planned_entry_price
+            else executable_entry_estimate
         )
         adjusted_plan = self.risk_manager.adjust_trade_plan_to_entry_price(
             trade_plan=plan,
-            entry_price=effective_entry_price,
+            entry_price=pnl_entry_price,
         )
         tracked_position = self.position_tracker.record_open_position(
             position_id=result.position_id,
             trade_plan=adjusted_plan,
-            entry_price=effective_entry_price,
+            signal_price=signal_price,
+            executable_entry_estimate=executable_entry_estimate,
+            broker_entry_fill_price=executed_entry_price,
         )
         self.risk_manager.record_open_position(
             candidate.symbol,
@@ -635,17 +641,17 @@ class AsyncCandidateExecutionCoordinator:
                 'trade_plan': adjusted_plan,
                 'original_trade_plan': plan,
                 'adjusted_trade_plan': adjusted_plan,
-                'planned_entry_price': planned_entry_price,
-                'executed_entry_price': executed_entry_price,
-                'effective_entry_price': effective_entry_price,
-                'entry_price_source': (
-                    'broker_execution'
-                    if executed_entry_price is not None
-                    else 'snapshot_fallback'
-                ),
+                'signal_price': signal_price,
+                'bid_at_entry': candidate.snapshot.bid,
+                'ask_at_entry': candidate.snapshot.ask,
+                'observed_spread_percent': spread_percent(candidate.snapshot),
+                'broker_entry_fill_price': executed_entry_price,
+                'executable_entry_estimate': executable_entry_estimate,
+                'pnl_entry_price': pnl_entry_price,
+                'entry_price_source': tracked_position.entry_price_source,
                 'execution_slippage_percent': _slippage_percent(
-                    planned_entry_price=planned_entry_price,
-                    effective_entry_price=effective_entry_price,
+                    planned_entry_price=signal_price,
+                    effective_entry_price=pnl_entry_price,
                 ),
                 'instrument_profile': context.instrument_profile,
                 'risk_profile': context.risk_profile,

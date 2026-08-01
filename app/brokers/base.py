@@ -20,6 +20,18 @@ class ClosePositionSubmission:
     broker_response: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class BrokerCloseExecution:
+    position_id: str
+    close_order_id: str
+    executed_exit_price: float
+    executed_at: datetime | None
+    units: float | None
+    conversion_rate: float | None
+    amount: float | None
+    broker_response: dict[str, Any]
+
+
 class ClosePositionRejectedError(RuntimeError):
     def __init__(
         self,
@@ -93,6 +105,17 @@ class BrokerClient(ABC):
 
     @abstractmethod
     def is_position_open(self, position_id: str) -> bool:
+        raise NotImplementedError
+
+    def get_close_execution(
+        self,
+        close_order_id: str,
+        position_id: str,
+    ) -> BrokerCloseExecution | None:
+        """Return a confirmed broker close fill, or explicit absence.
+
+        Implementations must not derive a fill from close-request acceptance.
+        """
         raise NotImplementedError
 
     def remember_position_instrument(self, position_id: str, symbol: str) -> None:

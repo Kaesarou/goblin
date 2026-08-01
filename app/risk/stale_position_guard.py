@@ -3,9 +3,6 @@ from datetime import datetime
 from enum import StrEnum
 
 
-STALE_POSITION_EXIT_REASON = 'stale_position_exit'
-
-
 class StalePositionAction(StrEnum):
     CLOSE = 'CLOSE'
 
@@ -22,12 +19,11 @@ class StalePositionConfig:
 @dataclass(frozen=True)
 class StalePositionDecision:
     should_close: bool
-    reason: str | None
     action: StalePositionAction | None
     age_minutes: float
     mfe_percent: float
     required_mfe_percent: float
-    estimated_total_cost_percent: float
+    estimated_explicit_cost_percent: float
 
 
 class StalePositionGuard:
@@ -40,7 +36,7 @@ class StalePositionGuard:
         lowest_price: float | None,
         opened_at: datetime,
         now: datetime,
-        estimated_total_cost_percent: float,
+        estimated_explicit_cost_percent: float,
         config: StalePositionConfig,
     ) -> StalePositionDecision:
         age_minutes = max(0.0, (now - opened_at).total_seconds() / 60)
@@ -51,7 +47,7 @@ class StalePositionGuard:
             lowest_price=lowest_price,
         )
         required_mfe_percent = self._required_mfe_percent(
-            estimated_total_cost_percent=estimated_total_cost_percent,
+            estimated_explicit_cost_percent=estimated_explicit_cost_percent,
             config=config,
         )
 
@@ -60,7 +56,7 @@ class StalePositionGuard:
                 age_minutes=age_minutes,
                 mfe_percent=mfe_percent,
                 required_mfe_percent=required_mfe_percent,
-                estimated_total_cost_percent=estimated_total_cost_percent,
+                estimated_explicit_cost_percent=estimated_explicit_cost_percent,
             )
 
         if config.action != StalePositionAction.CLOSE:
@@ -68,7 +64,7 @@ class StalePositionGuard:
                 age_minutes=age_minutes,
                 mfe_percent=mfe_percent,
                 required_mfe_percent=required_mfe_percent,
-                estimated_total_cost_percent=estimated_total_cost_percent,
+                estimated_explicit_cost_percent=estimated_explicit_cost_percent,
             )
 
         if config.max_age_minutes <= 0 or age_minutes < config.max_age_minutes:
@@ -76,7 +72,7 @@ class StalePositionGuard:
                 age_minutes=age_minutes,
                 mfe_percent=mfe_percent,
                 required_mfe_percent=required_mfe_percent,
-                estimated_total_cost_percent=estimated_total_cost_percent,
+                estimated_explicit_cost_percent=estimated_explicit_cost_percent,
             )
 
         if mfe_percent >= required_mfe_percent:
@@ -84,28 +80,27 @@ class StalePositionGuard:
                 age_minutes=age_minutes,
                 mfe_percent=mfe_percent,
                 required_mfe_percent=required_mfe_percent,
-                estimated_total_cost_percent=estimated_total_cost_percent,
+                estimated_explicit_cost_percent=estimated_explicit_cost_percent,
             )
 
         return StalePositionDecision(
             should_close=True,
-            reason=STALE_POSITION_EXIT_REASON,
             action=config.action,
             age_minutes=age_minutes,
             mfe_percent=mfe_percent,
             required_mfe_percent=required_mfe_percent,
-            estimated_total_cost_percent=estimated_total_cost_percent,
+            estimated_explicit_cost_percent=estimated_explicit_cost_percent,
         )
 
     def _required_mfe_percent(
         self,
         *,
-        estimated_total_cost_percent: float,
+        estimated_explicit_cost_percent: float,
         config: StalePositionConfig,
     ) -> float:
         return max(
             config.min_favorable_move_percent,
-            estimated_total_cost_percent + config.buffer_percent,
+            estimated_explicit_cost_percent + config.buffer_percent,
         )
 
     def _calculate_mfe_percent(
@@ -135,14 +130,13 @@ class StalePositionGuard:
         age_minutes: float,
         mfe_percent: float,
         required_mfe_percent: float,
-        estimated_total_cost_percent: float,
+        estimated_explicit_cost_percent: float,
     ) -> StalePositionDecision:
         return StalePositionDecision(
             should_close=False,
-            reason=None,
             action=None,
             age_minutes=age_minutes,
             mfe_percent=mfe_percent,
             required_mfe_percent=required_mfe_percent,
-            estimated_total_cost_percent=estimated_total_cost_percent,
+            estimated_explicit_cost_percent=estimated_explicit_cost_percent,
         )
