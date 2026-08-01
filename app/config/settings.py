@@ -3,6 +3,7 @@ from typing import Literal
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.execution.breakeven_profile import BreakevenProfileName
 
 BrokerMode = Literal['paper', 'etoro_demo', 'etoro_live']
 JournalDetailLevel = Literal['minimal', 'normal', 'debug', 'full']
@@ -82,6 +83,10 @@ class Settings(BaseSettings):
     max_trades_per_session: int = Field(
         default=3,
         alias='MAX_TRADES_PER_SESSION',
+    )
+    breakeven_profile: BreakevenProfileName = Field(
+        default=BreakevenProfileName.CORRECTED_BASELINE_V1,
+        alias='BREAKEVEN_PROFILE',
     )
 
     crypto_symbols: str = Field(default='', alias='CRYPTO_SYMBOLS')

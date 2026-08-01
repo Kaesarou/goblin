@@ -231,3 +231,21 @@ def test_overflow_is_reported_after_managed_ranking():
     assert result.rejected_candidates[0].selection_threshold_source == (
         'managed_edge_top_n'
     )
+
+
+def test_top_n_contract_does_not_backfill_after_later_portfolio_rejection():
+    result = select_evaluated_trade_candidates(
+        [evaluated('TOP', edge=0.20), evaluated('OVERFLOW', edge=0.10)],
+        CandidateSelectionConfig(top_n=1),
+    )
+
+    assert [item.candidate.symbol for item in result.selected_candidates] == [
+        'TOP'
+    ]
+    assert [
+        item.evaluated_candidate.candidate.symbol
+        for item in result.rejected_candidates
+    ] == ['OVERFLOW']
+    assert result.rejected_candidates[0].reason == (
+        'candidate_selection_outside_top_n'
+    )

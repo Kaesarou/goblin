@@ -1,10 +1,11 @@
 from datetime import datetime, timezone
 
-from app.brokers.base import BrokerClient, OpenPositionResult
+from app.brokers.base import BrokerClient, BrokerCloseExecution, OpenPositionResult
 from app.market.models import MarketSnapshot
 from app.runtime.broker_queries import (
     UnknownOrderLookup,
     get_fresh_position_open_states,
+    reconcile_positions_and_close_executions,
     resolve_unknown_open_order,
 )
 
@@ -86,3 +87,73 @@ def test_unknown_order_recovers_from_order_lookup_before_portfolio():
     )
     assert broker.order_calls == 1
     assert broker.portfolio_calls == 0
+
+
+class CloseExecutionBroker(PortfolioBroker):
+    def __init__(self, execution):
+        super().__init__()
+        self.execution = execution
+        self.close_execution_calls = []
+
+    def get_close_execution(self, close_order_id: str, position_id: str):
+        self.close_execution_calls.append((close_order_id, position_id))
+        if isinstance(self.execution, Exception):
+            raise self.execution
+        return self.execution
+
+
+def test_reconciliation_fetches_fill_only_after_portfolio_absence():
+    executed_at = datetime(2026, 7, 31, 20, 0, tzinfo=timezone.utc)
+    fill = BrokerCloseExecution(
+        position_id='p-2',
+        close_order_id='close-2',
+        executed_exit_price=98.75,
+        executed_at=executed_at,
+        units=10.0,
+        conversion_rate=1.0,
+        amount=987.5,
+        broker_response={'positions': []},
+    )
+    broker = CloseExecutionBroker(fill)
+
+    result = reconcile_positions_and_close_executions(
+        broker,
+        ['p-1', 'p-2'],
+        {'p-1': 'close-1', 'p-2': 'close-2'},
+    )
+
+    assert result.open_states == {'p-1': True, 'p-2': False}
+    assert result.close_executions == {'p-2': fill}
+    assert result.close_execution_unavailable == {}
+    assert broker.close_execution_calls == [('close-2', 'p-2')]
+
+
+def test_reconciliation_records_explicit_broker_fill_absence():
+    broker = CloseExecutionBroker(None)
+
+    result = reconcile_positions_and_close_executions(
+        broker,
+        ['p-2'],
+        {'p-2': 'close-2'},
+    )
+
+    assert result.close_executions == {}
+    assert result.close_execution_unavailable == {
+        'p-2': 'broker_fill_not_returned'
+    }
+
+
+def test_reconciliation_keeps_portfolio_confirmation_when_fill_lookup_fails():
+    broker = CloseExecutionBroker(RuntimeError('temporary lookup failure'))
+
+    result = reconcile_positions_and_close_executions(
+        broker,
+        ['p-2'],
+        {'p-2': 'close-2'},
+    )
+
+    assert result.open_states == {'p-2': False}
+    assert result.close_executions == {}
+    assert result.close_execution_unavailable == {
+        'p-2': 'lookup_failed:temporary lookup failure'
+    }

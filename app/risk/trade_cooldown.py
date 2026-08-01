@@ -1,60 +1,85 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from enum import StrEnum
 
+from app.execution.position_close_reason import PositionCloseReason
+from app.execution.position_models import ExitPriceSource
 from app.utils.commons import normalize_symbol
 
-
-class CloseReason(StrEnum):
-    TAKE_PROFIT = 'take_profit'
-    STOP_LOSS = 'stop_loss'
-    MANUAL = 'manual'
-    UNKNOWN = 'unknown'
+TRADE_COOLDOWN_CONTRACT_VERSION = 'trade_cooldown_v2'
 
 
 @dataclass(frozen=True)
 class TradeCooldownConfig:
     enabled: bool = True
     after_take_profit_minutes: int = 30
-    after_stop_loss_minutes: int = 45
-    after_manual_close_minutes: int = 15
-    after_unknown_close_minutes: int = 15
-    stop_loss_symbol_lock_minutes: int = 15
+    after_initial_stop_minutes: int = 45
+    after_protected_breakeven_minutes: int = 15
+    after_protected_trailing_minutes: int = 15
+    after_stale_exit_minutes: int = 15
+    after_session_force_close_minutes: int = 15
+    after_manual_or_broker_close_minutes: int = 15
+    after_unknown_confirmed_close_minutes: int = 15
+    initial_stop_symbol_lock_minutes: int = 15
 
-    def duration_minutes_for(self, close_reason: CloseReason) -> int:
-        if close_reason == CloseReason.TAKE_PROFIT:
-            return self.after_take_profit_minutes
-        if close_reason == CloseReason.STOP_LOSS:
-            return self.after_stop_loss_minutes
-        if close_reason == CloseReason.MANUAL:
-            return self.after_manual_close_minutes
-        return self.after_unknown_close_minutes
+    def duration_minutes_for(
+        self,
+        close_reason: PositionCloseReason,
+    ) -> int:
+        return {
+            PositionCloseReason.TAKE_PROFIT: self.after_take_profit_minutes,
+            PositionCloseReason.INITIAL_STOP: self.after_initial_stop_minutes,
+            PositionCloseReason.PROTECTED_BREAKEVEN: (
+                self.after_protected_breakeven_minutes
+            ),
+            PositionCloseReason.PROTECTED_TRAILING: (
+                self.after_protected_trailing_minutes
+            ),
+            PositionCloseReason.STALE_EXIT: self.after_stale_exit_minutes,
+            PositionCloseReason.SESSION_FORCE_CLOSE: (
+                self.after_session_force_close_minutes
+            ),
+            PositionCloseReason.MANUAL_OR_BROKER_CLOSE: (
+                self.after_manual_or_broker_close_minutes
+            ),
+            PositionCloseReason.UNKNOWN_CONFIRMED_CLOSE: (
+                self.after_unknown_confirmed_close_minutes
+            ),
+        }[close_reason]
 
-    def duration_for(self, close_reason: CloseReason) -> timedelta:
+    def duration_for(
+        self,
+        close_reason: PositionCloseReason,
+    ) -> timedelta:
         return timedelta(minutes=self.duration_minutes_for(close_reason))
 
-    def stop_loss_symbol_lock_duration(self) -> timedelta:
-        return timedelta(minutes=max(0, self.stop_loss_symbol_lock_minutes))
+    def initial_stop_symbol_lock_duration(self) -> timedelta:
+        return timedelta(minutes=max(0, self.initial_stop_symbol_lock_minutes))
 
 
 @dataclass(frozen=True)
 class ClosedTradeMemoryEntry:
     symbol: str
     side: str
-    close_reason: CloseReason
-    raw_close_reason: str | None
+    close_reason: PositionCloseReason
     opened_at: datetime | None
     closed_at: datetime
     cooldown_expires_at: datetime
     position_id: str | None = None
-    entry_price: float | None = None
-    exit_price: float | None = None
+    signal_price: float | None = None
+    executable_entry_estimate: float | None = None
+    broker_entry_fill_price: float | None = None
+    pnl_entry_price: float | None = None
+    pnl_exit_price: float | None = None
+    exit_price_source: ExitPriceSource | None = None
     stop_loss: float | None = None
     take_profit: float | None = None
-    highest_price: float | None = None
-    lowest_price: float | None = None
+    highest_executable_price: float | None = None
+    lowest_executable_price: float | None = None
     gross_pnl: float | None = None
     gross_pnl_percent: float | None = None
+    explicit_costs_deducted: float | None = None
+    net_pnl: float | None = None
+    net_pnl_percent: float | None = None
     created_at: datetime | None = None
     session_key: str | None = None
 
@@ -68,21 +93,24 @@ class ClosedTradeMemoryEntry:
 
     @property
     def lock_scope(self) -> str:
-        if self.close_reason == CloseReason.STOP_LOSS:
+        if self.close_reason == PositionCloseReason.INITIAL_STOP:
             return 'symbol_both_sides'
         return 'symbol_side'
 
     @property
     def blocked_sides(self) -> tuple[str, ...]:
-        if self.close_reason == CloseReason.STOP_LOSS:
+        if self.close_reason == PositionCloseReason.INITIAL_STOP:
             return ('BUY', 'SELL')
         return (self.side,)
 
     def remaining_seconds(self, now: datetime) -> int:
         return max(0, int((self.cooldown_expires_at - now).total_seconds()))
 
-    def symbol_lock_expires_at(self, config: TradeCooldownConfig) -> datetime:
-        return self.closed_at + config.stop_loss_symbol_lock_duration()
+    def symbol_lock_expires_at(
+        self,
+        config: TradeCooldownConfig,
+    ) -> datetime:
+        return self.closed_at + config.initial_stop_symbol_lock_duration()
 
     def symbol_lock_remaining_seconds(
         self,
@@ -90,71 +118,10 @@ class ClosedTradeMemoryEntry:
         config: TradeCooldownConfig,
         now: datetime,
     ) -> int:
-        return max(0, int((self.symbol_lock_expires_at(config) - now).total_seconds()))
-
-
-MANUAL_CLOSE_REASONS = {
-    'manual',
-    'manual_close',
-    'manually_closed',
-}
-
-STOP_LOSS_CLOSE_REASONS = {
-    'stop_loss_hit',
-}
-
-PROTECTED_EXIT_REASONS = {
-    'trailing_stop_hit',
-    'break_even_stop_hit',
-}
-
-TAKE_PROFIT_CLOSE_REASONS = {
-    'take_profit_hit',
-}
-
-
-def close_reason_from_raw(raw_reason: str | None) -> CloseReason:
-    normalized_reason = (raw_reason or '').strip().lower()
-
-    if normalized_reason in TAKE_PROFIT_CLOSE_REASONS:
-        return CloseReason.TAKE_PROFIT
-
-    if normalized_reason in STOP_LOSS_CLOSE_REASONS:
-        return CloseReason.STOP_LOSS
-
-    if normalized_reason in MANUAL_CLOSE_REASONS:
-        return CloseReason.MANUAL
-
-    return CloseReason.UNKNOWN
-
-
-def close_reason_for_closed_trade(
-    raw_reason: str | None,
-    gross_pnl: float | None = None,
-) -> CloseReason:
-    normalized_reason = (raw_reason or '').strip().lower()
-
-    if normalized_reason in PROTECTED_EXIT_REASONS:
-        return close_reason_from_pnl(gross_pnl)
-
-    close_reason = close_reason_from_raw(raw_reason)
-    if close_reason != CloseReason.UNKNOWN:
-        return close_reason
-
-    return close_reason_from_pnl(gross_pnl)
-
-
-def close_reason_from_pnl(gross_pnl: float | None) -> CloseReason:
-    if gross_pnl is None:
-        return CloseReason.UNKNOWN
-
-    if gross_pnl > 0:
-        return CloseReason.TAKE_PROFIT
-
-    if gross_pnl < 0:
-        return CloseReason.STOP_LOSS
-
-    return CloseReason.UNKNOWN
+        return max(
+            0,
+            int((self.symbol_lock_expires_at(config) - now).total_seconds()),
+        )
 
 
 def build_closed_trade_memory_entry(
@@ -162,50 +129,51 @@ def build_closed_trade_memory_entry(
     symbol: str,
     side: str,
     config: TradeCooldownConfig,
-    raw_close_reason: str | None,
+    close_reason: PositionCloseReason,
     closed_at: datetime,
     position_id: str | None = None,
     opened_at: datetime | None = None,
-    entry_price: float | None = None,
-    exit_price: float | None = None,
+    signal_price: float | None = None,
+    executable_entry_estimate: float | None = None,
+    broker_entry_fill_price: float | None = None,
+    pnl_entry_price: float | None = None,
+    pnl_exit_price: float | None = None,
+    exit_price_source: ExitPriceSource | None = None,
     stop_loss: float | None = None,
     take_profit: float | None = None,
-    highest_price: float | None = None,
-    lowest_price: float | None = None,
+    highest_executable_price: float | None = None,
+    lowest_executable_price: float | None = None,
     gross_pnl: float | None = None,
     gross_pnl_percent: float | None = None,
+    explicit_costs_deducted: float | None = None,
+    net_pnl: float | None = None,
+    net_pnl_percent: float | None = None,
     created_at: datetime | None = None,
     session_key: str | None = None,
 ) -> ClosedTradeMemoryEntry:
-    close_reason = close_reason_for_closed_trade(
-        raw_reason=raw_close_reason,
-        gross_pnl=gross_pnl,
-    )
-    normalized_symbol = normalize_symbol(symbol)
-    normalized_side = side.strip().upper()
-    actual_created_at = created_at or datetime.now(timezone.utc)
-
     return ClosedTradeMemoryEntry(
-        symbol=normalized_symbol,
-        side=normalized_side,
+        symbol=normalize_symbol(symbol),
+        side=side.strip().upper(),
         close_reason=close_reason,
-        raw_close_reason=raw_close_reason,
         opened_at=opened_at,
         closed_at=closed_at,
         cooldown_expires_at=closed_at + config.duration_for(close_reason),
         position_id=position_id,
-        entry_price=entry_price,
-        exit_price=exit_price,
+        signal_price=signal_price,
+        executable_entry_estimate=executable_entry_estimate,
+        broker_entry_fill_price=broker_entry_fill_price,
+        pnl_entry_price=pnl_entry_price,
+        pnl_exit_price=pnl_exit_price,
+        exit_price_source=exit_price_source,
         stop_loss=stop_loss,
         take_profit=take_profit,
-        highest_price=highest_price,
-        lowest_price=lowest_price,
+        highest_executable_price=highest_executable_price,
+        lowest_executable_price=lowest_executable_price,
         gross_pnl=gross_pnl,
         gross_pnl_percent=gross_pnl_percent,
-        created_at=actual_created_at,
+        explicit_costs_deducted=explicit_costs_deducted,
+        net_pnl=net_pnl,
+        net_pnl_percent=net_pnl_percent,
+        created_at=created_at or datetime.now(timezone.utc),
         session_key=session_key,
     )
-
-
-TradeCooldownEntry = ClosedTradeMemoryEntry
-build_trade_cooldown_entry = build_closed_trade_memory_entry

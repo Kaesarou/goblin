@@ -1,5 +1,6 @@
 import logging
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 
 from app.execution.candidate_economics import CandidateEconomicsEstimator
@@ -26,7 +27,6 @@ from app.runtime.market_data_event_flow import MarketDataEventFlow
 from app.runtime.market_data_maintenance import MarketDataMaintenance
 from app.runtime.market_data_session_flow import MarketDataSessionFlow
 from app.runtime.pending_entry import PendingEntryManager
-from app.runtime.position_lifecycle import BrokerAuthorizationErrorChecker
 from app.runtime.resilient_broker_operations import (
     ResilientBrokerOperationsCoordinator,
 )
@@ -52,6 +52,7 @@ from app.strategies.balanced_strategy_config import BalancedStrategyConfig
 from app.strategies.strategy import TrendStrategy
 
 logger = logging.getLogger(__name__)
+BrokerAuthorizationErrorChecker = Callable[[Exception], bool]
 
 
 class EventDrivenMarketRuntime(

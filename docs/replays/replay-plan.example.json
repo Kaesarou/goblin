@@ -1,0 +1,101 @@
+{
+  "timezone": "Europe/Paris",
+  "days": [
+    {
+      "date": "2026-07-22",
+      "incomplete": false,
+      "sources": [
+        {
+          "run_id": "run_20260721T234834_976267Z",
+          "parts": [
+            "archives/goblin-logs-day-1.part-000",
+            "archives/goblin-logs-day-1.part-001",
+            "archives/goblin-logs-day-1.part-002"
+          ]
+        }
+      ]
+    },
+    {
+      "date": "2026-07-23",
+      "incomplete": false,
+      "sources": [
+        {
+          "run_id": "run_20260722T215902_131640Z",
+          "parts": ["archives/goblin-logs-day-2.zip"]
+        },
+        {
+          "run_id": "run_20260723T133037_416904Z",
+          "parts": ["archives/goblin-logs-day-2.zip"]
+        }
+      ]
+    },
+    {
+      "date": "2026-07-24",
+      "incomplete": false,
+      "sources": [
+        {
+          "run_id": "run_20260723T133037_416904Z",
+          "parts": [
+            "archives/goblin-logs-day-3.part-000",
+            "archives/goblin-logs-day-3.part-001"
+          ]
+        },
+        {
+          "run_id": "run_20260724T133050_374323Z",
+          "parts": [
+            "archives/goblin-logs-day-3.part-000",
+            "archives/goblin-logs-day-3.part-001"
+          ]
+        }
+      ]
+    },
+    {
+      "date": "2026-07-27",
+      "incomplete": false,
+      "sources": [
+        {
+          "run_id": "run_20260726T094250_523011Z",
+          "parts": [
+            "archives/goblin-logs-july-27-28.part-000",
+            "archives/goblin-logs-july-27-28.part-001"
+          ]
+        }
+      ]
+    },
+    {
+      "date": "2026-07-28",
+      "incomplete": true,
+      "sources": [
+        {
+          "run_id": "run_20260726T094250_523011Z",
+          "parts": [
+            "archives/goblin-logs-july-27-28.part-000",
+            "archives/goblin-logs-july-27-28.part-001"
+          ]
+        }
+      ]
+    },
+    {
+      "date": "2026-07-31",
+      "incomplete": false,
+      "sources": [
+        {
+          "run_id": "run_20260729T214038_597493Z",
+          "parts": [
+            "archives/goblin-logs-20260731.part-000",
+            "archives/goblin-logs-20260731.part-001",
+            "archives/goblin-logs-20260731.part-002"
+          ]
+        },
+        {
+          "run_id": "run_20260731T113542_458255Z",
+          "parts": [
+            "archives/goblin-logs-20260731.part-000",
+            "archives/goblin-logs-20260731.part-001",
+            "archives/goblin-logs-20260731.part-002"
+          ]
+        }
+      ]
+    }
+  ]
+}

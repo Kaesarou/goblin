@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from app.execution.position_tracker import TrackedPosition
+from app.execution.position_models import EntryPriceSource, TrackedPosition
 from app.runtime.position_reconciliation_state import (
     PositionReconciliationTracker,
 )
@@ -12,7 +12,11 @@ def position(opened_at: datetime) -> TrackedPosition:
         symbol='BTC',
         side='BUY',
         amount=100.0,
-        entry_price=100.0,
+        signal_price=100.0,
+        executable_entry_estimate=100.1,
+        broker_entry_fill_price=None,
+        pnl_entry_price=100.1,
+        entry_price_source=EntryPriceSource.EXECUTABLE_ESTIMATE,
         stop_loss=99.0,
         take_profit=102.0,
         opened_at=opened_at,

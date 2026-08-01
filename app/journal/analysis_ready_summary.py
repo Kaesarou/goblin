@@ -3,6 +3,8 @@ from typing import Any
 
 from app.journal.daily_summary import DailySummaryAggregator
 
+ANALYSIS_READY_SUMMARY_SCHEMA_VERSION = 13
+
 
 class AnalysisReadySummaryAggregator(DailySummaryAggregator):
     """Summary schema focused on post-run calibration."""
@@ -55,9 +57,6 @@ class AnalysisReadySummaryAggregator(DailySummaryAggregator):
             self.managed_stop_updates_by_type[
                 str(payload.get('protection_type') or 'unknown')
             ] += 1
-        elif event_type == 'position_close_confirmed':
-            self.positions_closed += 1
-            self._record_closed_position_pnl(payload)
 
     def _record_decision(self, payload):
         approved_before = self.risk_approved
@@ -165,7 +164,7 @@ class AnalysisReadySummaryAggregator(DailySummaryAggregator):
 
     def to_dict(self) -> dict[str, Any]:
         summary = super().to_dict()
-        summary['schema_version'] = 12
+        summary['schema_version'] = ANALYSIS_READY_SUMMARY_SCHEMA_VERSION
         market_data = summary['market_data']
         trading_snapshots = market_data.get('accepted', 0)
         market_data['trading_snapshots_processed'] = trading_snapshots

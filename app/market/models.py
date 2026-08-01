@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
 
+EXECUTABLE_PRICE_CONTRACT_VERSION = 'side_aware_executable_prices_v2'
+
 
 class PriceSource(StrEnum):
     BROKER_LAST = 'broker_last'
@@ -30,6 +32,34 @@ class MarketSnapshot:
         object.__setattr__(self, 'timestamp', timestamp)
         object.__setattr__(self, 'received_at', received_at)
         object.__setattr__(self, 'symbol', self.symbol.strip().upper())
+
+    def executable_exit_price(self, side: str) -> float:
+        normalized_side = side.strip().upper()
+        if normalized_side == 'BUY':
+            price = self.bid
+        elif normalized_side == 'SELL':
+            price = self.ask
+        else:
+            raise ValueError(f'Unsupported position side: {side}')
+        if price <= 0:
+            raise ValueError(
+                f'Invalid executable exit price for {normalized_side}: {price}'
+            )
+        return price
+
+    def executable_entry_price(self, side: str) -> float:
+        normalized_side = side.strip().upper()
+        if normalized_side == 'BUY':
+            price = self.ask
+        elif normalized_side == 'SELL':
+            price = self.bid
+        else:
+            raise ValueError(f'Unsupported position side: {side}')
+        if price <= 0:
+            raise ValueError(
+                f'Invalid executable entry price for {normalized_side}: {price}'
+            )
+        return price
 
     @classmethod
     def now(

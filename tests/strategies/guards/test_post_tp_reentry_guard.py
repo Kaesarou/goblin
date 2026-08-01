@@ -1,9 +1,10 @@
 from datetime import datetime, timedelta, timezone
 
 from app.execution.trade_candidate import TradeCandidate
+from app.execution.position_close_reason import PositionCloseReason
 from app.market.models import Candle, MarketSnapshot
 from app.persistence.closed_trade_memory_store import ClosedTradeMemoryStore
-from app.risk.trade_cooldown import CloseReason, ClosedTradeMemoryEntry
+from app.risk.trade_cooldown import ClosedTradeMemoryEntry
 from app.strategies.guards.post_tp_reentry_guard import (
     CONSUMED_MOVE_AFTER_TP_REASON,
     POST_TP_RESET_CONFIRMED_REASON,
@@ -20,16 +21,15 @@ def save_tp(store: ClosedTradeMemoryStore):
         ClosedTradeMemoryEntry(
             symbol='META',
             side='BUY',
-            close_reason=CloseReason.TAKE_PROFIT,
-            raw_close_reason='take_profit_hit',
+            close_reason=PositionCloseReason.TAKE_PROFIT,
             opened_at=NOW - timedelta(minutes=20),
             closed_at=NOW - timedelta(minutes=15),
             cooldown_expires_at=NOW - timedelta(minutes=5),
             position_id='meta-buy-1',
-            entry_price=100.0,
-            exit_price=101.0,
+            pnl_entry_price=100.0,
+            pnl_exit_price=101.0,
             take_profit=101.0,
-            highest_price=101.2,
+            highest_executable_price=101.2,
         )
     )
 

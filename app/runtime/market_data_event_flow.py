@@ -130,7 +130,7 @@ class MarketDataEventFlow:
         symbol: str,
         observed_at: datetime,
     ) -> None:
-        latest_stop_loss = self.cooldown_store.find_latest_stop_loss(
+        latest_stop_loss = self.cooldown_store.find_latest_initial_stop(
             symbol=symbol
         )
         if latest_stop_loss is None:
@@ -148,7 +148,7 @@ class MarketDataEventFlow:
             self.trade_journal,
             self.pending_entry_manager.invalidate_symbol(
                 symbol,
-                'stop_loss_symbol_lock_registered',
+                'initial_stop_symbol_lock_registered',
             ),
         )
 

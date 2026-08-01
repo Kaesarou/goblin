@@ -1,3 +1,0 @@
-from app.runtime.session_force_close import force_close_positions_before_session_end
-
-close_positions_before_session_end = force_close_positions_before_session_end

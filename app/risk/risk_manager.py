@@ -26,10 +26,11 @@ class TradeCostPlanFields:
     expected_net_profit_percent: float | None = None
     required_min_expected_net_profit_amount: float | None = None
     min_expected_net_profit_percent: float | None = None
-    estimated_fees: float | None = None
     estimated_open_fee: float | None = None
     estimated_close_fee: float | None = None
     estimated_fixed_fees: float | None = None
+    estimated_explicit_cost: float | None = None
+    estimated_explicit_cost_percent: float | None = None
     estimated_spread_cost: float | None = None
     estimated_total_cost: float | None = None
     estimated_total_cost_percent: float | None = None
@@ -405,7 +406,7 @@ class RiskManager:
             )
 
         net_breakeven_distance = (
-            trade_cost_estimate.total_estimated_cost_percent
+            trade_cost_estimate.explicit_cost_percent
             + risk_profile.breakeven_buffer_percent
         )
         trigger_percent = max(
@@ -482,10 +483,13 @@ class RiskManager:
             'min_expected_net_profit_percent': (
                 fields.min_expected_net_profit_percent
             ),
-            'estimated_fees': fields.estimated_fees,
             'estimated_open_fee': fields.estimated_open_fee,
             'estimated_close_fee': fields.estimated_close_fee,
             'estimated_fixed_fees': fields.estimated_fixed_fees,
+            'estimated_explicit_cost': fields.estimated_explicit_cost,
+            'estimated_explicit_cost_percent': (
+                fields.estimated_explicit_cost_percent
+            ),
             'estimated_spread_cost': fields.estimated_spread_cost,
             'estimated_total_cost': fields.estimated_total_cost,
             'estimated_total_cost_percent': (
@@ -545,13 +549,17 @@ class RiskManager:
                 trade_cost_estimate.min_expected_net_profit_percent,
                 4,
             ),
-            estimated_fees=round(
-                trade_cost_estimate.total_estimated_cost,
-                4,
-            ),
             estimated_open_fee=round(trade_cost_estimate.open_fee, 4),
             estimated_close_fee=round(trade_cost_estimate.close_fee, 4),
             estimated_fixed_fees=round(trade_cost_estimate.fixed_fees, 4),
+            estimated_explicit_cost=round(
+                trade_cost_estimate.explicit_cost,
+                4,
+            ),
+            estimated_explicit_cost_percent=round(
+                trade_cost_estimate.explicit_cost_percent,
+                4,
+            ),
             estimated_spread_cost=round(
                 trade_cost_estimate.spread_cost,
                 4,

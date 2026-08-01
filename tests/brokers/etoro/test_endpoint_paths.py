@@ -1,4 +1,5 @@
 from app.brokers.etoro.endpoint_paths import (
+    close_order_lookup_path,
     close_position_path,
     demo_portfolio_path,
     instrument_rates_path,
@@ -26,6 +27,18 @@ def test_close_position_path_uses_demo_endpoint_when_env_is_demo():
 def test_close_position_path_uses_real_endpoint_when_env_is_real():
     assert close_position_path('live', '123') == (
         '/api/v1/trading/execution/market-close-orders/positions/123'
+    )
+
+
+def test_close_order_lookup_path_uses_demo_endpoint_when_env_is_demo():
+    assert close_order_lookup_path('demo', 'close-123') == (
+        '/api/v1/trading/info/demo/close-orders/close-123'
+    )
+
+
+def test_close_order_lookup_path_uses_real_endpoint_when_env_is_real():
+    assert close_order_lookup_path('live', 'close-123') == (
+        '/api/v1/trading/info/close-orders/close-123'
     )
 
 

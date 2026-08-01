@@ -214,7 +214,9 @@ def main() -> None:
         log_file_path=settings.app_log_path,
     )
     symbols = settings.watchlist_symbols()
-    strategy_profile = BalancedStrategyConfig()
+    strategy_profile = BalancedStrategyConfig(
+        breakeven_profile_name=settings.breakeven_profile,
+    )
     instrument_registry = InstrumentRegistry(
         settings,
         instrument_configs=strategy_profile.instrument_configs,
@@ -231,7 +233,6 @@ def main() -> None:
         manifest_path=archived_manifest_path,
         summary_path=archived_summary_path,
     )
-    manifest['schema_version'] = 11
     manifest['models']['market_data'] = MARKET_DATA_MODEL_VERSION
     manifest['runtime']['market_data'] = build_market_data_manifest()
     manifest['runtime']['journals'] = {
@@ -335,6 +336,7 @@ def main() -> None:
             'run_id': run_id,
             'symbols': symbols,
             'strategy_profile': strategy_profile.name,
+            'breakeven_profile': strategy_profile.breakeven_profile_name,
             'market_data_mode': 'websocket',
             'execution_mode': settings.broker,
             'run_journal_root': str(run_paths.root),
@@ -399,7 +401,6 @@ def main() -> None:
             },
         )
         summary = trade_journal.finalize()
-        summary['schema_version'] = 11
         summary.setdefault('market_data', {})['model_version'] = (
             MARKET_DATA_MODEL_VERSION
         )

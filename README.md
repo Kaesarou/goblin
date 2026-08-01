@@ -31,8 +31,12 @@ Goblin currently includes:
 - named fixed TP/SL profiles, structural pending stops and TP feasibility;
 - a frozen two-stage outcome model;
 - four trained equity direction segments and two explicit provisional crypto segments;
-- a five-point conditional direction-edge gate applied before top-N;
-- net breakeven, trailing stop, stale exit, cooldown and session controls;
+- the frozen `MANAGED_EDGE_V1` selector applied before top-N;
+- side-aware executable position economics: BUY exits at bid, SELL exits at ask;
+- one shared live/replay lifecycle for breakeven, trailing, TP, SL, stale and force close;
+- broker close-fill reconciliation with explicit uncertain-close states;
+- canonical typed close reasons and cooldown policies;
+- versioned baseline and delayed-equity breakeven profiles;
 - SQLite position/cooldown persistence and JSONL audit journals;
 - a broad pytest suite validated by GitHub Actions.
 
@@ -53,9 +57,9 @@ flowchart TD
     I -->|READY| J[P_TOUCH frozen activity model]
     I -->|WAIT| K[PendingEntryManager]
     I -->|SKIP| L[Counterfactual journal]
-    J --> M[Segmented P_DIRECTION]
-    M --> N[50/50 shrinkage to segment prior]
-    N --> O[direction_edge >= 5 points]
+    J --> M[Segmented P_DIRECTION diagnostics]
+    M --> N[MANAGED_EDGE_V1]
+    N --> O[Managed probability and net-return gates]
     O --> P[Rank eligible then top-N]
     K --> G
     P --> Q[RiskManager]
@@ -64,7 +68,7 @@ flowchart TD
     S --> L
 ```
 
-## Two-stage outcome probabilities
+## Diagnostic outcome probabilities
 
 For a candidate whose side, TP, SL and horizon already exist:
 
@@ -114,9 +118,9 @@ P_DIRECTION final
 
 The journal retains the raw probability, prior, final probability, segment, feature family, training status and source segment.
 
-## Economic gate and selection
+## Managed edge and selection
 
-The conditional probability needed to break even is:
+The conditional direction break-even estimate remains journalled:
 
 ```text
 direction_break_even
@@ -126,23 +130,29 @@ direction_edge
 = P_DIRECTION - direction_break_even
 ```
 
-The active policy requires:
+It is no longer a universal gate. The active `MANAGED_EDGE_V1` policy estimates:
 
 ```text
-direction_edge >= 0.05
+P_PROTECTION
+P_MANAGED_POSITIVE
+EXPECTED_MANAGED_NET_RETURN
+managed_edge = EXPECTED_MANAGED_NET_RETURN - 0.05%
 ```
 
-This means five **percentage points**, not a relative five-percent increase.
+Candidates must exceed their frozen segment floors for protection and positive
+outcome, then have non-negative managed edge.
 
 Selection order:
 
 1. apply entry route, readiness, feasibility and hard economics;
-2. reject candidates below the five-point direction margin;
-3. rank the eligible candidates by `direction_edge`, then `P_TP`, then deterministic candidate ID;
+2. apply the managed protection, positive-outcome and managed-edge gates;
+3. rank eligible candidates by managed edge, protection, positive probability,
+   retained direction edge and deterministic candidate ID;
 4. keep the asset-specific top-N: two crypto, one US equity, one EU equity;
 5. apply RiskManager and execute.
 
-The former minimum-`P_TP` and maximum-`P_TOUCH` gates do not exist. A rejected top candidate cannot consume a slot and block the next eligible candidate.
+The former minimum-`P_TP`, maximum-`P_TOUCH` and direction-edge vetoes do not
+exist. The top-N policy and the absence of portfolio backfill remain deliberate.
 
 ## Evidence behind V2
 
@@ -168,6 +178,22 @@ A stricter train-22–24/test-27–28 check produced approximately AUC 0.588 and
 
 Breakeven protection is net of estimated costs. Trailing protection activates only when the candidate stop locks the configured minimum net gain. Finite-session entries must have enough time for the stale horizon plus force-close buffer.
 
+Position management uses executable prices throughout: bid for a BUY exit and
+ask for a SELL exit. Broker fills are canonical when available. Post-trade P&L
+deducts explicit costs only; spread remains a pre-trade feasibility input and is
+not deducted a second time from executable fills.
+
+Two explicit breakeven profiles exist:
+
+| Profile | Crypto | EU equities | US equities | Status |
+|---|---:|---:|---:|---|
+| `corrected_baseline_v1` | 0.20% | 0.55% | 0.60% | live default |
+| `delayed_equity_trigger_v1` | 0.20% | 0.65% | 0.70% | selectable experiment |
+
+The buffer, trailing, TP/SL, stale horizon, sizing, risk and selector are identical
+between profiles. Select an experiment only with `BREAKEVEN_PROFILE`; the chosen
+name and thresholds are recorded in every manifest and startup event.
+
 ## Running
 
 Python 3.12 or newer is required.
@@ -182,23 +208,46 @@ Local execution:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install -e ".[dev]"
 python -m app.main
+```
+
+Replay a logged cohort with the shared lifecycle:
+
+```bash
+python scripts/replay_breakeven_profiles.py PLAN.json report.json \
+  --output-markdown report.md --validate-archives
 ```
 
 ## Analysis contract
 
-Run-manifest schema V11 records:
+Run-manifest schema V12 records:
 
 - model and feature-contract versions;
 - activity and direction dataset hashes;
 - all six direction segments and their provenance;
-- the five-point margin and 50/50 calibration weights;
+- the managed selector and artifact provenance;
+- the executable-price, position-economics, lifecycle, cost, close-taxonomy and
+  cooldown contract versions;
+- the selected breakeven profile and exact thresholds;
+- the broker-fill-priority and explicit-cost-only convention;
 - the packaged artifact SHA-256;
 - code fingerprint, watchlist, profiles and runtime settings.
 
 Standalone `entry_decision` records include the complete nested outcome estimate, so raw/final direction probabilities and segment metadata remain auditable without duplicate shadow decisions.
 
+Daily summary schema V10 and analysis-ready schema V13 expose each closed
+position’s signal price, executable estimate, broker fill provenance, bid/ask,
+observed spread, gross P&L, explicit costs, net P&L and executable MFE/MAE.
+
+See [Position lifecycle V2](docs/position-lifecycle-v2.md),
+[Managed Edge V1](docs/managed-edge-v1.md) and
+[the breakeven replay decision](docs/breakeven-replay-v1.md).
+
 ## Pre-live status
 
-Goblin remains **demo-only**. Before real capital, the project still requires verified broker exits, catastrophe protection, reconciliation, drawdown/kill-switch controls, watchdogs and controlled price precision. The current objective is repeatable calibration, not a claim of profitability.
+Goblin remains **demo-only**. The close-detail endpoint is integrated, but real
+run evidence must still confirm fill availability and timing. Before real capital,
+the project also requires catastrophe protection, drawdown/kill-switch controls,
+watchdogs and controlled price precision. The current objective is repeatable
+calibration, not a claim of profitability.

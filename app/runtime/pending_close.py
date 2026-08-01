@@ -6,7 +6,7 @@ from enum import StrEnum
 from typing import Any
 
 from app.brokers.base import ClosePositionSubmission
-from app.execution.position_tracker import PositionCloseSignal
+from app.execution.position_models import PositionCloseSignal
 
 
 class CloseState(StrEnum):

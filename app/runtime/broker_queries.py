@@ -4,7 +4,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from app.brokers.base import BrokerClient, OpenPositionResult
+from app.brokers.base import (
+    BrokerClient,
+    BrokerCloseExecution,
+    OpenPositionResult,
+)
 from app.brokers.etoro.order_confirmation_error import (
     EtoroOrderConfirmationUnknownError,
 )
@@ -36,6 +40,13 @@ class UnknownOrderResolution:
     result: OpenPositionResult | None = None
     matched_by: str | None = None
     details: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class PositionReconciliationResult:
+    open_states: dict[str, bool]
+    close_executions: dict[str, BrokerCloseExecution]
+    close_execution_unavailable: dict[str, str]
 
 
 def unwrap_broker(broker: BrokerClient) -> BrokerClient:
@@ -73,6 +84,37 @@ def get_fresh_position_open_states(
         position_id: broker.is_position_open(position_id)
         for position_id in position_ids
     }
+
+
+def reconcile_positions_and_close_executions(
+    broker: BrokerClient,
+    position_ids: list[str],
+    pending_close_order_ids: dict[str, str],
+) -> PositionReconciliationResult:
+    open_states = get_fresh_position_open_states(broker, position_ids)
+    raw = unwrap_broker(broker)
+    close_executions: dict[str, BrokerCloseExecution] = {}
+    unavailable: dict[str, str] = {}
+    for position_id, close_order_id in pending_close_order_ids.items():
+        if open_states.get(position_id) is not False:
+            continue
+        try:
+            execution = raw.get_close_execution(
+                close_order_id,
+                position_id,
+            )
+        except Exception as exc:  # portfolio absence still confirms the close
+            unavailable[position_id] = f'lookup_failed:{exc}'
+            continue
+        if execution is not None:
+            close_executions[position_id] = execution
+        else:
+            unavailable[position_id] = 'broker_fill_not_returned'
+    return PositionReconciliationResult(
+        open_states=open_states,
+        close_executions=close_executions,
+        close_execution_unavailable=unavailable,
+    )
 
 
 def resolve_unknown_open_order(

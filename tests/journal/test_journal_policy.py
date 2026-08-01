@@ -29,7 +29,9 @@ def test_minimal_level_keeps_order_and_position_events():
     assert should_write_to_trade_journal('order_submitted', {}, 'minimal')
     assert should_write_to_trade_journal('order_filled', {}, 'minimal')
     assert should_write_to_trade_journal('position_opened', {}, 'minimal')
-    assert should_write_to_trade_journal('position_closed', {}, 'minimal')
+    assert should_write_to_trade_journal(
+        'position_close_confirmed', {}, 'minimal'
+    )
 
 
 def test_error_events_are_routed_to_errors_journal_not_trade_journal():
