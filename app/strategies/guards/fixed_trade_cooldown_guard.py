@@ -51,7 +51,7 @@ class FixedTradeCooldownGuard:
         if normalized_side not in ('BUY', 'SELL'):
             return FixedTradeCooldownDecision(allowed=True)
 
-        active_symbol_lock = self.store.find_latest_stop_loss(symbol=symbol)
+        active_symbol_lock = self.store.find_latest_initial_stop(symbol=symbol)
         if active_symbol_lock is not None:
             remaining_seconds = active_symbol_lock.symbol_lock_remaining_seconds(
                 config=config,
@@ -60,7 +60,7 @@ class FixedTradeCooldownGuard:
             if remaining_seconds > 0:
                 return FixedTradeCooldownDecision(
                     allowed=False,
-                    reason='cooldown_after_stop_loss_symbol_lock',
+                    reason='cooldown_after_initial_stop_symbol_lock',
                     active_cooldown=active_symbol_lock,
                     remaining_seconds=remaining_seconds,
                     lock_scope='symbol_both_sides',

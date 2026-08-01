@@ -3,7 +3,11 @@ import time
 from dataclasses import dataclass, field
 from typing import cast
 
-from app.brokers.base import BrokerClient, ClosePositionSubmission
+from app.brokers.base import (
+    BrokerClient,
+    BrokerCloseExecution,
+    ClosePositionSubmission,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +84,13 @@ class CachedBrokerClient(BrokerClient):
             self.position_status_ttl_seconds,
         )
         return is_open
+
+    def get_close_execution(
+        self,
+        close_order_id: str,
+        position_id: str,
+    ) -> BrokerCloseExecution | None:
+        return self.delegate.get_close_execution(close_order_id, position_id)
 
     def remember_position_instrument(self, position_id: str, symbol: str) -> None:
         self.delegate.remember_position_instrument(position_id, symbol)

@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from app.brokers.base import (
     BrokerClient,
+    BrokerCloseExecution,
     ClosePositionRejectedError,
     ClosePositionSubmission,
     OpenPositionResult,
@@ -88,6 +89,14 @@ class PaperBrokerClient(BrokerClient):
 
     def is_position_open(self, position_id: str) -> bool:
         return position_id in self.positions
+
+    def get_close_execution(
+        self,
+        close_order_id: str,
+        position_id: str,
+    ) -> BrokerCloseExecution | None:
+        # Paper execution has no independent broker fill source.
+        return None
 
     def get_position_open_states(
         self,

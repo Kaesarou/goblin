@@ -3,7 +3,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from app.risk.trade_cooldown import CloseReason, ClosedTradeMemoryEntry
+from app.execution.position_close_reason import PositionCloseReason
+from app.execution.position_models import ExitPriceSource
+from app.risk.trade_cooldown import (
+    TRADE_COOLDOWN_CONTRACT_VERSION,
+    ClosedTradeMemoryEntry,
+)
 from app.utils.commons import normalize_symbol
 
 
@@ -14,143 +19,71 @@ class ClosedTradeMemoryStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize_schema()
 
-    def save_or_replace(self, entry: ClosedTradeMemoryEntry) -> ClosedTradeMemoryEntry:
-        existing_entry = self.find_latest(symbol=entry.symbol, side=entry.side)
-        if existing_entry is not None and existing_entry.closed_at > entry.closed_at:
-            return existing_entry
-
+    def save_or_replace(
+        self,
+        entry: ClosedTradeMemoryEntry,
+    ) -> ClosedTradeMemoryEntry:
+        existing = self.find_latest(symbol=entry.symbol, side=entry.side)
+        if existing is not None and existing.closed_at > entry.closed_at:
+            return existing
         with self._connect() as connection:
             connection.execute(
                 """
                 INSERT OR REPLACE INTO closed_trade_memory (
-                    symbol,
-                    side,
-                    close_reason,
-                    raw_close_reason,
-                    opened_at,
-                    closed_at,
-                    cooldown_expires_at,
-                    position_id,
-                    entry_price,
-                    exit_price,
-                    stop_loss,
-                    take_profit,
-                    highest_price,
-                    lowest_price,
-                    gross_pnl,
-                    gross_pnl_percent,
-                    created_at,
-                    session_key
+                    cooldown_contract_version, symbol, side, close_reason,
+                    opened_at, closed_at, cooldown_expires_at, position_id,
+                    signal_price, executable_entry_estimate,
+                    broker_entry_fill_price, pnl_entry_price,
+                    pnl_exit_price, exit_price_source,
+                    stop_loss, take_profit, highest_executable_price,
+                    lowest_executable_price, gross_pnl, gross_pnl_percent,
+                    explicit_costs_deducted, net_pnl, net_pnl_percent,
+                    created_at, session_key
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?
+                )
                 """,
-                (
-                    normalize_symbol(entry.symbol),
-                    entry.side.strip().upper(),
-                    entry.close_reason.value,
-                    entry.raw_close_reason,
-                    entry.opened_at.isoformat() if entry.opened_at is not None else None,
-                    entry.closed_at.isoformat(),
-                    entry.cooldown_expires_at.isoformat(),
-                    entry.position_id,
-                    entry.entry_price,
-                    entry.exit_price,
-                    entry.stop_loss,
-                    entry.take_profit,
-                    entry.highest_price,
-                    entry.lowest_price,
-                    entry.gross_pnl,
-                    entry.gross_pnl_percent,
-                    entry.created_at.isoformat() if entry.created_at is not None else None,
-                    entry.session_key,
-                ),
+                self._entry_values(entry),
             )
-
         return entry
 
-    def find_latest(self, symbol: str, side: str) -> ClosedTradeMemoryEntry | None:
-        normalized_symbol = normalize_symbol(symbol)
-        normalized_side = side.strip().upper()
-
+    def find_latest(
+        self,
+        symbol: str,
+        side: str,
+    ) -> ClosedTradeMemoryEntry | None:
         with self._connect() as connection:
             row = connection.execute(
-                """
-                SELECT
-                    symbol,
-                    side,
-                    close_reason,
-                    raw_close_reason,
-                    opened_at,
-                    closed_at,
-                    cooldown_expires_at,
-                    position_id,
-                    entry_price,
-                    exit_price,
-                    stop_loss,
-                    take_profit,
-                    highest_price,
-                    lowest_price,
-                    gross_pnl,
-                    gross_pnl_percent,
-                    created_at,
-                    session_key
-                FROM closed_trade_memory
-                WHERE symbol = ?
-                  AND side = ?
+                f"""
+                {self._select_sql()}
+                WHERE symbol = ? AND side = ?
                 LIMIT 1
                 """,
-                (
-                    normalized_symbol,
-                    normalized_side,
-                ),
+                (normalize_symbol(symbol), side.strip().upper()),
             ).fetchone()
+        return None if row is None else self._to_entry(row)
 
-        if row is None:
-            return None
-
-        return self._to_entry(row)
-
-    def find_latest_stop_loss(self, *, symbol: str) -> ClosedTradeMemoryEntry | None:
-        normalized_symbol = normalize_symbol(symbol)
-
+    def find_latest_initial_stop(
+        self,
+        *,
+        symbol: str,
+    ) -> ClosedTradeMemoryEntry | None:
         with self._connect() as connection:
             row = connection.execute(
-                """
-                SELECT
-                    symbol,
-                    side,
-                    close_reason,
-                    raw_close_reason,
-                    opened_at,
-                    closed_at,
-                    cooldown_expires_at,
-                    position_id,
-                    entry_price,
-                    exit_price,
-                    stop_loss,
-                    take_profit,
-                    highest_price,
-                    lowest_price,
-                    gross_pnl,
-                    gross_pnl_percent,
-                    created_at,
-                    session_key
-                FROM closed_trade_memory
-                WHERE symbol = ?
-                  AND close_reason = ?
+                f"""
+                {self._select_sql()}
+                WHERE symbol = ? AND close_reason = ?
                 ORDER BY closed_at DESC
                 LIMIT 1
                 """,
                 (
-                    normalized_symbol,
-                    CloseReason.STOP_LOSS.value,
+                    normalize_symbol(symbol),
+                    PositionCloseReason.INITIAL_STOP.value,
                 ),
             ).fetchone()
-
-        if row is None:
-            return None
-
-        return self._to_entry(row)
+        return None if row is None else self._to_entry(row)
 
     def find_active_cooldown(
         self,
@@ -173,11 +106,12 @@ class ClosedTradeMemoryStore:
         lookback_minutes: int,
     ) -> ClosedTradeMemoryEntry | None:
         entry = self.find_latest(symbol=symbol, side=side)
-        if entry is None or entry.close_reason != CloseReason.TAKE_PROFIT:
-            return None
-        if lookback_minutes <= 0:
-            return None
-        if entry.closed_at < now - timedelta(minutes=lookback_minutes):
+        if (
+            entry is None
+            or entry.close_reason != PositionCloseReason.TAKE_PROFIT
+            or lookback_minutes <= 0
+            or entry.closed_at < now - timedelta(minutes=lookback_minutes)
+        ):
             return None
         return entry
 
@@ -187,8 +121,7 @@ class ClosedTradeMemoryStore:
             connection.execute(
                 """
                 DELETE FROM closed_trade_memory
-                WHERE cooldown_expires_at <= ?
-                  AND closed_at <= ?
+                WHERE cooldown_expires_at <= ? AND closed_at <= ?
                 """,
                 (now.isoformat(), retention_cutoff.isoformat()),
             )
@@ -198,39 +131,37 @@ class ClosedTradeMemoryStore:
 
     def _initialize_schema(self) -> None:
         with self._connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT name FROM sqlite_master
+                WHERE type = 'table' AND name = 'closed_trade_memory'
+                """
+            ).fetchone()
+            if existing is not None:
+                columns = {
+                    str(row[1])
+                    for row in connection.execute(
+                        'PRAGMA table_info(closed_trade_memory)'
+                    ).fetchall()
+                }
+                if 'cooldown_contract_version' not in columns:
+                    row_count = int(
+                        connection.execute(
+                            'SELECT COUNT(*) FROM closed_trade_memory'
+                        ).fetchone()[0]
+                    )
+                    if row_count:
+                        raise RuntimeError(
+                            'Closed-trade memory uses the obsolete cooldown '
+                            'taxonomy. Rows were preserved and no legacy '
+                            'close reason was inferred.'
+                        )
+                    connection.execute('DROP TABLE closed_trade_memory')
+            self._create_table(connection)
             connection.execute(
                 """
-                CREATE TABLE IF NOT EXISTS closed_trade_memory (
-                    symbol TEXT NOT NULL,
-                    side TEXT NOT NULL,
-                    close_reason TEXT NOT NULL,
-                    raw_close_reason TEXT,
-                    opened_at TEXT,
-                    closed_at TEXT NOT NULL,
-                    cooldown_expires_at TEXT NOT NULL,
-                    position_id TEXT,
-                    entry_price REAL,
-                    exit_price REAL,
-                    stop_loss REAL,
-                    take_profit REAL,
-                    highest_price REAL,
-                    lowest_price REAL,
-                    gross_pnl REAL,
-                    gross_pnl_percent REAL,
-                    created_at TEXT,
-                    session_key TEXT,
-                    PRIMARY KEY (symbol, side)
-                )
-                """
-            )
-            self._ensure_column(
-                connection,
-                column_name='session_key',
-                column_type='TEXT',
-            )
-            connection.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_closed_trade_memory_cooldown_expires_at
+                CREATE INDEX IF NOT EXISTS
+                idx_closed_trade_memory_cooldown_expires_at
                 ON closed_trade_memory(cooldown_expires_at)
                 """
             )
@@ -242,137 +173,158 @@ class ClosedTradeMemoryStore:
             )
             connection.execute(
                 """
-                CREATE INDEX IF NOT EXISTS idx_closed_trade_memory_symbol_close_reason
+                CREATE INDEX IF NOT EXISTS
+                idx_closed_trade_memory_symbol_close_reason
                 ON closed_trade_memory(symbol, close_reason, closed_at)
                 """
             )
-            self._migrate_legacy_trade_cooldowns(connection)
 
-    def _ensure_column(
-        self,
-        connection: sqlite3.Connection,
-        *,
-        column_name: str,
-        column_type: str,
-    ) -> None:
-        columns = {
-            str(row[1])
-            for row in connection.execute(
-                'PRAGMA table_info(closed_trade_memory)'
-            ).fetchall()
-        }
-        if column_name not in columns:
-            connection.execute(
-                f'ALTER TABLE closed_trade_memory ADD COLUMN {column_name} {column_type}'
-            )
-
-    def _migrate_legacy_trade_cooldowns(self, connection: sqlite3.Connection) -> None:
-        legacy_table = connection.execute(
-            """
-            SELECT name
-            FROM sqlite_master
-            WHERE type = 'table'
-              AND name = 'trade_cooldowns'
-            """
-        ).fetchone()
-        if legacy_table is None:
-            return
-
+    def _create_table(self, connection: sqlite3.Connection) -> None:
         connection.execute(
             """
-            INSERT OR IGNORE INTO closed_trade_memory (
-                symbol,
-                side,
-                close_reason,
-                raw_close_reason,
-                opened_at,
-                closed_at,
-                cooldown_expires_at,
-                position_id,
-                entry_price,
-                exit_price,
-                stop_loss,
-                take_profit,
-                highest_price,
-                lowest_price,
-                gross_pnl,
-                gross_pnl_percent,
-                created_at,
-                session_key
+            CREATE TABLE IF NOT EXISTS closed_trade_memory (
+                cooldown_contract_version TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                close_reason TEXT NOT NULL,
+                opened_at TEXT,
+                closed_at TEXT NOT NULL,
+                cooldown_expires_at TEXT NOT NULL,
+                position_id TEXT,
+                signal_price REAL,
+                executable_entry_estimate REAL,
+                broker_entry_fill_price REAL,
+                pnl_entry_price REAL,
+                pnl_exit_price REAL,
+                exit_price_source TEXT,
+                stop_loss REAL,
+                take_profit REAL,
+                highest_executable_price REAL,
+                lowest_executable_price REAL,
+                gross_pnl REAL,
+                gross_pnl_percent REAL,
+                explicit_costs_deducted REAL,
+                net_pnl REAL,
+                net_pnl_percent REAL,
+                created_at TEXT,
+                session_key TEXT,
+                PRIMARY KEY (symbol, side)
             )
-            SELECT
-                symbol,
-                side,
-                close_reason,
-                raw_close_reason,
-                NULL,
-                closed_at,
-                expires_at,
-                position_id,
-                NULL,
-                NULL,
-                NULL,
-                NULL,
-                NULL,
-                NULL,
-                gross_pnl,
-                gross_pnl_percent,
-                created_at,
-                NULL
-            FROM trade_cooldowns
             """
         )
-        connection.execute('DROP TABLE trade_cooldowns')
+
+    @staticmethod
+    def _entry_values(entry: ClosedTradeMemoryEntry) -> tuple[Any, ...]:
+        return (
+            TRADE_COOLDOWN_CONTRACT_VERSION,
+            normalize_symbol(entry.symbol),
+            entry.side.strip().upper(),
+            entry.close_reason.value,
+            entry.opened_at.isoformat() if entry.opened_at else None,
+            entry.closed_at.isoformat(),
+            entry.cooldown_expires_at.isoformat(),
+            entry.position_id,
+            entry.signal_price,
+            entry.executable_entry_estimate,
+            entry.broker_entry_fill_price,
+            entry.pnl_entry_price,
+            entry.pnl_exit_price,
+            entry.exit_price_source.value if entry.exit_price_source else None,
+            entry.stop_loss,
+            entry.take_profit,
+            entry.highest_executable_price,
+            entry.lowest_executable_price,
+            entry.gross_pnl,
+            entry.gross_pnl_percent,
+            entry.explicit_costs_deducted,
+            entry.net_pnl,
+            entry.net_pnl_percent,
+            entry.created_at.isoformat() if entry.created_at else None,
+            entry.session_key,
+        )
+
+    @staticmethod
+    def _select_sql() -> str:
+        return """
+            SELECT
+                cooldown_contract_version, symbol, side, close_reason,
+                opened_at, closed_at, cooldown_expires_at, position_id,
+                signal_price, executable_entry_estimate,
+                broker_entry_fill_price, pnl_entry_price,
+                pnl_exit_price, exit_price_source,
+                stop_loss, take_profit, highest_executable_price,
+                lowest_executable_price, gross_pnl, gross_pnl_percent,
+                explicit_costs_deducted, net_pnl, net_pnl_percent,
+                created_at, session_key
+            FROM closed_trade_memory
+        """
 
     def _to_entry(self, row: tuple[Any, ...]) -> ClosedTradeMemoryEntry:
         (
-            symbol,
-            side,
-            close_reason,
-            raw_close_reason,
-            opened_at,
-            closed_at,
-            cooldown_expires_at,
-            position_id,
-            entry_price,
-            exit_price,
-            stop_loss,
-            take_profit,
-            highest_price,
-            lowest_price,
-            gross_pnl,
-            gross_pnl_percent,
-            created_at,
-            session_key,
+            contract_version, symbol, side, close_reason, opened_at,
+            closed_at, cooldown_expires_at, position_id, signal_price,
+            executable_entry_estimate, broker_entry_fill_price,
+            pnl_entry_price, pnl_exit_price, exit_price_source,
+            stop_loss, take_profit,
+            highest_executable_price, lowest_executable_price, gross_pnl,
+            gross_pnl_percent, explicit_costs_deducted, net_pnl,
+            net_pnl_percent, created_at, session_key,
         ) = row
-
+        if str(contract_version) != TRADE_COOLDOWN_CONTRACT_VERSION:
+            raise RuntimeError(
+                f'Unsupported cooldown contract: {contract_version}'
+            )
         return ClosedTradeMemoryEntry(
             symbol=str(symbol),
             side=str(side),
-            close_reason=CloseReason(str(close_reason)),
-            raw_close_reason=str(raw_close_reason) if raw_close_reason is not None else None,
-            opened_at=(
-                datetime.fromisoformat(str(opened_at)) if opened_at is not None else None
-            ),
+            close_reason=PositionCloseReason(str(close_reason)),
+            opened_at=self._optional_datetime(opened_at),
             closed_at=datetime.fromisoformat(str(closed_at)),
-            cooldown_expires_at=datetime.fromisoformat(str(cooldown_expires_at)),
-            position_id=str(position_id) if position_id is not None else None,
-            entry_price=self._optional_float(entry_price),
-            exit_price=self._optional_float(exit_price),
+            cooldown_expires_at=datetime.fromisoformat(
+                str(cooldown_expires_at)
+            ),
+            position_id=self._optional_string(position_id),
+            signal_price=self._optional_float(signal_price),
+            executable_entry_estimate=self._optional_float(
+                executable_entry_estimate
+            ),
+            broker_entry_fill_price=self._optional_float(
+                broker_entry_fill_price
+            ),
+            pnl_entry_price=self._optional_float(pnl_entry_price),
+            pnl_exit_price=self._optional_float(pnl_exit_price),
+            exit_price_source=(
+                ExitPriceSource(str(exit_price_source))
+                if exit_price_source is not None
+                else None
+            ),
             stop_loss=self._optional_float(stop_loss),
             take_profit=self._optional_float(take_profit),
-            highest_price=self._optional_float(highest_price),
-            lowest_price=self._optional_float(lowest_price),
+            highest_executable_price=self._optional_float(
+                highest_executable_price
+            ),
+            lowest_executable_price=self._optional_float(
+                lowest_executable_price
+            ),
             gross_pnl=self._optional_float(gross_pnl),
             gross_pnl_percent=self._optional_float(gross_pnl_percent),
-            created_at=(
-                datetime.fromisoformat(str(created_at)) if created_at is not None else None
+            explicit_costs_deducted=self._optional_float(
+                explicit_costs_deducted
             ),
-            session_key=str(session_key) if session_key is not None else None,
+            net_pnl=self._optional_float(net_pnl),
+            net_pnl_percent=self._optional_float(net_pnl_percent),
+            created_at=self._optional_datetime(created_at),
+            session_key=self._optional_string(session_key),
         )
 
-    def _optional_float(self, value: Any) -> float | None:
-        if value is None:
-            return None
+    @staticmethod
+    def _optional_float(value: Any) -> float | None:
+        return None if value is None else float(value)
 
-        return float(value)
+    @staticmethod
+    def _optional_string(value: Any) -> str | None:
+        return None if value is None else str(value)
+
+    @staticmethod
+    def _optional_datetime(value: Any) -> datetime | None:
+        return None if value is None else datetime.fromisoformat(str(value))

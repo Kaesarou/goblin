@@ -39,7 +39,12 @@ class PostTpResetDetector:
     def _detect_buy_reset(self, *, previous_trade: ClosedTradeMemoryEntry, candidate: 'TradeCandidate') -> PostTpResetDecision:
         move_unit_percent = self._move_unit_percent(previous_trade)
         required_pullback_percent = self._required_pullback_percent(move_unit_percent)
-        reference_high = max(self._positive_or_zero(previous_trade.highest_price), self._positive_or_zero(previous_trade.exit_price))
+        reference_high = max(
+            self._positive_or_zero(
+                previous_trade.highest_executable_price
+            ),
+            self._positive_or_zero(previous_trade.pnl_exit_price),
+        )
         current_price = candidate.snapshot.last
         pullback_percent = self._percent_drop(reference_price=reference_high, current_price=current_price)
         pullback_valid = pullback_percent >= required_pullback_percent
@@ -63,7 +68,10 @@ class PostTpResetDetector:
     def _detect_sell_reset(self, *, previous_trade: ClosedTradeMemoryEntry, candidate: 'TradeCandidate') -> PostTpResetDecision:
         move_unit_percent = self._move_unit_percent(previous_trade)
         required_pullback_percent = self._required_pullback_percent(move_unit_percent)
-        reference_low = self._first_positive(previous_trade.lowest_price, previous_trade.exit_price)
+        reference_low = self._first_positive(
+            previous_trade.lowest_executable_price,
+            previous_trade.pnl_exit_price,
+        )
         current_price = candidate.snapshot.last
         bounce_percent = self._percent_rise(reference_price=reference_low, current_price=current_price)
         pullback_valid = bounce_percent >= required_pullback_percent
@@ -111,8 +119,8 @@ class PostTpResetDetector:
         return PostTpResetDecision(valid=True, reset_type='range_breakout', details=details)
 
     def _move_unit_percent(self, previous_trade: ClosedTradeMemoryEntry) -> float:
-        entry_price = self._positive_or_zero(previous_trade.entry_price)
-        exit_price = self._positive_or_zero(previous_trade.exit_price)
+        entry_price = self._positive_or_zero(previous_trade.pnl_entry_price)
+        exit_price = self._positive_or_zero(previous_trade.pnl_exit_price)
         take_profit = self._positive_or_zero(previous_trade.take_profit)
         if entry_price <= 0:
             return 0.10

@@ -14,6 +14,8 @@ from app.journal.journal_policy import (
 )
 from app.journal.serialization import serialize_value
 
+DAILY_SUMMARY_SCHEMA_VERSION = 10
+
 
 class DailySummaryAggregator:
     def __init__(
@@ -79,11 +81,17 @@ class DailySummaryAggregator:
         self.risk_approved = self.risk_rejected = 0
         self.orders_from_pending = 0
         self.pending_position_ids = set()
-        self.gross_pnl_estimated = 0.0
-        self.estimated_costs = 0.0
-        self.net_pnl_estimated = 0.0
+        self.gross_pnl = 0.0
+        self.explicit_costs_deducted = 0.0
+        self.net_pnl = 0.0
         self.pnl_from_pending = 0.0
-        self.net_pnl_available = True
+        self.pnl_economics_complete = True
+        self.pnl_by_exit_price_source: dict[str, dict[str, float | int]] = {}
+        self.pnl_by_close_reason: dict[str, dict[str, float | int]] = {}
+        self.closed_position_calculations: list[dict[str, Any]] = []
+        self.mfe_total = 0.0
+        self.mae_total = 0.0
+        self.mfe_mae_count = 0
         self.top_rejected_candidates = []
         self.selected_candidates = []
         self.session_transitions = []
@@ -162,7 +170,10 @@ class DailySummaryAggregator:
                 )
                 if position_id:
                     self.pending_position_ids.add(str(position_id))
-        elif event_type == 'position_closed':
+        elif event_type in {
+            'position_close_confirmed',
+            'position_reconciled_closed',
+        }:
             self.positions_closed += 1
             self._record_closed_position_pnl(payload)
         elif event_type == 'position_restored':
@@ -367,7 +378,7 @@ class DailySummaryAggregator:
         gap_total = sum(self.candle_gaps_by_symbol.values())
         blocked_spread_count = len(self.pending_blocked_spread_values)
         return {
-            'schema_version': 9,
+            'schema_version': DAILY_SUMMARY_SCHEMA_VERSION,
             'run_id': self.run_id,
             'strategy': self.strategy,
             'profile': self.profile,
@@ -523,22 +534,35 @@ class DailySummaryAggregator:
                 },
             },
             'pnl': {
-                'gross_estimated': round(
-                    self.gross_pnl_estimated,
+                'gross_total': round(self.gross_pnl, 4),
+                'explicit_costs_deducted': round(
+                    self.explicit_costs_deducted,
                     4,
                 ),
-                'estimated_costs': (
-                    round(self.estimated_costs, 4)
-                    if self.net_pnl_available
+                'net_total': (
+                    round(self.net_pnl, 4)
+                    if self.pnl_economics_complete
                     else None
                 ),
-                'net_estimated': (
-                    round(self.net_pnl_estimated, 4)
-                    if self.net_pnl_available
-                    else None
-                ),
-                'net_estimated_available': self.net_pnl_available,
+                'economics_complete': self.pnl_economics_complete,
                 'from_pending': round(self.pnl_from_pending, 4),
+                'by_exit_price_source': self._rounded_pnl_breakdown(
+                    self.pnl_by_exit_price_source
+                ),
+                'by_close_reason': self._rounded_pnl_breakdown(
+                    self.pnl_by_close_reason
+                ),
+                'average_mfe_percent': (
+                    round(self.mfe_total / self.mfe_mae_count, 4)
+                    if self.mfe_mae_count
+                    else None
+                ),
+                'average_mae_percent': (
+                    round(self.mae_total / self.mfe_mae_count, 4)
+                    if self.mfe_mae_count
+                    else None
+                ),
+                'position_calculations': self.closed_position_calculations,
             },
             'cooldown': {
                 'blocked_total': sum(self.cooldowns_by_symbol.values()),
@@ -572,25 +596,93 @@ class DailySummaryAggregator:
         closed = payload.get('closed_position')
         gross = _attribute(closed, 'gross_pnl')
         if gross is None:
+            self.pnl_economics_complete = False
             return
         gross = float(gross)
-        self.gross_pnl_estimated += gross
-        cost = _attribute(closed, 'estimated_total_cost')
-        net = _attribute(closed, 'net_pnl_estimated')
+        self.gross_pnl += gross
+        cost = _attribute(closed, 'explicit_costs_deducted')
+        net = _attribute(closed, 'net_pnl')
         if cost is None or net is None:
-            amount = _attribute(closed, 'amount')
-            percent = _attribute(
-                closed,
-                'estimated_total_cost_percent',
-            )
-            if amount is not None and percent is not None:
-                cost = float(amount) * float(percent) / 100
-                net = gross - cost
-        if cost is None or net is None:
-            self.net_pnl_available = False
+            self.pnl_economics_complete = False
             return
-        self.estimated_costs += float(cost)
-        self.net_pnl_estimated += float(net)
+        cost = float(cost)
+        net = float(net)
+        self.explicit_costs_deducted += cost
+        self.net_pnl += net
+        exit_source = str(
+            _enum_value(_attribute(closed, 'exit_price_source'))
+            or 'unavailable'
+        )
+        close_reason = str(
+            _enum_value(_attribute(closed, 'close_reason'))
+            or 'unknown'
+        )
+        self._add_pnl_breakdown(
+            self.pnl_by_exit_price_source,
+            exit_source,
+            gross=gross,
+            cost=cost,
+            net=net,
+        )
+        self._add_pnl_breakdown(
+            self.pnl_by_close_reason,
+            close_reason,
+            gross=gross,
+            cost=cost,
+            net=net,
+        )
+        mfe = _attribute(closed, 'mfe_percent')
+        mae = _attribute(closed, 'mae_percent')
+        if mfe is not None and mae is not None:
+            self.mfe_total += float(mfe)
+            self.mae_total += float(mae)
+            self.mfe_mae_count += 1
+        self.closed_position_calculations.append(
+            {
+                'position_id': _attribute(closed, 'position_id'),
+                'symbol': _attribute(closed, 'symbol'),
+                'side': _attribute(closed, 'side'),
+                'close_reason': close_reason,
+                'signal_price': _attribute(closed, 'signal_price'),
+                'executable_entry_estimate': _attribute(
+                    closed,
+                    'executable_entry_estimate',
+                ),
+                'broker_entry_fill_price': _attribute(
+                    closed,
+                    'broker_entry_fill_price',
+                ),
+                'pnl_entry_price': _attribute(closed, 'pnl_entry_price'),
+                'entry_price_source': _enum_value(
+                    _attribute(closed, 'entry_price_source')
+                ),
+                'detection_last_execution_price': _attribute(
+                    closed,
+                    'detection_last_execution_price',
+                ),
+                'executable_exit_estimate': _attribute(
+                    closed,
+                    'executable_exit_estimate',
+                ),
+                'broker_exit_fill_price': _attribute(
+                    closed,
+                    'broker_exit_fill_price',
+                ),
+                'pnl_exit_price': _attribute(closed, 'pnl_exit_price'),
+                'exit_price_source': exit_source,
+                'bid_at_detection': _attribute(closed, 'bid_at_detection'),
+                'ask_at_detection': _attribute(closed, 'ask_at_detection'),
+                'observed_spread_percent': _attribute(
+                    closed,
+                    'observed_spread_percent',
+                ),
+                'gross_pnl': gross,
+                'explicit_costs_deducted': cost,
+                'net_pnl': net,
+                'mfe_percent': mfe,
+                'mae_percent': mae,
+            }
+        )
         position_id = _attribute(closed, 'position_id')
         if (
             position_id is not None
@@ -598,6 +690,38 @@ class DailySummaryAggregator:
         ):
             self.pnl_from_pending += float(net)
             self.pending_position_ids.discard(str(position_id))
+
+    @staticmethod
+    def _add_pnl_breakdown(
+        target: dict[str, dict[str, float | int]],
+        key: str,
+        *,
+        gross: float,
+        cost: float,
+        net: float,
+    ) -> None:
+        item = target.setdefault(
+            key,
+            {'count': 0, 'gross': 0.0, 'explicit_costs': 0.0, 'net': 0.0},
+        )
+        item['count'] = int(item['count']) + 1
+        item['gross'] = float(item['gross']) + gross
+        item['explicit_costs'] = float(item['explicit_costs']) + cost
+        item['net'] = float(item['net']) + net
+
+    @staticmethod
+    def _rounded_pnl_breakdown(
+        value: dict[str, dict[str, float | int]],
+    ) -> dict[str, dict[str, float | int]]:
+        return {
+            key: {
+                'count': int(item['count']),
+                'gross': round(float(item['gross']), 4),
+                'explicit_costs': round(float(item['explicit_costs']), 4),
+                'net': round(float(item['net']), 4),
+            }
+            for key, item in value.items()
+        }
 
     def _record_error(self, event_type, payload):
         self.error_types[event_type] += 1

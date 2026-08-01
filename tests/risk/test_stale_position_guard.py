@@ -26,12 +26,11 @@ def test_buy_stale_when_mfe_is_too_low():
         lowest_price=99.8,
         opened_at=checked_at() - timedelta(minutes=61),
         now=checked_at(),
-        estimated_total_cost_percent=0.3,
+        estimated_explicit_cost_percent=0.3,
         config=stale_config(),
     )
 
     assert decision.should_close
-    assert decision.reason == 'stale_position_exit'
     assert decision.mfe_percent == pytest.approx(0.4)
     assert decision.required_mfe_percent == pytest.approx(0.5)
 
@@ -44,7 +43,7 @@ def test_buy_not_stale_when_mfe_is_sufficient():
         lowest_price=99.8,
         opened_at=checked_at() - timedelta(minutes=61),
         now=checked_at(),
-        estimated_total_cost_percent=0.3,
+        estimated_explicit_cost_percent=0.3,
         config=stale_config(),
     )
 
@@ -60,7 +59,7 @@ def test_position_too_young_is_not_stale():
         lowest_price=100.0,
         opened_at=checked_at() - timedelta(minutes=59),
         now=checked_at(),
-        estimated_total_cost_percent=0.3,
+        estimated_explicit_cost_percent=0.3,
         config=stale_config(),
     )
 

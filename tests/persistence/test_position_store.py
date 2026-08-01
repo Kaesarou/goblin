@@ -1,132 +1,106 @@
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from app.execution.position_tracker import TrackedPosition
+import pytest
+
+from app.execution.managed_stop import ManagedProtectionType
+from app.execution.position_models import EntryPriceSource, TrackedPosition
 from app.persistence.position_store import PositionStore
 
 
-def position(
-    position_id: str,
-    symbol: str = 'MSFT',
-    entry_price: float = 100.0,
-    stop_loss: float = 99.0,
-    take_profit: float = 102.0,
-) -> TrackedPosition:
+OPENED_AT = datetime(2026, 7, 31, 15, 0, tzinfo=UTC)
+
+
+def position(position_id: str, symbol: str = 'MSFT') -> TrackedPosition:
     return TrackedPosition(
         position_id=position_id,
         symbol=symbol,
         side='BUY',
         amount=500.0,
-        entry_price=entry_price,
-        stop_loss=stop_loss,
-        take_profit=take_profit,
-        opened_at=datetime(2026, 6, 26, 16, 0, tzinfo=timezone.utc),
+        signal_price=100.0,
+        executable_entry_estimate=100.1,
+        broker_entry_fill_price=100.08,
+        pnl_entry_price=100.08,
+        entry_price_source=EntryPriceSource.BROKER_FILL,
+        stop_loss=99.0,
+        take_profit=102.0,
+        opened_at=OPENED_AT,
+        highest_executable_price=101.0,
+        lowest_executable_price=99.8,
+        highest_last_execution_price=101.1,
+        lowest_last_execution_price=99.9,
+        trailing_stop_net_buffer_percent=0.1,
+        managed_stop_protection_type=ManagedProtectionType.TRAILING,
+        estimated_explicit_cost=0.5,
+        estimated_explicit_cost_percent=0.1,
+        pretrade_estimated_spread_cost=1.0,
+        pretrade_observed_spread_percent=0.2,
+        pretrade_estimated_total_cost=1.5,
+        pretrade_estimated_total_cost_percent=0.3,
+        stale_position_enabled=True,
+        stale_position_max_age_minutes=60,
+        stale_position_min_favorable_move_percent=0.35,
+        stale_position_buffer_percent=0.1,
     )
 
 
-def test_position_store_saves_loads_and_deletes_open_positions(tmp_path):
+def test_position_store_round_trips_v2_economics_and_lifecycle(tmp_path):
     store = PositionStore(str(tmp_path / 'goblin.sqlite'))
-
-    store.save_open_position(position('position-1', 'MSFT'))
-    store.save_open_position(position('position-2', 'NVDA'))
-
-    loaded_positions = store.load_open_positions()
-
-    assert [loaded.position_id for loaded in loaded_positions] == ['position-1', 'position-2']
-    assert loaded_positions[0].symbol == 'MSFT'
-    assert loaded_positions[0].side == 'BUY'
-    assert loaded_positions[0].amount == 500.0
-    assert loaded_positions[0].entry_price == 100.0
-    assert loaded_positions[0].stop_loss == 99.0
-    assert loaded_positions[0].take_profit == 102.0
-
-    store.delete_open_position('position-1')
-
-    remaining_positions = store.load_open_positions()
-
-    assert [loaded.position_id for loaded in remaining_positions] == ['position-2']
-
-
-def test_position_store_persists_adjusted_execution_price_levels(tmp_path):
-    store = PositionStore(str(tmp_path / 'goblin.sqlite'))
-
-    store.save_open_position(position('position-1', 'HO.PA', entry_price=238.0, stop_loss=236.096, take_profit=241.332))
-
-    loaded = store.load_open_positions()[0]
-
-    assert loaded.entry_price == 238.0
-    assert loaded.stop_loss == 236.096
-    assert loaded.take_profit == 241.332
-
-
-def test_position_store_persists_managed_stop_fields(tmp_path):
-    store = PositionStore(str(tmp_path / 'goblin.sqlite'))
-    managed_position = position('position-1')
-    managed_position = TrackedPosition(
-        **{
-            **managed_position.__dict__,
-            'trailing_stop_net_buffer_percent': 0.1,
-            'managed_stop_protection_type': 'trailing',
-        }
-    )
-
-    store.save_open_position(managed_position)
-
-    loaded = store.load_open_positions()[0]
-
-    assert loaded.trailing_stop_net_buffer_percent == 0.1
-    assert loaded.managed_stop_protection_type == 'trailing'
-    assert loaded.last_stop_update_metadata is None
-
-
-def test_position_store_migrates_existing_open_positions_table(tmp_path):
-    db_path = tmp_path / 'goblin.sqlite'
-    with sqlite3.connect(db_path) as connection:
-        connection.execute(
-            """
-            CREATE TABLE open_positions (
-                position_id TEXT PRIMARY KEY,
-                symbol TEXT NOT NULL,
-                side TEXT NOT NULL,
-                amount REAL NOT NULL,
-                entry_price REAL NOT NULL,
-                stop_loss REAL NOT NULL,
-                take_profit REAL NOT NULL,
-                opened_at TEXT NOT NULL,
-                initial_stop_loss REAL,
-                highest_price REAL,
-                lowest_price REAL,
-                breakeven_stop_enabled INTEGER NOT NULL DEFAULT 0,
-                breakeven_trigger_percent REAL NOT NULL DEFAULT 0,
-                breakeven_buffer_percent REAL NOT NULL DEFAULT 0,
-                trailing_stop_enabled INTEGER NOT NULL DEFAULT 0,
-                trailing_stop_trigger_percent REAL NOT NULL DEFAULT 0,
-                trailing_stop_distance_percent REAL NOT NULL DEFAULT 0,
-                estimated_total_cost_percent REAL NOT NULL DEFAULT 0,
-                stale_position_enabled INTEGER NOT NULL DEFAULT 0,
-                stale_position_max_age_minutes INTEGER NOT NULL DEFAULT 0,
-                stale_position_min_favorable_move_percent REAL NOT NULL DEFAULT 0,
-                stale_position_buffer_percent REAL NOT NULL DEFAULT 0
-            )
-            """
-        )
-
-    store = PositionStore(str(db_path))
     store.save_open_position(position('position-1'))
+
     loaded = store.load_open_positions()[0]
 
-    assert loaded.trailing_stop_net_buffer_percent == 0.0
-    assert loaded.managed_stop_protection_type is None
+    assert loaded == position('position-1')
 
 
-def test_position_store_replaces_existing_position(tmp_path):
+def test_position_store_saves_replaces_and_deletes(tmp_path):
     store = PositionStore(str(tmp_path / 'goblin.sqlite'))
-
     store.save_open_position(position('position-1', 'MSFT'))
     store.save_open_position(position('position-1', 'AAPL'))
 
-    loaded_positions = store.load_open_positions()
+    assert [item.symbol for item in store.load_open_positions()] == ['AAPL']
+    store.delete_open_position('position-1')
+    assert store.load_open_positions() == []
 
-    assert len(loaded_positions) == 1
-    assert loaded_positions[0].position_id == 'position-1'
-    assert loaded_positions[0].symbol == 'AAPL'
+
+def test_empty_obsolete_table_is_rebuilt_without_legacy_columns(tmp_path):
+    path = tmp_path / 'goblin.sqlite'
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            'CREATE TABLE open_positions ('
+            'position_id TEXT PRIMARY KEY, entry_price REAL NOT NULL)'
+        )
+
+    store = PositionStore(str(path))
+    store.save_open_position(position('position-1'))
+
+    with sqlite3.connect(path) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute(
+                'PRAGMA table_info(open_positions)'
+            ).fetchall()
+        }
+    assert 'position_contract_version' in columns
+    assert 'pnl_entry_price' in columns
+    assert 'entry_price' not in columns
+
+
+def test_nonempty_obsolete_table_preserves_rows_and_refuses_inference(tmp_path):
+    path = tmp_path / 'goblin.sqlite'
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            'CREATE TABLE open_positions ('
+            'position_id TEXT PRIMARY KEY, entry_price REAL NOT NULL)'
+        )
+        connection.execute(
+            "INSERT INTO open_positions VALUES ('position-legacy', 100.0)"
+        )
+
+    with pytest.raises(RuntimeError, match='flat portfolio'):
+        PositionStore(str(path))
+
+    with sqlite3.connect(path) as connection:
+        assert connection.execute(
+            'SELECT COUNT(*) FROM open_positions'
+        ).fetchone()[0] == 1

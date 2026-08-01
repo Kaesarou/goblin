@@ -1,31 +1,9 @@
-def test_candidate_flow_runtime_module_imports():
-    from app.runtime.candidate_flow import execute_ranked_candidates
-
-    assert callable(execute_ranked_candidates)
-
-
-def test_position_lifecycle_runtime_module_imports():
-    from app.runtime.position_lifecycle import (
-        close_positions_triggered_by_snapshot,
-        reconcile_externally_closed_positions,
-        register_trade_cooldown_for_closed_position,
-        restore_persisted_positions,
-    )
-
-    assert callable(close_positions_triggered_by_snapshot)
-    assert callable(reconcile_externally_closed_positions)
-    assert callable(register_trade_cooldown_for_closed_position)
-    assert callable(restore_persisted_positions)
+from app.runtime import candidate_flow
+from app.runtime.async_candidate_execution import (
+    AsyncCandidateExecutionCoordinator,
+)
 
 
-def test_symbol_flow_runtime_module_imports():
-    from app.runtime.symbol_flow import process_closed_candle, process_symbol
-
-    assert callable(process_closed_candle)
-    assert callable(process_symbol)
-
-
-def test_main_imports_after_runtime_extractions():
-    import app.main
-
-    assert callable(app.main.main)
+def test_runtime_exposes_only_async_candidate_execution_path():
+    assert AsyncCandidateExecutionCoordinator is not None
+    assert not hasattr(candidate_flow, 'execute_ranked_candidates')

@@ -3,8 +3,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.persistence.closed_trade_memory_store import ClosedTradeMemoryStore
+from app.execution.position_close_reason import PositionCloseReason
 from app.risk.trade_cooldown import (
-    CloseReason,
     ClosedTradeMemoryEntry,
     TradeCooldownConfig,
 )
@@ -14,8 +14,8 @@ from app.strategies.guards.fixed_trade_cooldown_guard import FixedTradeCooldownG
 CLOSED_AT = datetime(2026, 7, 10, 15, 0, tzinfo=timezone.utc)
 CONFIG = TradeCooldownConfig(
     after_take_profit_minutes=30,
-    after_stop_loss_minutes=45,
-    stop_loss_symbol_lock_minutes=15,
+    after_initial_stop_minutes=45,
+    initial_stop_symbol_lock_minutes=15,
 )
 
 
@@ -23,14 +23,15 @@ def _entry(
     *,
     symbol: str = 'MU',
     side: str = 'SELL',
-    close_reason: CloseReason = CloseReason.STOP_LOSS,
+    close_reason: PositionCloseReason = PositionCloseReason.INITIAL_STOP,
 ) -> ClosedTradeMemoryEntry:
-    cooldown_minutes = 45 if close_reason == CloseReason.STOP_LOSS else 30
+    cooldown_minutes = (
+        45 if close_reason == PositionCloseReason.INITIAL_STOP else 30
+    )
     return ClosedTradeMemoryEntry(
         symbol=symbol,
         side=side,
         close_reason=close_reason,
-        raw_close_reason=f'{close_reason.value}_hit',
         opened_at=CLOSED_AT - timedelta(minutes=5),
         closed_at=CLOSED_AT,
         cooldown_expires_at=CLOSED_AT + timedelta(minutes=cooldown_minutes),
@@ -70,7 +71,7 @@ def test_stop_loss_locks_both_sides(
     )
 
     assert not decision.allowed
-    assert decision.reason == 'cooldown_after_stop_loss_symbol_lock'
+    assert decision.reason == 'cooldown_after_initial_stop_symbol_lock'
     assert decision.lock_scope == 'symbol_both_sides'
     assert decision.blocked_sides == ('BUY', 'SELL')
     assert decision.remaining_seconds == 10 * 60
@@ -79,7 +80,7 @@ def test_stop_loss_locks_both_sides(
 def test_take_profit_does_not_lock_opposite_side(tmp_path):
     guard = _guard(
         tmp_path,
-        _entry(close_reason=CloseReason.TAKE_PROFIT),
+        _entry(close_reason=PositionCloseReason.TAKE_PROFIT),
     )
 
     decision = guard.check(
@@ -111,7 +112,7 @@ def test_symbol_lock_expires_before_same_side_stop_loss_cooldown(tmp_path):
 
     assert opposite_side.allowed
     assert not same_side.allowed
-    assert same_side.reason == 'cooldown_after_stop_loss'
+    assert same_side.reason == 'cooldown_after_initial_stop'
     assert same_side.lock_scope == 'symbol_side'
     assert same_side.remaining_seconds == 29 * 60
 

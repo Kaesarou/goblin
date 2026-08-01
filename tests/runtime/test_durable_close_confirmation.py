@@ -2,21 +2,25 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from app.brokers.base import (
+    BrokerCloseExecution,
     ClosePositionRejectedError,
     ClosePositionSubmission,
     ClosePositionSubmissionUnknownError,
 )
-from app.execution.position_tracker import (
+from app.execution.position_close_reason import PositionCloseReason
+from app.execution.position_models import (
+    EntryPriceSource,
+    ExitPriceSource,
     PositionCloseSignal,
-    PositionTracker,
     TrackedPosition,
 )
+from app.execution.position_tracker import PositionTracker
 from app.persistence.pending_close_store import PendingCloseStore
 from app.persistence.position_store import PositionStore
 from app.runtime.async_broker_operations import AsyncBrokerOperationsCoordinator
+from app.runtime.broker_queries import PositionReconciliationResult
 from app.runtime.broker_task_runner import BrokerTaskCompletion, BrokerTaskLane
 from app.runtime.pending_close import CloseState, PendingClose
-
 
 NOW = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
 
@@ -89,7 +93,11 @@ def position(position_id: str, symbol: str) -> TrackedPosition:
         symbol=symbol,
         side='BUY',
         amount=500.0,
-        entry_price=100.0,
+        signal_price=100.0,
+        executable_entry_estimate=100.1,
+        broker_entry_fill_price=None,
+        pnl_entry_price=100.1,
+        entry_price_source=EntryPriceSource.EXECUTABLE_ESTIMATE,
         stop_loss=99.0,
         take_profit=102.0,
         opened_at=NOW,
@@ -101,9 +109,13 @@ def signal(position_id: str, symbol: str) -> PositionCloseSignal:
         position_id=position_id,
         symbol=symbol,
         side='BUY',
-        exit_price=98.9,
-        reason='stop_loss',
+        reason=PositionCloseReason.INITIAL_STOP,
         detected_at=NOW,
+        last_execution_price=99.0,
+        executable_estimate=98.9,
+        bid_at_detection=98.9,
+        ask_at_detection=99.1,
+        observed_spread_percent=0.2,
     )
 
 
@@ -310,7 +322,13 @@ def test_ambiguous_submission_confirms_from_one_portfolio_absence(tmp_path):
             kind='position_reconciliation',
             lane=BrokerTaskLane.STANDARD,
             context=scheduled['context'],
-            value={'position-a': False, 'position-b': True},
+            value=PositionReconciliationResult(
+                open_states={'position-a': False, 'position-b': True},
+                close_executions={},
+                close_execution_unavailable={
+                    'position-a': 'broker_fill_not_returned'
+                },
+            ),
         ),
         now=NOW,
         latest_snapshots={},
@@ -324,6 +342,84 @@ def test_ambiguous_submission_confirms_from_one_portfolio_absence(tmp_path):
     ]
     assert broker.forgotten == ['position-a']
     assert 'position_close_confirmed' in event_types(journal)
+    confirmed = next(
+        payload
+        for event_type, payload in journal.events
+        if event_type == 'position_close_confirmed'
+    )
+    assert confirmed['closed_position'].pnl_exit_price == 98.9
+    assert confirmed['closed_position'].exit_price_source is (
+        ExitPriceSource.EXECUTABLE_ESTIMATE
+    )
+
+
+def test_reconciliation_uses_broker_close_fill_as_canonical_pnl_price(tmp_path):
+    (
+        coordinator,
+        runner,
+        journal,
+        tracker,
+        risk,
+        pending_store,
+        position_store,
+        _,
+    ) = build_coordinator(tmp_path)
+    coordinator.submit_close(
+        signal=signal('position-a', 'BTC'),
+        source='websocket_position_guard',
+    )
+    submission = runner.tasks[0]
+    coordinator.handle_completion(
+        completion_for(submission, value=submission['operation']()),
+        now=NOW,
+        latest_snapshots={},
+    )
+
+    fill = BrokerCloseExecution(
+        position_id='position-a',
+        close_order_id='close-position-a',
+        executed_exit_price=98.5,
+        executed_at=NOW,
+        units=5.0,
+        conversion_rate=1.0,
+        amount=492.5,
+        broker_response={'positions': [{'positionID': 'position-a'}]},
+    )
+    runner.tasks.clear()
+    assert coordinator.schedule_reconciliation(now=NOW)
+    scheduled = runner.tasks[0]
+    coordinator.handle_completion(
+        BrokerTaskCompletion(
+            task_id='reconcile-with-fill',
+            kind='position_reconciliation',
+            lane=BrokerTaskLane.STANDARD,
+            context=scheduled['context'],
+            value=PositionReconciliationResult(
+                open_states={'position-a': False, 'position-b': True},
+                close_executions={'position-a': fill},
+                close_execution_unavailable={},
+            ),
+        ),
+        now=NOW,
+        latest_snapshots={},
+    )
+
+    confirmed = next(
+        payload
+        for event_type, payload in journal.events
+        if event_type == 'position_close_confirmed'
+    )
+    closed = confirmed['closed_position']
+    assert closed.pnl_exit_price == 98.5
+    assert closed.broker_exit_fill_price == 98.5
+    assert closed.exit_price_source is ExitPriceSource.BROKER_FILL
+    assert 'position-a' not in tracker.positions
+    assert risk.closed_symbols == ['BTC']
+    assert pending_store.load_all() == []
+    assert [item.position_id for item in position_store.load_open_positions()] == [
+        'position-b'
+    ]
+    assert 'broker_close_fill_resolved' in event_types(journal)
 
 
 def test_explicit_rejection_keeps_position_and_requires_intervention(tmp_path):
@@ -370,7 +466,7 @@ def test_explicit_rejection_keeps_position_and_requires_intervention(tmp_path):
     )
 
 
-def test_restart_restores_pending_without_reissuing_post(tmp_path):
+def test_restart_absence_keeps_risk_until_background_confirmation(tmp_path):
     (
         coordinator,
         runner,
@@ -396,14 +492,16 @@ def test_restart_restores_pending_without_reissuing_post(tmp_path):
     )
 
     assert runner.tasks == []
-    assert 'position-a' not in tracker.positions
-    assert risk.closed_symbols == ['BTC']
-    assert pending_store.load_all() == []
-    assert [item.position_id for item in position_store.load_open_positions()] == [
-        'position-b'
-    ]
-    assert broker.forgotten == ['position-a']
-    assert 'position_close_confirmed' in event_types(journal)
+    assert 'position-a' in tracker.positions
+    assert risk.closed_symbols == []
+    assert pending_store.load_all()
+    assert {item.position_id for item in position_store.load_open_positions()} == {
+        'position-a',
+        'position-b',
+    }
+    assert broker.forgotten == []
+    assert 'position_close_confirmed' not in event_types(journal)
+    assert 'position_close_confirmation_pending' in event_types(journal)
 
 
 def test_restart_during_submission_becomes_unknown_without_post(tmp_path):
