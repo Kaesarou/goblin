@@ -1,12 +1,20 @@
 from dataclasses import replace
 from datetime import datetime, timezone
+from types import SimpleNamespace
+
+import pytest
 
 from app.config.settings import Settings
 from app.execution.candidate_economics import (
     CandidateEconomics,
     EvaluatedTradeCandidate,
 )
-from app.execution.candidate_selector import CandidateSelectionConfig
+from app.execution.candidate_selector import (
+    CandidateSelectionConfig,
+    EvaluatedCandidateSelectionResult,
+    RejectedEvaluatedCandidateSelection,
+)
+from app.execution.strategy_segment import StrategySegment
 from app.execution.trade_candidate import TradeCandidate
 from app.instruments.instrument_registry import InstrumentRegistry
 from app.instruments.models import AssetClass
@@ -14,8 +22,14 @@ from app.market.models import Candle, MarketSnapshot
 from app.risk.position_sizing import FixedPercentPositionSizing
 from app.risk.risk_manager import RiskManager
 from app.runtime.candidate_flow import (
+    apply_managed_v2_shadow_to_evaluated_candidates,
     select_evaluated_trade_candidates_with_strategy_profile,
     select_trade_candidates_with_strategy_profile,
+)
+from app.runtime.managed_v2_shadow import (
+    annotate_managed_v2_shadow_shared_rejections,
+    apply_managed_v2_shadow_selection,
+    candidate_selection_contract_metadata,
 )
 from app.strategies.balanced_strategy_config import BalancedStrategyConfig
 from app.strategies.signals import Signal
@@ -77,6 +91,7 @@ def make_evaluated_candidate(symbol: str, score: float) -> EvaluatedTradeCandida
                 'minimum_positive_probability': 0.30,
                 'minimum_expected_net_return_percent': 0.05,
             },
+            segment=StrategySegment.EQUITY_US_BUY,
         ),
         economics=CandidateEconomics(
             position_value=100.0,
@@ -183,3 +198,113 @@ def test_eu_top_one_does_not_reduce_us_top_two():
         for item in result.rejected_candidates
     }
     assert rejected == {'ASML.NV': 'candidate_selection_outside_top_n'}
+
+
+def test_runtime_declares_v1_active_and_v2_shadow_without_runtime_tuning():
+    assert candidate_selection_contract_metadata(
+        managed_evaluation_enabled=True
+    ) == {
+        'selection_policy_version': 'managed_edge_v1',
+        'managed_v2_shadow_policy_version': 'managed_v2_segment_first_v1',
+        'managed_v2_deployment_status': 'shadow_not_approved',
+    }
+
+
+def test_shadow_evaluation_fails_when_segment_is_absent():
+    item = make_evaluated_candidate('AAPL', score=130.0)
+    item = replace(item, candidate=replace(item.candidate, segment=None))
+
+    with pytest.raises(RuntimeError, match='explicit segment'):
+        apply_managed_v2_shadow_to_evaluated_candidates(
+            evaluated_candidates=[item],
+            evaluator=SimpleNamespace(),
+        )
+
+
+def test_full_shadow_selection_outcome_replaces_gate_only_annotation(
+    monkeypatch,
+):
+    from app.runtime import managed_v2_shadow
+
+    items = []
+    for symbol, score in (
+        ('AAPL', 130.0),
+        ('MSFT', 120.0),
+        ('NVDA', 110.0),
+    ):
+        item = make_evaluated_candidate(symbol, score)
+        items.append(
+            replace(
+                item,
+                candidate=replace(
+                    item.candidate,
+                    candidate_id=f'candidate-{symbol}',
+                    managed_v2_metadata={
+                        'shadow_selection_outcome': 'selected',
+                        'shadow_selection_reason': None,
+                    },
+                ),
+            )
+        )
+    fake_selection = EvaluatedCandidateSelectionResult(
+        selected_candidates=items[:2],
+        rejected_candidates=[
+            RejectedEvaluatedCandidateSelection(
+                evaluated_candidate=items[2],
+                reason='candidate_selection_outside_top_n',
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        managed_v2_shadow,
+        'select_evaluated_trade_candidates_with_strategy_profile',
+        lambda *_args, **_kwargs: fake_selection,
+    )
+
+    annotated, selection = apply_managed_v2_shadow_selection(
+        evaluated_candidates=items,
+        risk_manager=build_risk_manager(),
+        strategy_profile=build_strategy_profile(),
+    )
+
+    by_symbol = {item.candidate.symbol: item for item in annotated}
+    assert by_symbol['AAPL'].candidate.managed_v2_metadata[
+        'shadow_selection_outcome'
+    ] == 'selected'
+    assert by_symbol['NVDA'].candidate.managed_v2_metadata[
+        'shadow_selection_outcome'
+    ] == 'rejected'
+    assert by_symbol['NVDA'].candidate.managed_v2_metadata[
+        'shadow_selection_reason'
+    ] == 'candidate_selection_outside_top_n'
+    assert selection.rejected_candidates[0].evaluated_candidate is (
+        by_symbol['NVDA']
+    )
+
+
+def test_shared_cooldown_rejection_is_explicit_in_shadow_outcome():
+    item = make_evaluated_candidate('AAPL', 130.0)
+    item = replace(
+        item,
+        candidate=replace(
+            item.candidate,
+            managed_v2_metadata={
+                'gate_outcome': 'eligible',
+                'gate_rejection_reason': None,
+            },
+        ),
+    )
+    rejection = RejectedEvaluatedCandidateSelection(
+        evaluated_candidate=item,
+        reason='same_side_trade_cooldown_active',
+        selection_threshold_source='trade_cooldown',
+    )
+
+    annotated = annotate_managed_v2_shadow_shared_rejections([rejection])[0]
+
+    metadata = annotated.evaluated_candidate.candidate.managed_v2_metadata
+    assert metadata['gate_outcome'] == 'eligible'
+    assert metadata['shadow_selection_outcome'] == 'rejected'
+    assert metadata['shadow_selection_reason'] == (
+        'same_side_trade_cooldown_active'
+    )

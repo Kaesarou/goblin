@@ -42,7 +42,7 @@ def test_run_manifest_captures_segmented_probability_contract():
         started_at=datetime(2026, 7, 29, 8, 0, tzinfo=UTC),
     )
 
-    assert manifest['schema_version'] == 12
+    assert manifest['schema_version'] == 13
     assert 'ETORO_API_KEY' not in manifest['runtime']['settings']
     assert 'ETORO_USER_KEY' not in manifest['runtime']['settings']
     models = manifest['models']
@@ -75,7 +75,34 @@ def test_run_manifest_captures_segmented_probability_contract():
     assert 'outcome_probability' in manifest['analysis_sources'][
         'analysis_ready_entry_fields'
     ]
+    entry_fields = manifest['analysis_sources'][
+        'analysis_ready_entry_fields'
+    ]
+    assert {
+        'schema_version',
+        'entry_reference_price',
+        'spread',
+        'managed_protection_probability',
+        'managed_positive_probability',
+        'managed_expected_net_return_percent',
+        'managed_edge',
+        'managed_outcome_model_version',
+        'managed_v2_gate_outcome',
+        'managed_v2_gate_rejection_reason',
+    } <= set(entry_fields)
     assert manifest['strategy']['selection_policy'] == 'managed_edge_v1'
+    assert manifest['strategy']['managed_v2_shadow_policy'] == (
+        'managed_v2_segment_first_v1'
+    )
+    assert manifest['strategy']['managed_v2_deployment_status'] == (
+        'shadow_not_approved'
+    )
+    assert models['managed_v2_runtime_role'] == 'shadow'
+    assert manifest['analysis_sources']['schemas'] == {
+        'entry_decision': 2,
+        'daily_summary': 10,
+        'analysis_ready_summary': 14,
+    }
     assert manifest['strategy']['breakeven_profile'] == (
         BreakevenProfileName.CORRECTED_BASELINE_V1
     )

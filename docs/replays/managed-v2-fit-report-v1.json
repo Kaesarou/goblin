@@ -1,0 +1,972 @@
+{
+  "artifact_file_sha256": {
+    "EQUITY_EU_BUY.json": "e73f00e180e0e38f4fa4808ff1b68ddc509219c742928584926cc4923f3223df",
+    "EQUITY_EU_SELL.json": "f1d8c7f90ce3721adee393d7104081b58a2c7d05b154fa0b23994ce5de78f03a",
+    "EQUITY_US_BUY.json": "2e83541dee0b0face4fe85e349fce58b27c625f5c5cbc75322586a3f09305211",
+    "EQUITY_US_SELL.json": "9fbc64ab2534a02aabbad0c4af0dd040d0aa32481c489af0c5fb7b926da6701a",
+    "manifest.json": "8693e73208c3e7261eb5c168e5853eb111fbd6ff50842ab4ce9e0d97981dfbd0"
+  },
+  "artifact_sha256": "f991f1080afd1c8f820edae35c059a5350bdfef50cc199c66e33680ab109d5aa",
+  "dataset_sha256": "509bf6e5305107a360b63af3bf35c372c0cd59ad9c3e7f68a6a7897f2de9111d",
+  "extraction": {
+    "by_day": {
+      "2026-07-22": {
+        "candidate_universe": 584,
+        "labeled_rows": 464,
+        "unresolved": 0
+      },
+      "2026-07-23": {
+        "candidate_universe": 719,
+        "labeled_rows": 539,
+        "unresolved": 0
+      },
+      "2026-07-24": {
+        "candidate_universe": 674,
+        "labeled_rows": 488,
+        "unresolved": 0
+      },
+      "2026-07-27": {
+        "candidate_universe": 700,
+        "labeled_rows": 510,
+        "unresolved": 0
+      },
+      "2026-07-28": {
+        "candidate_universe": 869,
+        "labeled_rows": 604,
+        "unresolved": 39
+      },
+      "2026-07-29": {
+        "candidate_universe": 998,
+        "labeled_rows": 719,
+        "unresolved": 0
+      },
+      "2026-07-30": {
+        "candidate_universe": 978,
+        "labeled_rows": 759,
+        "unresolved": 0
+      },
+      "2026-07-31": {
+        "candidate_universe": 829,
+        "labeled_rows": 618,
+        "unresolved": 0
+      },
+      "2026-08-03": {
+        "candidate_universe": 653,
+        "labeled_rows": 511,
+        "unresolved": 0
+      },
+      "2026-08-04": {
+        "candidate_universe": 651,
+        "labeled_rows": 517,
+        "unresolved": 0
+      },
+      "2026-08-05": {
+        "candidate_universe": 705,
+        "labeled_rows": 490,
+        "unresolved": 0
+      },
+      "2026-08-06": {
+        "candidate_universe": 687,
+        "labeled_rows": 498,
+        "unresolved": 0
+      },
+      "2026-08-07": {
+        "candidate_universe": 534,
+        "labeled_rows": 430,
+        "unresolved": 0
+      }
+    },
+    "counts": {
+      "duplicate_market_snapshot": 511,
+      "entry_skip": 11,
+      "entry_wait_for_retest": 1238,
+      "label_candidates": 7186,
+      "quote_quarantined": 254,
+      "risk_reject:spread_too_high": 1146,
+      "unresolved_at_day_end": 39
+    }
+  },
+  "feature_contract_version": "managed_v2_features_v1",
+  "label_contract_version": "managed_v2_labels_v1",
+  "model_version": "managed_v2_20260808",
+  "quote_quality_contract": {
+    "ambiguous_follow_up": "quarantine_and_rebase_pending_until_level_or_baseline_confirmation",
+    "change_basis": "max_abs_percent_change_across_bid_ask_last",
+    "confirmation_basis": "max_abs_percent_distance_across_bid_ask_last",
+    "confirmation_tolerance_source": "instrument_market_data_quality.jump_confirmation_tolerance_percent",
+    "median_multiplier": 20.0,
+    "minimum_jump_percent": 0.75,
+    "minimum_observations": 20,
+    "reference_observations": 128,
+    "version": "quote_quality_v2"
+  },
+  "schema_version": 1,
+  "segments": {
+    "EQUITY_EU_BUY": {
+      "floors": {
+        "expected_net_return_percent": 0.0,
+        "opportunity_probability": 0.441739,
+        "path_probability": 0.7,
+        "policy_version": "managed_v2_training_prior_floors_v1"
+      },
+      "training_rows": 575,
+      "training_status": "trained",
+      "validation_rows": 940
+    },
+    "EQUITY_EU_SELL": {
+      "floors": {
+        "expected_net_return_percent": 0.0,
+        "opportunity_probability": 0.35,
+        "path_probability": 0.7,
+        "policy_version": "managed_v2_training_prior_floors_v1"
+      },
+      "training_rows": 636,
+      "training_status": "trained",
+      "validation_rows": 1243
+    },
+    "EQUITY_US_BUY": {
+      "floors": {
+        "expected_net_return_percent": 0.0,
+        "opportunity_probability": 0.368139,
+        "path_probability": 0.7,
+        "policy_version": "managed_v2_training_prior_floors_v1"
+      },
+      "training_rows": 747,
+      "training_status": "trained",
+      "validation_rows": 1381
+    },
+    "EQUITY_US_SELL": {
+      "floors": {
+        "expected_net_return_percent": 0.0,
+        "opportunity_probability": 0.412674,
+        "path_probability": 0.7,
+        "policy_version": "managed_v2_training_prior_floors_v1"
+      },
+      "training_rows": 647,
+      "training_status": "trained",
+      "validation_rows": 978
+    }
+  },
+  "selection_policy_version": "managed_v2_segment_first_v1",
+  "source_provenance": {
+    "parts": {
+      "day1.zip": {
+        "bytes": 1030521986,
+        "sha256": "6bb350b1dc23bacaa452685f5a982e2eaf2731ccbcec3c1cdf589a06b56ad4b4"
+      },
+      "day3.zip": {
+        "bytes": 604248086,
+        "sha256": "6cbe011ac7e6004202718b99eea2fe5a072099e947b7bc4a6c3c2cf7ef6634e3"
+      },
+      "july-history.zip": {
+        "bytes": 592827205,
+        "sha256": "936ea4f16e14daa233aa5a5caf70ce7db6575882123216a7e877a3aaca416d8f"
+      },
+      "july31.zip": {
+        "bytes": 970045619,
+        "sha256": "2af9679ee4aee53e46995eb1536bdb59f79a5afee1954312a9a6e2031f658f1f"
+      },
+      "week2.zip": {
+        "bytes": 1441288793,
+        "sha256": "f4005d806db67ee642fc127c0756e616a0cc4650599e47edc1e17688dbf77126"
+      }
+    },
+    "runs": {
+      "run_20260721T234834_976267Z": {
+        "ended_at": null,
+        "git_commit": "174387a33f968e77848ab38da5bacbfea894ac6f",
+        "market_member_crc32": "d4caae4b",
+        "market_member_uncompressed_bytes": 284863821,
+        "parts": [
+          "day1.zip"
+        ],
+        "started_at": "2026-07-21T23:48:34.976267+00:00",
+        "status": "running"
+      },
+      "run_20260722T215902_131640Z": {
+        "ended_at": "2026-07-23T13:30:01.613276+00:00",
+        "git_commit": "d56056d66a57ecec0f716d3cf72e7a4e90abeac5",
+        "market_member_crc32": "26250400",
+        "market_member_uncompressed_bytes": 106942099,
+        "parts": [
+          "day3.zip"
+        ],
+        "started_at": "2026-07-22T21:59:02.131640+00:00",
+        "status": "failed"
+      },
+      "run_20260723T133037_416904Z": {
+        "ended_at": "2026-07-24T13:30:01.538568+00:00",
+        "git_commit": "d56056d66a57ecec0f716d3cf72e7a4e90abeac5",
+        "market_member_crc32": "7aa7260f",
+        "market_member_uncompressed_bytes": 309283920,
+        "parts": [
+          "day3.zip"
+        ],
+        "started_at": "2026-07-23T13:30:37.416904+00:00",
+        "status": "failed"
+      },
+      "run_20260724T133050_374323Z": {
+        "ended_at": null,
+        "git_commit": "d56056d66a57ecec0f716d3cf72e7a4e90abeac5",
+        "market_member_crc32": "347bf1d3",
+        "market_member_uncompressed_bytes": 215963588,
+        "parts": [
+          "day3.zip"
+        ],
+        "started_at": "2026-07-24T13:30:50.374323+00:00",
+        "status": "running"
+      },
+      "run_20260726T094250_523011Z": {
+        "ended_at": null,
+        "git_commit": "74d4b81af9c4104f3a5eb03e0a61576f7027193f",
+        "market_member_crc32": "9d44afad",
+        "market_member_uncompressed_bytes": 604136779,
+        "parts": [
+          "july-history.zip"
+        ],
+        "started_at": "2026-07-26T09:42:50.523011+00:00",
+        "status": "running"
+      },
+      "run_20260729T010827_207768Z": {
+        "ended_at": null,
+        "git_commit": "2381ef1dfec8eb8c87a0f32d4cbc645d31ec13be",
+        "market_member_crc32": "7a169903",
+        "market_member_uncompressed_bytes": 333040378,
+        "parts": [
+          "july31.zip"
+        ],
+        "started_at": "2026-07-29T01:08:27.207768+00:00",
+        "status": "running"
+      },
+      "run_20260729T214038_597493Z": {
+        "ended_at": null,
+        "git_commit": "7da5a72d7af33e91b05e2c31ab0fe1c835629bf2",
+        "market_member_crc32": "bc1bbdc1",
+        "market_member_uncompressed_bytes": 426970089,
+        "parts": [
+          "july31.zip"
+        ],
+        "started_at": "2026-07-29T21:40:38.597493+00:00",
+        "status": "running"
+      },
+      "run_20260731T113542_458255Z": {
+        "ended_at": null,
+        "git_commit": "f4978c64cb781b1f74e3c05d9e9007b806864a5f",
+        "market_member_crc32": "b4808474",
+        "market_member_uncompressed_bytes": 250181975,
+        "parts": [
+          "july31.zip"
+        ],
+        "started_at": "2026-07-31T11:35:42.458255+00:00",
+        "status": "running"
+      },
+      "run_20260801T173539_648998Z": {
+        "ended_at": null,
+        "git_commit": "184941762f82be808c3c5118f6c0163b1ef2e0b3",
+        "market_member_crc32": "67bf66b7",
+        "market_member_uncompressed_bytes": 1448719254,
+        "parts": [
+          "week2.zip"
+        ],
+        "started_at": "2026-08-01T17:35:39.648998+00:00",
+        "status": "running"
+      }
+    }
+  },
+  "training_dates": [
+    "2026-07-22",
+    "2026-07-23",
+    "2026-07-24",
+    "2026-07-27",
+    "2026-07-28"
+  ],
+  "training_metrics_oof": {
+    "EQUITY_EU_BUY": {
+      "close_reasons": {
+        "initial_stop": 94,
+        "protected_breakeven": 132,
+        "protected_trailing": 77,
+        "stale_exit": 173,
+        "take_profit": 7
+      },
+      "economics": {
+        "correlation": -0.004950274745000518,
+        "expected_mean_percent": 0.2430744037267113,
+        "mae_percent": 0.2821702929126727,
+        "realized_mean_percent": 0.23941899767816344,
+        "rows": 216
+      },
+      "opportunity": {
+        "auc": 0.4947138617018667,
+        "brier": 0.27582093681385084,
+        "calibration": [
+          {
+            "lower": 0.0,
+            "observed_rate": 0.4642857142857143,
+            "predicted_mean": 0.1316114804762885,
+            "rows": 28,
+            "upper": 0.2
+          },
+          {
+            "lower": 0.2,
+            "observed_rate": 0.5053763440860215,
+            "predicted_mean": 0.31824627597551797,
+            "rows": 186,
+            "upper": 0.4
+          },
+          {
+            "lower": 0.4,
+            "observed_rate": 0.3754646840148699,
+            "predicted_mean": 0.49768329308314063,
+            "rows": 269,
+            "upper": 0.6000000000000001
+          },
+          {
+            "lower": 0.6,
+            "observed_rate": 0.5185185185185185,
+            "predicted_mean": 0.6441541923059682,
+            "rows": 54,
+            "upper": 0.8
+          },
+          {
+            "lower": 0.8,
+            "observed_rate": 0.47368421052631576,
+            "predicted_mean": 0.8528458669453188,
+            "rows": 38,
+            "upper": 1.0
+          }
+        ],
+        "positive_rate": 0.44173913043478263,
+        "predicted_mean": 0.4590403547001594,
+        "rows": 575
+      },
+      "path": {
+        "auc": 0.12029569892473119,
+        "brier": 0.029773220222968865,
+        "calibration": [
+          {
+            "lower": 0.2,
+            "observed_rate": 1.0,
+            "predicted_mean": 0.3898652978097418,
+            "rows": 1,
+            "upper": 0.4
+          },
+          {
+            "lower": 0.4,
+            "observed_rate": 1.0,
+            "predicted_mean": 0.532309090652315,
+            "rows": 3,
+            "upper": 0.6000000000000001
+          },
+          {
+            "lower": 0.6,
+            "observed_rate": 1.0,
+            "predicted_mean": 0.678110895140657,
+            "rows": 3,
+            "upper": 0.8
+          },
+          {
+            "lower": 0.8,
+            "observed_rate": 0.9757085020242915,
+            "predicted_mean": 0.9774623276627054,
+            "rows": 247,
+            "upper": 1.0
+          }
+        ],
+        "positive_rate": 0.9763779527559056,
+        "predicted_mean": 0.9663555912908539,
+        "rows": 254
+      },
+      "rows": 575
+    },
+    "EQUITY_EU_SELL": {
+      "close_reasons": {
+        "initial_stop": 221,
+        "protected_breakeven": 92,
+        "protected_trailing": 4,
+        "stale_exit": 201,
+        "take_profit": 46
+      },
+      "economics": {
+        "correlation": 0.16539670695002975,
+        "expected_mean_percent": 0.25482627860819257,
+        "mae_percent": 0.28649269457263904,
+        "realized_mean_percent": 0.25470592319131097,
+        "rows": 142
+      },
+      "opportunity": {
+        "auc": 0.642659244410965,
+        "brier": 0.18463289941620653,
+        "calibration": [
+          {
+            "lower": 0.0,
+            "observed_rate": 0.1696969696969697,
+            "predicted_mean": 0.168094082490163,
+            "rows": 165,
+            "upper": 0.2
+          },
+          {
+            "lower": 0.2,
+            "observed_rate": 0.2837209302325581,
+            "predicted_mean": 0.280013702389374,
+            "rows": 430,
+            "upper": 0.4
+          },
+          {
+            "lower": 0.4,
+            "observed_rate": 0.4146341463414634,
+            "predicted_mean": 0.44842069270494606,
+            "rows": 41,
+            "upper": 0.6000000000000001
+          }
+        ],
+        "positive_rate": 0.26257861635220126,
+        "predicted_mean": 0.2618343774201423,
+        "rows": 636
+      },
+      "path": {
+        "auc": 0.48124999999999996,
+        "brier": 0.040791207811525544,
+        "calibration": [
+          {
+            "lower": 0.8,
+            "observed_rate": 0.9580838323353293,
+            "predicted_mean": 0.9580438122563788,
+            "rows": 167,
+            "upper": 1.0
+          }
+        ],
+        "positive_rate": 0.9580838323353293,
+        "predicted_mean": 0.9580438122563788,
+        "rows": 167
+      },
+      "rows": 636
+    },
+    "EQUITY_US_BUY": {
+      "close_reasons": {
+        "initial_stop": 230,
+        "protected_breakeven": 134,
+        "protected_trailing": 29,
+        "stale_exit": 183,
+        "take_profit": 56
+      },
+      "economics": {
+        "correlation": -0.14609838955996776,
+        "expected_mean_percent": 0.30442713545950567,
+        "mae_percent": 0.34522220607795506,
+        "realized_mean_percent": 0.29695093577272713,
+        "rows": 219
+      },
+      "opportunity": {
+        "auc": 0.658713405238829,
+        "brier": 0.21816760861060375,
+        "calibration": [
+          {
+            "lower": 0.0,
+            "observed_rate": 0.23076923076923078,
+            "predicted_mean": 0.18025239366200344,
+            "rows": 26,
+            "upper": 0.2
+          },
+          {
+            "lower": 0.2,
+            "observed_rate": 0.3072289156626506,
+            "predicted_mean": 0.3181865918956732,
+            "rows": 498,
+            "upper": 0.4
+          },
+          {
+            "lower": 0.4,
+            "observed_rate": 0.5025125628140703,
+            "predicted_mean": 0.47490780592304677,
+            "rows": 199,
+            "upper": 0.6000000000000001
+          },
+          {
+            "lower": 0.6,
+            "observed_rate": 0.6666666666666666,
+            "predicted_mean": 0.6761232435556273,
+            "rows": 24,
+            "upper": 0.8
+          }
+        ],
+        "positive_rate": 0.36813922356091033,
+        "predicted_mean": 0.3666360056536529,
+        "rows": 747
+      },
+      "path": {
+        "auc": 0.6984313725490197,
+        "brier": 0.06595530960087691,
+        "calibration": [
+          {
+            "lower": 0.4,
+            "observed_rate": 1.0,
+            "predicted_mean": 0.5921300418581442,
+            "rows": 1,
+            "upper": 0.6000000000000001
+          },
+          {
+            "lower": 0.6,
+            "observed_rate": 0.8571428571428571,
+            "predicted_mean": 0.7213372621143674,
+            "rows": 7,
+            "upper": 0.8
+          },
+          {
+            "lower": 0.8,
+            "observed_rate": 0.9288389513108615,
+            "predicted_mean": 0.9422993951038163,
+            "rows": 267,
+            "upper": 1.0
+          }
+        ],
+        "positive_rate": 0.9272727272727272,
+        "predicted_mean": 0.9354015613431916,
+        "rows": 275
+      },
+      "rows": 747
+    },
+    "EQUITY_US_SELL": {
+      "close_reasons": {
+        "initial_stop": 191,
+        "protected_breakeven": 138,
+        "protected_trailing": 19,
+        "stale_exit": 139,
+        "take_profit": 65
+      },
+      "economics": {
+        "correlation": -0.2789835900310517,
+        "expected_mean_percent": 0.2545273350487313,
+        "mae_percent": 0.3818764018442441,
+        "realized_mean_percent": 0.310303467418959,
+        "rows": 222
+      },
+      "opportunity": {
+        "auc": 0.6308003153952296,
+        "brier": 0.23811273143143774,
+        "calibration": [
+          {
+            "lower": 0.0,
+            "observed_rate": 0.2903225806451613,
+            "predicted_mean": 0.17362948980201562,
+            "rows": 31,
+            "upper": 0.2
+          },
+          {
+            "lower": 0.2,
+            "observed_rate": 0.33972602739726027,
+            "predicted_mean": 0.3109160127549683,
+            "rows": 365,
+            "upper": 0.4
+          },
+          {
+            "lower": 0.4,
+            "observed_rate": 0.5425531914893617,
+            "predicted_mean": 0.476261880697083,
+            "rows": 188,
+            "upper": 0.6000000000000001
+          },
+          {
+            "lower": 0.6,
+            "observed_rate": 0.5423728813559322,
+            "predicted_mean": 0.6636994343515242,
+            "rows": 59,
+            "upper": 0.8
+          },
+          {
+            "lower": 0.8,
+            "observed_rate": 0.0,
+            "predicted_mean": 0.8478414113389898,
+            "rows": 4,
+            "upper": 1.0
+          }
+        ],
+        "positive_rate": 0.4126738794435858,
+        "predicted_mean": 0.3878728356763113,
+        "rows": 647
+      },
+      "path": {
+        "auc": 0.8224867724867725,
+        "brier": 0.0511559088863234,
+        "calibration": [
+          {
+            "lower": 0.6,
+            "observed_rate": 0.8888888888888888,
+            "predicted_mean": 0.7548182621243371,
+            "rows": 18,
+            "upper": 0.8
+          },
+          {
+            "lower": 0.8,
+            "observed_rate": 0.9477911646586346,
+            "predicted_mean": 0.9493184831181631,
+            "rows": 249,
+            "upper": 1.0
+          }
+        ],
+        "positive_rate": 0.9438202247191011,
+        "predicted_mean": 0.9362061086691412,
+        "rows": 267
+      },
+      "rows": 647
+    }
+  },
+  "training_rows": 2605,
+  "validation_dates": [
+    "2026-07-29",
+    "2026-07-30",
+    "2026-07-31",
+    "2026-08-03",
+    "2026-08-04",
+    "2026-08-05",
+    "2026-08-06",
+    "2026-08-07"
+  ],
+  "validation_metrics": {
+    "EQUITY_EU_BUY": {
+      "close_reasons": {
+        "initial_stop": 187,
+        "protected_breakeven": 249,
+        "protected_trailing": 130,
+        "stale_exit": 226,
+        "take_profit": 7
+      },
+      "economics": {
+        "correlation": -0.06852147456533791,
+        "expected_mean_percent": 0.23525687205956844,
+        "mae_percent": 0.2726481811896566,
+        "realized_mean_percent": 0.20251285010016418,
+        "rows": 386
+      },
+      "opportunity": {
+        "auc": 0.47426052525472184,
+        "brier": 0.2878463122416297,
+        "calibration": [
+          {
+            "lower": 0.0,
+            "observed_rate": 0.2777777777777778,
+            "predicted_mean": 0.18183962436451187,
+            "rows": 18,
+            "upper": 0.2
+          },
+          {
+            "lower": 0.2,
+            "observed_rate": 0.49019607843137253,
+            "predicted_mean": 0.32886301656598943,
+            "rows": 204,
+            "upper": 0.4
+          },
+          {
+            "lower": 0.4,
+            "observed_rate": 0.5198135198135199,
+            "predicted_mean": 0.4923212607645461,
+            "rows": 429,
+            "upper": 0.6000000000000001
+          },
+          {
+            "lower": 0.6,
+            "observed_rate": 0.453551912568306,
+            "predicted_mean": 0.694526405862145,
+            "rows": 183,
+            "upper": 0.8
+          },
+          {
+            "lower": 0.8,
+            "observed_rate": 0.4339622641509434,
+            "predicted_mean": 0.8296893101100099,
+            "rows": 106,
+            "upper": 1.0
+          }
+        ],
+        "positive_rate": 0.48617021276595745,
+        "predicted_mean": 0.528311051734518,
+        "rows": 940
+      },
+      "path": {
+        "auc": 0.7322775263951735,
+        "brier": 0.04123443170869318,
+        "calibration": [
+          {
+            "lower": 0.2,
+            "observed_rate": 0.6666666666666666,
+            "predicted_mean": 0.33046293911381425,
+            "rows": 3,
+            "upper": 0.4
+          },
+          {
+            "lower": 0.4,
+            "observed_rate": 0.8888888888888888,
+            "predicted_mean": 0.4990115098167602,
+            "rows": 18,
+            "upper": 0.6000000000000001
+          },
+          {
+            "lower": 0.6,
+            "observed_rate": 0.9642857142857143,
+            "predicted_mean": 0.7151629797749478,
+            "rows": 28,
+            "upper": 0.8
+          },
+          {
+            "lower": 0.8,
+            "observed_rate": 0.9730392156862745,
+            "predicted_mean": 0.9725511687928973,
+            "rows": 408,
+            "upper": 1.0
+          }
+        ],
+        "positive_rate": 0.9671772428884027,
+        "predicted_mean": 0.9339147402521745,
+        "rows": 457
+      },
+      "rows": 940
+    },
+    "EQUITY_EU_SELL": {
+      "close_reasons": {
+        "initial_stop": 391,
+        "protected_breakeven": 214,
+        "protected_trailing": 31,
+        "session_force_close": 1,
+        "stale_exit": 358,
+        "take_profit": 109
+      },
+      "economics": {
+        "correlation": -0.0257800464159543,
+        "expected_mean_percent": 0.26404406948520515,
+        "mae_percent": 0.294788649192686,
+        "realized_mean_percent": 0.25220606822100794,
+        "rows": 354
+      },
+      "opportunity": {
+        "auc": 0.5944631510808525,
+        "brier": 0.22921482185536135,
+        "calibration": [
+          {
+            "lower": 0.0,
+            "observed_rate": 0.2601626016260163,
+            "predicted_mean": 0.17375849425333387,
+            "rows": 246,
+            "upper": 0.2
+          },
+          {
+            "lower": 0.2,
+            "observed_rate": 0.36223929747530187,
+            "predicted_mean": 0.2793402207404049,
+            "rows": 911,
+            "upper": 0.4
+          },
+          {
+            "lower": 0.4,
+            "observed_rate": 0.5,
+            "predicted_mean": 0.43480219533877745,
+            "rows": 86,
+            "upper": 0.6000000000000001
+          }
+        ],
+        "positive_rate": 0.3515687851971038,
+        "predicted_mean": 0.2692007397264391,
+        "rows": 1243
+      },
+      "path": {
+        "auc": 0.6911764705882353,
+        "brier": 0.06097473652030796,
+        "calibration": [
+          {
+            "lower": 0.8,
+            "observed_rate": 0.9336384439359268,
+            "predicted_mean": 0.9577684483416018,
+            "rows": 437,
+            "upper": 1.0
+          }
+        ],
+        "positive_rate": 0.9336384439359268,
+        "predicted_mean": 0.9577684483416018,
+        "rows": 437
+      },
+      "rows": 1243
+    },
+    "EQUITY_US_BUY": {
+      "close_reasons": {
+        "initial_stop": 390,
+        "protected_breakeven": 250,
+        "protected_trailing": 42,
+        "stale_exit": 343,
+        "take_profit": 92
+      },
+      "economics": {
+        "correlation": 0.05062961747653793,
+        "expected_mean_percent": 0.3321066102023394,
+        "mae_percent": 0.34435396924878997,
+        "realized_mean_percent": 0.2735959976655357,
+        "rows": 384
+      },
+      "opportunity": {
+        "auc": 0.6819284802043422,
+        "brier": 0.21531827663943,
+        "calibration": [
+          {
+            "lower": 0.0,
+            "observed_rate": 0.16666666666666666,
+            "predicted_mean": 0.1867130994230067,
+            "rows": 18,
+            "upper": 0.2
+          },
+          {
+            "lower": 0.2,
+            "observed_rate": 0.29880043620501634,
+            "predicted_mean": 0.29494045037499855,
+            "rows": 917,
+            "upper": 0.4
+          },
+          {
+            "lower": 0.4,
+            "observed_rate": 0.5568181818181818,
+            "predicted_mean": 0.470408626511009,
+            "rows": 352,
+            "upper": 0.6000000000000001
+          },
+          {
+            "lower": 0.6,
+            "observed_rate": 0.6823529411764706,
+            "predicted_mean": 0.7026455115759332,
+            "rows": 85,
+            "upper": 0.8
+          },
+          {
+            "lower": 0.8,
+            "observed_rate": 1.0,
+            "predicted_mean": 0.8123981858652329,
+            "rows": 9,
+            "upper": 1.0
+          }
+        ],
+        "positive_rate": 0.391020999275887,
+        "predicted_mean": 0.36672086710507196,
+        "rows": 1381
+      },
+      "path": {
+        "auc": 0.7216872769930104,
+        "brier": 0.07809732869057483,
+        "calibration": [
+          {
+            "lower": 0.2,
+            "observed_rate": 0.8181818181818182,
+            "predicted_mean": 0.36447990503911,
+            "rows": 11,
+            "upper": 0.4
+          },
+          {
+            "lower": 0.4,
+            "observed_rate": 0.7931034482758621,
+            "predicted_mean": 0.5109806066835374,
+            "rows": 29,
+            "upper": 0.6000000000000001
+          },
+          {
+            "lower": 0.6,
+            "observed_rate": 0.8409090909090909,
+            "predicted_mean": 0.7298290673508236,
+            "rows": 44,
+            "upper": 0.8
+          },
+          {
+            "lower": 0.8,
+            "observed_rate": 0.9429824561403509,
+            "predicted_mean": 0.9396204487620977,
+            "rows": 456,
+            "upper": 1.0
+          }
+        ],
+        "positive_rate": 0.924074074074074,
+        "predicted_mean": 0.8877909632374177,
+        "rows": 540
+      },
+      "rows": 1381
+    },
+    "EQUITY_US_SELL": {
+      "close_reasons": {
+        "initial_stop": 369,
+        "protected_breakeven": 155,
+        "protected_trailing": 25,
+        "stale_exit": 245,
+        "take_profit": 37
+      },
+      "economics": {
+        "correlation": 0.0671887336173546,
+        "expected_mean_percent": 0.31092161794143497,
+        "mae_percent": 0.3151676126656024,
+        "realized_mean_percent": 0.21754818202930878,
+        "rows": 217
+      },
+      "opportunity": {
+        "auc": 0.664917780061665,
+        "brier": 0.2179607543737119,
+        "calibration": [
+          {
+            "lower": 0.0,
+            "observed_rate": 0.0,
+            "predicted_mean": 0.17343420269255472,
+            "rows": 2,
+            "upper": 0.2
+          },
+          {
+            "lower": 0.2,
+            "observed_rate": 0.18041237113402062,
+            "predicted_mean": 0.3271838848069744,
+            "rows": 388,
+            "upper": 0.4
+          },
+          {
+            "lower": 0.4,
+            "observed_rate": 0.28216704288939054,
+            "predicted_mean": 0.4956787273380933,
+            "rows": 443,
+            "upper": 0.6000000000000001
+          },
+          {
+            "lower": 0.6,
+            "observed_rate": 0.574468085106383,
+            "predicted_mean": 0.6733353322274109,
+            "rows": 141,
+            "upper": 0.8
+          },
+          {
+            "lower": 0.8,
+            "observed_rate": 0.5,
+            "predicted_mean": 0.8082392377666505,
+            "rows": 4,
+            "upper": 1.0
+          }
+        ],
+        "positive_rate": 0.2842535787321063,
+        "predicted_mean": 0.45506455083476277,
+        "rows": 978
+      },
+      "path": {
+        "auc": 0.6657813191677734,
+        "brier": 0.08634482799824574,
+        "calibration": [
+          {
+            "lower": 0.6,
+            "observed_rate": 1.0,
+            "predicted_mean": 0.7752699505132417,
+            "rows": 4,
+            "upper": 0.8
+          },
+          {
+            "lower": 0.8,
+            "observed_rate": 0.9014598540145985,
+            "predicted_mean": 0.9530141881324055,
+            "rows": 274,
+            "upper": 1.0
+          }
+        ],
+        "positive_rate": 0.9028776978417267,
+        "predicted_mean": 0.9504567170875254,
+        "rows": 278
+      },
+      "rows": 978
+    }
+  },
+  "validation_rows": 4542
+}

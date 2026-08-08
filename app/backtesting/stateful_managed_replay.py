@@ -1,11 +1,18 @@
 from __future__ import annotations
 
-from collections import Counter
-from dataclasses import asdict, dataclass
+from collections import Counter, defaultdict, deque
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta
 from statistics import mean
 from typing import Any
 
+from app.backtesting.replay_pricing import (
+    REPLAY_PRICING_CONTRACT_VERSION,
+    HistoricalReplayFill,
+    ReplayFillLedger,
+    ReplayMode,
+    ReplayPriceProvenance,
+)
 from app.config.settings import Settings
 from app.execution.candidate_economics import (
     CandidateEconomicsEstimator,
@@ -13,10 +20,21 @@ from app.execution.candidate_economics import (
 )
 from app.execution.position_close_reason import PositionCloseReason
 from app.execution.position_economics import calculate_position_pnl
-from app.execution.position_models import ClosedPosition, PositionCloseSignal
+from app.execution.position_models import (
+    ClosedPosition,
+    PositionCloseSignal,
+    TrackedPosition,
+)
 from app.execution.position_tracker import PositionTracker
 from app.execution.scoring.managed_outcome import (
     CandidateManagedOutcomeEvaluator,
+)
+from app.execution.scoring.managed_outcome_model_contract import (
+    MANAGED_SELECTION_POLICY_VERSION,
+)
+from app.execution.scoring.managed_v2_model_contract import (
+    ACTIVE_EQUITY_SELECTION_POLICY_VERSION,
+    MANAGED_V2_SELECTION_POLICY_VERSION,
 )
 from app.execution.scoring.outcome_probability import (
     CandidateOutcomeProbabilityEvaluator,
@@ -24,10 +42,16 @@ from app.execution.scoring.outcome_probability import (
 from app.execution.scoring.tp_feasibility import (
     CandidateTpFeasibilityEvaluator,
 )
+from app.execution.strategy_segment import StrategySegment
 from app.execution.trade_candidate import TradeCandidate
 from app.instruments.instrument_registry import InstrumentRegistry
 from app.instruments.models import AssetClass
+from app.market.data_quality import MarketDataStatus, MarketDataValidator
 from app.market.models import MarketSnapshot
+from app.market.relative_spread import (
+    build_relative_spread_context,
+    compact_relative_spread_history,
+)
 from app.risk.position_sizing import FixedPercentPositionSizing
 from app.risk.risk_manager import RiskManager
 from app.risk.trade_cooldown import (
@@ -46,7 +70,7 @@ from app.runtime.trading_session_window import (
 from app.strategies.balanced_strategy_config import BalancedStrategyConfig
 from app.utils.commons import spread_percent
 
-STATEFUL_MANAGED_REPLAY_CONTRACT_VERSION = "stateful_managed_replay_v1"
+STATEFUL_MANAGED_REPLAY_CONTRACT_VERSION = "stateful_managed_replay_v2"
 
 
 @dataclass(frozen=True)
@@ -64,6 +88,7 @@ class ReplayTrade:
     position_id: str
     symbol: str
     asset_class: str
+    segment: str | None
     side: str
     session_key: str
     opened_at: datetime
@@ -81,16 +106,30 @@ class ReplayTrade:
     duration_seconds: float
     mfe_percent: float
     mae_percent: float
-    managed_edge_at_entry: float
-    managed_time_expected_return_contribution: float
+    managed_edge_at_entry: float | None
+    managed_time_expected_return_contribution: float | None
+    managed_v2_opportunity_probability: float | None
+    managed_v2_path_probability: float | None
+    managed_v2_expected_net_return_percent: float | None
+    managed_v2_ranking_score: float | None
+    managed_v2_model_version: str | None
+    managed_v2_feature_contract_version: str | None
+    managed_v2_label_contract_version: str | None
+    replay_mode: str
+    selection_policy_version: str
+    entry_price_provenance: str
+    exit_price_provenance: str
+    pricing_contract_version: str
 
 
 @dataclass
 class _OpenTradeMetadata:
     candidate: TradeCandidate
     asset_class: AssetClass
-    managed_edge: float
-    managed_time_expected_return_contribution: float
+    managed_edge: float | None
+    managed_time_expected_return_contribution: float | None
+    historical_position_id: str | None
+    entry_price_provenance: ReplayPriceProvenance
 
 
 @dataclass
@@ -174,7 +213,7 @@ class _ReplayClosedTradeMemory:
 
 
 class StatefulManagedReplay:
-    """Chronological MANAGED_EDGE_V1 portfolio replay using live contracts."""
+    """Chronological V1/V2 portfolio replay using the shared live contracts."""
 
     def __init__(
         self,
@@ -182,10 +221,30 @@ class StatefulManagedReplay:
         settings: Settings,
         strategy_profile: BalancedStrategyConfig,
         scenario_name: str,
+        replay_mode: ReplayMode = ReplayMode.COUNTERFACTUAL,
+        fill_ledger: ReplayFillLedger | None = None,
+        selection_policy_version: str = ACTIVE_EQUITY_SELECTION_POLICY_VERSION,
+        apply_quote_quality: bool = True,
     ) -> None:
         self.settings = settings
         self.strategy_profile = strategy_profile
         self.scenario_name = scenario_name
+        self.replay_mode = replay_mode
+        self.fill_ledger = fill_ledger or ReplayFillLedger()
+        if selection_policy_version not in {
+            MANAGED_V2_SELECTION_POLICY_VERSION,
+            MANAGED_SELECTION_POLICY_VERSION,
+        }:
+            raise ValueError(
+                f'Unsupported replay selection policy: '
+                f'{selection_policy_version}.'
+            )
+        self.selection_policy_version = selection_policy_version
+        self.apply_quote_quality = apply_quote_quality
+        self.market_data_validator = MarketDataValidator()
+        self.relative_spread_history: dict[str, deque[MarketSnapshot]] = (
+            defaultdict(deque)
+        )
         self.instrument_registry = InstrumentRegistry(
             settings,
             instrument_configs=strategy_profile.instrument_configs,
@@ -249,6 +308,7 @@ class StatefulManagedReplay:
             evaluated,
             self.risk_manager,
             self.strategy_profile,
+            selection_policy_version=self.selection_policy_version,
         )
         for rejected in selection.rejected_candidates:
             self.model_rejections[rejected.reason] += 1
@@ -272,10 +332,16 @@ class StatefulManagedReplay:
                     self.counts["prevented_by_capacity"] += 1
                 continue
 
-            entry_estimate = candidate.snapshot.executable_entry_price(candidate.signal.action)
+            replay_entry = self.fill_ledger.entry_for(
+                candidate,
+                self.replay_mode,
+            )
+            entry_estimate = candidate.snapshot.executable_entry_price(
+                candidate.signal.action
+            )
             adjusted_plan = self.risk_manager.adjust_trade_plan_to_entry_price(
                 trade_plan=plan,
-                entry_price=entry_estimate,
+                entry_price=replay_entry.price,
             )
             position_id = self._position_id(candidate, batch.occurred_at)
             self.position_tracker.record_open_position(
@@ -283,21 +349,40 @@ class StatefulManagedReplay:
                 trade_plan=adjusted_plan,
                 signal_price=candidate.snapshot.last,
                 executable_entry_estimate=entry_estimate,
-                broker_entry_fill_price=None,
-                opened_at=batch.occurred_at,
+                broker_entry_fill_price=(
+                    replay_entry.price
+                    if replay_entry.provenance
+                    is ReplayPriceProvenance.BROKER_HISTORICAL_FILL
+                    else None
+                ),
+                opened_at=(
+                    replay_entry.historical_entry_at
+                    or batch.occurred_at
+                ),
             )
             self.risk_manager.record_open_position(
                 candidate.symbol,
                 candidate.session_key,
             )
-            time_adjustment = candidate.managed_outcome_metadata.get("time_adjustment") or {}
+            time_adjustment = (
+                candidate.managed_outcome_metadata.get('time_adjustment') or {}
+            )
+            time_contribution = time_adjustment.get(
+                'expected_return_contribution'
+            )
             self.open_metadata[position_id] = _OpenTradeMetadata(
                 candidate=candidate,
                 asset_class=self.instrument_registry.resolve(candidate.symbol).asset_class,
-                managed_edge=float(candidate.managed_edge or 0.0),
-                managed_time_expected_return_contribution=float(
-                    time_adjustment.get("expected_return_contribution") or 0.0
+                managed_edge=candidate.managed_edge,
+                managed_time_expected_return_contribution=(
+                    None
+                    if time_contribution is None
+                    else float(time_contribution)
                 ),
+                historical_position_id=(
+                    replay_entry.historical_position_id
+                ),
+                entry_price_provenance=replay_entry.provenance,
             )
             self.latest_snapshot_by_symbol[candidate.symbol] = candidate.snapshot
             self.counts["trades_opened"] += 1
@@ -307,6 +392,8 @@ class StatefulManagedReplay:
                 self.peak_open_positions,
                 len(self.position_tracker.open_positions_snapshot()),
             )
+        for history in self.relative_spread_history.values():
+            compact_relative_spread_history(history)
         self._update_intraday_equity_drawdown()
 
     def on_market_snapshot(
@@ -316,18 +403,65 @@ class StatefulManagedReplay:
         occurred_at: datetime,
     ) -> None:
         self._observe_time(occurred_at)
+        if self.apply_quote_quality:
+            try:
+                quality_config = self.instrument_registry.config_for(
+                    snapshot.symbol
+                ).market_data_quality
+            except ValueError:
+                quality_config = None
+            if quality_config is not None:
+                validation = self.market_data_validator.validate(
+                    snapshot,
+                    quality_config,
+                    now=occurred_at,
+                )
+                if validation.status is not MarketDataStatus.ACCEPTED:
+                    self.counts[
+                        f'quote_quality_{validation.status.value}'
+                    ] += 1
+                    return
         self.latest_snapshot_by_symbol[snapshot.symbol] = snapshot
+        self.relative_spread_history[snapshot.symbol].append(snapshot)
         self._advance_counterfactuals(snapshot, occurred_at=occurred_at)
-        if not any(
-            position.symbol == snapshot.symbol
+        symbol_positions = [
+            position
             for position in self.position_tracker.open_positions_snapshot()
-        ):
+            if position.symbol == snapshot.symbol
+        ]
+        if not symbol_positions:
             return
         asset_class = self.instrument_registry.resolve(snapshot.symbol).asset_class
         session_decision = self.session_service.evaluate(
             asset_class=asset_class,
             now=occurred_at,
         )
+        lifecycle_position_ids: set[str] = set()
+        historical_exit_controlled_ids: set[str] = set()
+        for position in symbol_positions:
+            if snapshot.timestamp <= position.opened_at:
+                continue
+            metadata = self.open_metadata[position.position_id]
+            historical_fill = self.fill_ledger.historical_fill_for_position(
+                metadata.historical_position_id,
+                self.replay_mode,
+            )
+            if (
+                historical_fill is not None
+                and historical_fill.exit_at is not None
+            ):
+                if historical_fill.exit_at <= snapshot.timestamp:
+                    self._close_from_historical_fill(
+                        position=position,
+                        snapshot=snapshot,
+                        historical_fill=historical_fill,
+                    )
+                else:
+                    historical_exit_controlled_ids.add(
+                        position.position_id
+                    )
+                continue
+            lifecycle_position_ids.add(position.position_id)
         close_signals = self.position_tracker.evaluate_snapshot(
             snapshot,
             force_close=session_decision.force_close_required,
@@ -335,13 +469,55 @@ class StatefulManagedReplay:
                 "session_decision": session_decision.reason,
                 "time_until_session_end_minutes": (session_decision.time_until_session_end_minutes),
             },
+            position_ids=(
+                lifecycle_position_ids | historical_exit_controlled_ids
+            ),
         )
         self.counts["managed_stop_updates"] += len(
             self.position_tracker.consume_managed_stop_updates()
         )
         for signal in close_signals:
+            if signal.position_id in historical_exit_controlled_ids:
+                self.counts['historical_lifecycle_close_signals_deferred'] += 1
+                continue
             self._close_position(signal)
         self._update_intraday_equity_drawdown()
+
+    def _close_from_historical_fill(
+        self,
+        *,
+        position: TrackedPosition,
+        snapshot: MarketSnapshot,
+        historical_fill: HistoricalReplayFill,
+    ) -> None:
+        if historical_fill.exit_at is None:
+            raise RuntimeError('Historical replay close timestamp is missing.')
+        try:
+            reason = PositionCloseReason(str(historical_fill.close_reason))
+        except ValueError:
+            reason = PositionCloseReason.UNKNOWN_CONFIRMED_CLOSE
+        self._close_position(
+            PositionCloseSignal(
+                position_id=position.position_id,
+                symbol=position.symbol,
+                side=position.side,
+                reason=reason,
+                detected_at=historical_fill.exit_at,
+                last_execution_price=snapshot.last,
+                executable_estimate=snapshot.executable_exit_price(
+                    position.side
+                ),
+                bid_at_detection=snapshot.bid,
+                ask_at_detection=snapshot.ask,
+                observed_spread_percent=spread_percent(snapshot),
+                metadata={
+                    'replay_historical_position_id': (
+                        historical_fill.position_id
+                    ),
+                    'replay_historical_close': True,
+                },
+            )
+        )
 
     def result(self) -> dict[str, Any]:
         mark_to_market = self._mark_to_market()
@@ -364,6 +540,10 @@ class StatefulManagedReplay:
         )
         return {
             "contract_version": STATEFUL_MANAGED_REPLAY_CONTRACT_VERSION,
+            "pricing_contract_version": REPLAY_PRICING_CONTRACT_VERSION,
+            "replay_mode": self.replay_mode.value,
+            "selection_policy_version": self.selection_policy_version,
+            "quote_quality_applied": self.apply_quote_quality,
             "scenario": self.scenario_name,
             "breakeven_profile": self.strategy_profile.breakeven_profile_name,
             "breakeven_trigger_percent": {
@@ -394,6 +574,7 @@ class StatefulManagedReplay:
                 "count": len(self.trades),
                 "by_close_reason": dict(Counter(item.close_reason for item in self.trades)),
                 "by_asset_class": self._pnl_breakdown("asset_class"),
+                "by_segment": self._pnl_breakdown("segment"),
                 "by_side": self._pnl_breakdown("side"),
                 "average_duration_seconds": (round(mean(durations), 3) if durations else None),
                 "average_mfe_percent": self._average_trade_field("mfe_percent"),
@@ -425,6 +606,33 @@ class StatefulManagedReplay:
         candidate: TradeCandidate,
         account_equity: float,
     ) -> EvaluatedTradeCandidate:
+        asset_class = self.instrument_registry.resolve(
+            candidate.symbol
+        ).asset_class
+        segment = StrategySegment.from_asset_and_side(
+            asset_class,
+            candidate.signal.action,
+        )
+        spread_context = build_relative_spread_context(
+            current=candidate.snapshot,
+            prior_snapshots=[
+                snapshot
+                for snapshot in self.relative_spread_history[candidate.symbol]
+                if snapshot.timestamp < candidate.snapshot.timestamp
+            ],
+        )
+        candidate = replace(
+            candidate,
+            segment=segment,
+            market_context=(
+                None
+                if candidate.market_context is None
+                else replace(
+                    candidate.market_context,
+                    spread=spread_context,
+                )
+            ),
+        )
         evaluated = self.economics.evaluate(candidate, account_equity)
         risk_profile = self.risk_manager.risk_profile_for(candidate.symbol)
         evaluated = self.tp_feasibility.evaluate(
@@ -436,7 +644,11 @@ class StatefulManagedReplay:
             evaluated_candidate=evaluated,
             risk_profile=risk_profile,
         )
-        return self.managed_outcome.evaluate(evaluated_candidate=evaluated)
+        if self.selection_policy_version == MANAGED_SELECTION_POLICY_VERSION:
+            return self.managed_outcome.evaluate(
+                evaluated_candidate=evaluated
+            )
+        return evaluated
 
     def _close_position(self, signal: PositionCloseSignal) -> None:
         tracked = next(
@@ -444,8 +656,17 @@ class StatefulManagedReplay:
             for position in self.position_tracker.open_positions_snapshot()
             if position.position_id == signal.position_id
         )
+        metadata = self.open_metadata[tracked.position_id]
+        broker_execution, exit_provenance = (
+            self.fill_ledger.close_execution_for(
+                historical_position_id=metadata.historical_position_id,
+                replay_position_id=tracked.position_id,
+                mode=self.replay_mode,
+            )
+        )
         closed = self.position_tracker.record_closed_position(
             signal,
+            broker_execution=broker_execution,
             confirmed_at=signal.detected_at,
         )
         if closed is None:
@@ -453,7 +674,13 @@ class StatefulManagedReplay:
         metadata = self.open_metadata.pop(closed.position_id)
         self.risk_manager.record_close_position(closed.symbol)
         self._register_cooldown(closed, metadata)
-        self.trades.append(self._replay_trade(closed, metadata))
+        self.trades.append(
+            self._replay_trade(
+                closed,
+                metadata,
+                exit_provenance=exit_provenance,
+            )
+        )
         self.counts["trades_closed"] += 1
         if signal.reason in {
             PositionCloseReason.PROTECTED_BREAKEVEN,
@@ -645,6 +872,8 @@ class StatefulManagedReplay:
         self,
         closed: ClosedPosition,
         metadata: _OpenTradeMetadata,
+        *,
+        exit_provenance: ReplayPriceProvenance,
     ) -> ReplayTrade:
         candidate = metadata.candidate
         return ReplayTrade(
@@ -654,6 +883,9 @@ class StatefulManagedReplay:
             position_id=closed.position_id,
             symbol=closed.symbol,
             asset_class=metadata.asset_class.value,
+            segment=(
+                candidate.segment.value if candidate.segment is not None else None
+            ),
             side=closed.side,
             session_key=candidate.session_key,
             opened_at=closed.opened_at,
@@ -675,6 +907,28 @@ class StatefulManagedReplay:
             managed_time_expected_return_contribution=(
                 metadata.managed_time_expected_return_contribution
             ),
+            managed_v2_opportunity_probability=(
+                candidate.managed_v2_opportunity_probability
+            ),
+            managed_v2_path_probability=(
+                candidate.managed_v2_path_probability
+            ),
+            managed_v2_expected_net_return_percent=(
+                candidate.managed_v2_expected_net_return_percent
+            ),
+            managed_v2_ranking_score=candidate.managed_v2_ranking_score,
+            managed_v2_model_version=candidate.managed_v2_model_version,
+            managed_v2_feature_contract_version=(
+                candidate.managed_v2_metadata.get('feature_contract_version')
+            ),
+            managed_v2_label_contract_version=(
+                candidate.managed_v2_metadata.get('label_contract_version')
+            ),
+            replay_mode=self.replay_mode.value,
+            selection_policy_version=self.selection_policy_version,
+            entry_price_provenance=metadata.entry_price_provenance.value,
+            exit_price_provenance=exit_provenance.value,
+            pricing_contract_version=REPLAY_PRICING_CONTRACT_VERSION,
         )
 
     def _pnl_breakdown(self, attribute: str) -> dict[str, dict[str, float | int]]:
@@ -707,6 +961,8 @@ class StatefulManagedReplay:
         for position in self.position_tracker.open_positions_snapshot():
             snapshot = self.latest_snapshot_by_symbol.get(position.symbol)
             if snapshot is None:
+                continue
+            if snapshot.timestamp <= position.opened_at:
                 continue
             marked = calculate_position_pnl(
                 side=position.side,

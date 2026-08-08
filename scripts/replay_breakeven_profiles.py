@@ -196,6 +196,8 @@ def main() -> None:
                     breakeven_profile_name=(BreakevenProfileName.CORRECTED_BASELINE_V1)
                 ),
                 scenario_name="corrected_baseline_v1",
+                selection_policy_version=MANAGED_SELECTION_POLICY_VERSION,
+                apply_quote_quality=False,
             ),
             "delayed_equity_trigger_v1": StatefulManagedReplay(
                 settings=settings,
@@ -203,6 +205,8 @@ def main() -> None:
                     breakeven_profile_name=(BreakevenProfileName.DELAYED_EQUITY_TRIGGER_V1)
                 ),
                 scenario_name="delayed_equity_trigger_v1",
+                selection_policy_version=MANAGED_SELECTION_POLICY_VERSION,
+                apply_quote_quality=False,
             ),
         }
         _run_day(

@@ -46,6 +46,10 @@ class RecordingStrategy:
 class RecordingMarketContext:
     def __init__(self) -> None:
         self.calls: list[dict[str, MarketSnapshot]] = []
+        self.accepted_snapshots: list[MarketSnapshot] = []
+
+    def observe_accepted_snapshot(self, snapshot: MarketSnapshot) -> None:
+        self.accepted_snapshots.append(snapshot)
 
     def update(
         self,
@@ -118,12 +122,13 @@ def _event(
     *,
     timestamp: datetime,
     received_at: datetime,
+    price: float = 100.0,
 ) -> MarketDataEvent:
     snapshot = MarketSnapshot(
         symbol=symbol,
-        bid=99.9,
-        ask=100.1,
-        last=100.0,
+        bid=price - 0.1,
+        ask=price + 0.1,
+        last=price,
         timestamp=timestamp,
         received_at=received_at,
     )
@@ -213,3 +218,55 @@ def test_in_session_snapshot_enters_strategy_candles_and_context():
             'SPX500': runtime.latest_snapshots['SPX500'],
         }
     ]
+
+
+def test_quarantined_quote_never_reaches_position_or_strategy_flow():
+    runtime = BoundaryRuntime()
+    for index in range(21):
+        observed_at = SESSION_START + timedelta(seconds=index + 1)
+        runtime._handle_event(
+            _event(
+                'AMZN',
+                timestamp=observed_at,
+                received_at=observed_at,
+                price=100.0 + index * 0.005,
+            ),
+            observed_at,
+        )
+    accepted_count = len(runtime.broker_operations.snapshots)
+    suspect_at = SESSION_START + timedelta(seconds=22)
+
+    runtime._handle_event(
+        _event(
+            'AMZN',
+            timestamp=suspect_at,
+            received_at=suspect_at,
+            price=99.10,
+        ),
+        suspect_at,
+    )
+
+    assert len(runtime.broker_operations.snapshots) == accepted_count
+    assert len(runtime.strategies['AMZN'].snapshots) == accepted_count
+    assert runtime.latest_snapshots['AMZN'].last == 100.10
+    assert any(
+        event_type == 'market_data_quarantined'
+        for event_type, _ in runtime.trade_journal.events
+    )
+
+    recovery_at = SESSION_START + timedelta(seconds=23)
+    runtime._handle_event(
+        _event(
+            'AMZN',
+            timestamp=recovery_at,
+            received_at=recovery_at,
+            price=100.105,
+        ),
+        recovery_at,
+    )
+
+    assert len(runtime.broker_operations.snapshots) == accepted_count + 1
+    assert any(
+        event_type == 'market_data_quality_resolved'
+        for event_type, _ in runtime.trade_journal.events
+    )

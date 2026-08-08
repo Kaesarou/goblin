@@ -7,7 +7,6 @@ from app.market.data_quality import (
 )
 from app.market.models import MarketSnapshot
 
-
 NOW = datetime(2026, 7, 14, 9, 0, tzinfo=timezone.utc)
 
 
@@ -117,7 +116,7 @@ def test_large_jump_requires_a_second_snapshot_near_the_new_level():
 
     assert jump.status == MarketDataStatus.QUARANTINED
     assert confirmation.status == MarketDataStatus.ACCEPTED
-    assert confirmation.reasons == ('price_jump_confirmed',)
+    assert confirmation.reasons == ('suspect_quote_level_confirmed',)
 
 
 def test_batch_reports_missing_symbols_without_failing_valid_symbols():

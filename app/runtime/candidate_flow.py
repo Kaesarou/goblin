@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 from app.execution.candidate_economics import (
+    CandidateEconomicsEstimator,
     EvaluatedTradeCandidate,
 )
 from app.execution.candidate_ranking import rank_trade_candidates
@@ -17,6 +18,10 @@ from app.execution.candidate_selector import (
     select_trade_candidates,
 )
 from app.execution.entry_decision import EntryDecisionEngine
+from app.execution.scoring.managed_v2 import CandidateManagedV2Evaluator
+from app.execution.scoring.managed_v2_model_contract import (
+    ACTIVE_EQUITY_SELECTION_POLICY_VERSION,
+)
 from app.execution.scoring.outcome_probability import (
     CandidateOutcomeProbabilityEvaluator,
 )
@@ -68,6 +73,8 @@ def select_evaluated_trade_candidates_with_strategy_profile(
     evaluated_candidates: list[EvaluatedTradeCandidate],
     risk_manager: RiskManager,
     strategy_profile: StrategyProfileConfig,
+    *,
+    selection_policy_version: str = ACTIVE_EQUITY_SELECTION_POLICY_VERSION,
 ) -> EvaluatedCandidateSelectionResult:
     grouped: dict[
         AssetClass,
@@ -87,11 +94,15 @@ def select_evaluated_trade_candidates_with_strategy_profile(
             strategy_profile.candidate_selection_config_for_asset_class(
                 asset_class
             ),
+            selection_policy_version=selection_policy_version,
         )
         selected.extend(result.selected_candidates)
         rejected.extend(result.rejected_candidates)
     return EvaluatedCandidateSelectionResult(
-        rank_evaluated_trade_candidates(selected),
+        rank_evaluated_trade_candidates(
+            selected,
+            selection_policy_version=selection_policy_version,
+        ),
         rejected,
     )
 
@@ -216,6 +227,77 @@ def apply_outcome_probability_to_evaluated_candidates(
     ]
 
 
+def apply_managed_v2_shadow_to_evaluated_candidates(
+    *,
+    evaluated_candidates: list[EvaluatedTradeCandidate],
+    evaluator: CandidateManagedV2Evaluator | None = None,
+) -> list[EvaluatedTradeCandidate]:
+    actual_evaluator = evaluator or CandidateManagedV2Evaluator()
+    result: list[EvaluatedTradeCandidate] = []
+    for item in evaluated_candidates:
+        segment = item.candidate.segment
+        if segment is None:
+            raise RuntimeError(
+                'MANAGED V2 shadow evaluation requires an explicit segment.'
+            )
+        result.append(
+            actual_evaluator.evaluate(evaluated_candidate=item)
+            if segment.is_equity
+            else item
+        )
+    return result
+
+
+def evaluate_candidate_batch(
+    *,
+    candidates: list[TradeCandidate],
+    equity: float,
+    economics_estimator: CandidateEconomicsEstimator,
+    risk_manager: RiskManager,
+    trade_journal: JsonlJournal,
+) -> list[EvaluatedTradeCandidate]:
+    """Apply the shared, main-loop candidate evaluation pipeline.
+
+    Broker equity retrieval happens before this function, outside the WebSocket
+    consumer. Every mutation and journal write remains on the coordinator's
+    serialized completion path.
+    """
+
+    evaluated = [
+        economics_estimator.evaluate(candidate, equity)
+        for candidate in candidates
+    ]
+    trade_journal.write(
+        'candidate_economics',
+        {'equity': equity, 'evaluated_candidates': evaluated},
+    )
+    evaluated = apply_tp_feasibility_to_evaluated_candidates(
+        evaluated_candidates=evaluated,
+        risk_manager=risk_manager,
+    )
+    trade_journal.write(
+        'candidate_tp_feasibility',
+        {'equity': equity, 'evaluated_candidates': evaluated},
+    )
+    evaluated = attach_entry_decisions(evaluated)
+    evaluated = apply_outcome_probability_to_evaluated_candidates(
+        evaluated_candidates=evaluated,
+        risk_manager=risk_manager,
+    )
+    trade_journal.write(
+        'candidate_outcome_probability',
+        {'equity': equity, 'evaluated_candidates': evaluated},
+    )
+    evaluated = apply_managed_v2_shadow_to_evaluated_candidates(
+        evaluated_candidates=evaluated,
+    )
+    trade_journal.write(
+        'candidate_managed_v2_shadow',
+        {'equity': equity, 'evaluated_candidates': evaluated},
+    )
+    return evaluated
+
+
 def _slippage_percent(
     *,
     planned_entry_price: float,
@@ -280,6 +362,9 @@ def _candidate_log_item(
     effective_sl_tp = effective_sl_tp_by_id.get(object_id)
     return {
         'candidate_id': candidate.candidate_id,
+        'segment': (
+            candidate.segment.value if candidate.segment is not None else None
+        ),
         'symbol': candidate.symbol,
         'action': candidate.signal.action,
         'probability_score': candidate.probability_score,
@@ -325,5 +410,16 @@ def _candidate_log_item(
             candidate.direction_break_even_probability
         ),
         'direction_edge': candidate.direction_edge,
+        'managed_v2_opportunity_probability': (
+            candidate.managed_v2_opportunity_probability
+        ),
+        'managed_v2_path_probability': (
+            candidate.managed_v2_path_probability
+        ),
+        'managed_v2_expected_net_return_percent': (
+            candidate.managed_v2_expected_net_return_percent
+        ),
+        'managed_v2_ranking_score': candidate.managed_v2_ranking_score,
+        'managed_v2_model_version': candidate.managed_v2_model_version,
         'reason': candidate.rank_reason,
     }

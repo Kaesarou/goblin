@@ -1,8 +1,12 @@
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+from app.market.data_quality import MarketDataQualityConfig, MarketDataValidator
+from app.market.models import MarketSnapshot
+from app.runtime.async_broker_operations import (
+    AsyncBrokerOperationsCoordinator,
+)
 from app.runtime.market_data_maintenance import MarketDataMaintenance
-
 
 NOW = datetime(2026, 7, 20, 10, 0, tzinfo=timezone.utc)
 
@@ -78,3 +82,46 @@ def test_position_fallback_only_schedules_position_lifecycle_work():
 
     assert runtime.broker_operations.calls == [(['AIR.PA'], NOW)]
     assert not hasattr(runtime, '_handle_event')
+
+
+def test_rest_fallback_uses_an_independent_warmed_quote_quality_gate():
+    events = []
+    coordinator = object.__new__(AsyncBrokerOperationsCoordinator)
+    coordinator.instrument_registry = SimpleNamespace(
+        config_for=lambda _symbol: SimpleNamespace(
+            market_data_quality=MarketDataQualityConfig()
+        )
+    )
+    coordinator.fallback_market_data_validator = MarketDataValidator()
+    coordinator.trade_journal = SimpleNamespace(
+        write=lambda event_type, payload: events.append(
+            (event_type, payload)
+        )
+    )
+    for index in range(21):
+        price = 100.0 + index * 0.005
+        coordinator.fallback_market_data_validator.observe_accepted(
+            MarketSnapshot(
+                'GOOGL',
+                price - 0.01,
+                price + 0.01,
+                price,
+                NOW,
+            )
+        )
+    suspect = MarketSnapshot(
+        'GOOGL',
+        99.09,
+        99.11,
+        99.10,
+        NOW,
+    )
+
+    accepted = coordinator._position_fallback_snapshot_is_accepted(
+        suspect,
+        now=NOW,
+    )
+
+    assert accepted is False
+    assert events[-1][0] == 'market_data_quarantined'
+    assert events[-1][1]['source'] == 'rest_fallback'

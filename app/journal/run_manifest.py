@@ -24,6 +24,17 @@ from app.execution.scoring.managed_outcome_model_contract import (
     MANAGED_OUTCOME_MODEL_VERSION,
     MANAGED_SELECTION_POLICY_VERSION,
 )
+from app.execution.scoring.managed_v2 import FrozenManagedV2Model
+from app.execution.scoring.managed_v2_model_contract import (
+    ACTIVE_EQUITY_SELECTION_POLICY_VERSION,
+    MANAGED_V2_DEPLOYMENT_STATUS,
+    MANAGED_V2_ECONOMICS_MODEL_VERSION,
+    MANAGED_V2_FEATURE_CONTRACT_VERSION,
+    MANAGED_V2_LABEL_CONTRACT_VERSION,
+    MANAGED_V2_OPPORTUNITY_MODEL_VERSION,
+    MANAGED_V2_PATH_MODEL_VERSION,
+    MANAGED_V2_SELECTION_POLICY_VERSION,
+)
 from app.execution.scoring.market_context_scorer import (
     MARKET_CONTEXT_SCORER_VERSION,
 )
@@ -39,7 +50,16 @@ from app.execution.scoring.tp_feasibility import (
     TP_FEASIBILITY_MODEL_VERSION,
 )
 from app.instruments.instrument_registry import InstrumentRegistry
+from app.journal.analysis_journal import ENTRY_DECISION_SCHEMA_VERSION
+from app.journal.analysis_ready_summary import (
+    ANALYSIS_READY_SUMMARY_SCHEMA_VERSION,
+)
+from app.journal.daily_summary import DAILY_SUMMARY_SCHEMA_VERSION
 from app.journal.serialization import serialize_value
+from app.market.data_quality import (
+    QUOTE_QUALITY_CONTRACT_VERSION,
+    quote_quality_contract_metadata,
+)
 from app.market.market_context import MARKET_CONTEXT_VERSION
 from app.market.models import EXECUTABLE_PRICE_CONTRACT_VERSION
 from app.market.timeframes import (
@@ -51,7 +71,7 @@ from app.risk.trade_cooldown import TRADE_COOLDOWN_CONTRACT_VERSION
 from app.risk.trade_cost_model import TRADE_COST_CONTRACT_VERSION
 
 _SENSITIVE_SETTINGS = {'ETORO_API_KEY', 'ETORO_USER_KEY'}
-RUN_MANIFEST_SCHEMA_VERSION = 12
+RUN_MANIFEST_SCHEMA_VERSION = 13
 
 
 def build_run_id(started_at: datetime | None = None) -> str:
@@ -130,6 +150,7 @@ def build_run_manifest(
     actual_summary_path = summary_path or settings.daily_summary_path
     outcome_probability_model = FrozenOutcomeProbabilityModel.load()
     managed_outcome_model = FrozenManagedOutcomeModel.load()
+    managed_v2_model = FrozenManagedV2Model.load()
     direction_segments = {
         name: {
             'feature_family': segment.feature_family,
@@ -204,12 +225,55 @@ def build_run_manifest(
             'managed_outcome_provenance': dict(
                 managed_outcome_model.provenance
             ),
+            'managed_outcome_runtime_role': 'active_equity_and_crypto',
+            'managed_v2': managed_v2_model.version,
+            'managed_v2_features': MANAGED_V2_FEATURE_CONTRACT_VERSION,
+            'managed_v2_labels': MANAGED_V2_LABEL_CONTRACT_VERSION,
+            'managed_v2_opportunity': (
+                MANAGED_V2_OPPORTUNITY_MODEL_VERSION
+            ),
+            'managed_v2_path': MANAGED_V2_PATH_MODEL_VERSION,
+            'managed_v2_economics': MANAGED_V2_ECONOMICS_MODEL_VERSION,
+            'managed_v2_artifact_sha256': managed_v2_model.artifact_sha256,
+            'managed_v2_training_asset_classes': list(
+                managed_v2_model.training_asset_classes
+            ),
+            'managed_v2_supported_segments': [
+                segment.value for segment in managed_v2_model.supported_segments
+            ],
+            'managed_v2_provenance': dict(managed_v2_model.provenance),
+            'managed_v2_runtime_role': 'shadow',
+            'managed_v2_deployment_status': MANAGED_V2_DEPLOYMENT_STATUS,
+            'managed_v2_segments': {
+                segment.value: {
+                    'training_status': model.training_status,
+                    'opportunity_training_rows': (
+                        model.opportunity.training_rows
+                    ),
+                    'path_training_rows': model.path.training_rows,
+                    'economics_training_rows': model.economics.training_rows,
+                    'opportunity_floor': model.opportunity_floor,
+                    'path_floor': model.path_floor,
+                    'economics_floor_percent': (
+                        model.economics_floor_percent
+                    ),
+                    'opportunity_features': list(
+                        model.opportunity_features
+                    ),
+                    'path_features': list(model.path_features),
+                    'economics_features': list(model.economics_features),
+                }
+                for segment, model in managed_v2_model.segments.items()
+            },
         },
         'strategy': {
             'name': 'TrendStrategy',
             'profile': strategy_profile.name,
             'profile_config': strategy_profile,
-            'selection_policy': MANAGED_SELECTION_POLICY_VERSION,
+            'selection_policy': ACTIVE_EQUITY_SELECTION_POLICY_VERSION,
+            'managed_v2_shadow_policy': MANAGED_V2_SELECTION_POLICY_VERSION,
+            'managed_v2_deployment_status': MANAGED_V2_DEPLOYMENT_STATUS,
+            'crypto_selection_policy': MANAGED_SELECTION_POLICY_VERSION,
             'breakeven_profile_contract': (
                 BREAKEVEN_PROFILE_CONTRACT_VERSION
             ),
@@ -230,6 +294,7 @@ def build_run_manifest(
                     POSITION_CLOSE_TAXONOMY_VERSION
                 ),
                 'trade_cooldown': TRADE_COOLDOWN_CONTRACT_VERSION,
+                'quote_quality': QUOTE_QUALITY_CONTRACT_VERSION,
             },
             'economic_convention': {
                 'signal_and_candle_price': 'last_execution',
@@ -239,6 +304,7 @@ def build_run_manifest(
                 'post_trade_deducted_costs': 'explicit_only',
                 'broker_close_fill_priority': True,
             },
+            'quote_quality_policy': quote_quality_contract_metadata(),
             'watchlist': symbols,
             'context_benchmarks': benchmark_symbols,
             'symbol_profiles': symbol_profiles,
@@ -263,6 +329,13 @@ def build_run_manifest(
         },
         'analysis_sources': {
             'run_id': run_id,
+            'schemas': {
+                'entry_decision': ENTRY_DECISION_SCHEMA_VERSION,
+                'daily_summary': DAILY_SUMMARY_SCHEMA_VERSION,
+                'analysis_ready_summary': (
+                    ANALYSIS_READY_SUMMARY_SCHEMA_VERSION
+                ),
+            },
             'market_stream': settings.market_log_path,
             'candle_stream': settings.candle_journal_path,
             'trade_stream': settings.journal_path,
@@ -277,18 +350,24 @@ def build_run_manifest(
             'managed_stop_updates_retained': True,
             'entry_horizon_rejections_retained': True,
             'analysis_ready_entry_fields': [
+                'schema_version',
                 'candidate_id',
                 'origin_candidate_id',
                 'pending_entry_id',
                 'candidate_timestamp',
                 'symbol',
                 'side',
+                'segment',
+                'entry_reference_price',
                 'signal_price',
                 'executable_entry_estimate',
                 'broker_entry_fill_price',
                 'pnl_entry_price',
                 'bid',
                 'ask',
+                'last',
+                'spread',
+                'executable_entry_price',
                 'observed_spread_percent',
                 'profile_key',
                 'sl_tp_source',
@@ -323,6 +402,35 @@ def build_run_manifest(
                 'direction_edge',
                 'outcome_probability',
                 'outcome_probability_model_version',
+                'managed_protection_probability',
+                'managed_positive_probability',
+                'managed_expected_net_return_percent',
+                'managed_edge',
+                'managed_outcome_model_version',
+                'selection_policy_version',
+                'managed_v2_shadow_policy_version',
+                'feature_contract_version',
+                'label_contract_version',
+                'opportunity_model_version',
+                'path_model_version',
+                'economics_model_version',
+                'managed_v2_opportunity_probability',
+                'managed_v2_path_probability',
+                'managed_v2_expected_net_return_percent',
+                'managed_v2_ranking_score',
+                'managed_v2_artifact_sha256',
+                'managed_v2_deployment_status',
+                'managed_v2_gate_outcome',
+                'managed_v2_gate_rejection_reason',
+                'managed_v2_shadow_selection_outcome',
+                'managed_v2_shadow_selection_reason',
+                'managed_v2_opportunity_floor',
+                'managed_v2_path_floor',
+                'managed_v2_economics_floor_percent',
+                'relative_spread_ratio',
+                'relative_spread_percentile',
+                'relative_spread_recent_change',
+                'relative_spread_available',
             ],
         },
         'files': {

@@ -31,7 +31,7 @@ calibration = [
 ]
 
 [tool.setuptools.package-data]
-"app.execution.scoring" = ["models/*.json"]
+"app.execution.scoring" = ["models/*.json", "models/managed_v2/*.json"]
 
 [tool.setuptools.packages.find]
 include = ["app*"]

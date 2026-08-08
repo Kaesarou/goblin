@@ -56,8 +56,20 @@ class MarketDataEventFlow:
             )
             return
 
+        if validation.reasons:
+            self.trade_journal.write(
+                'market_data_quality_resolved',
+                {
+                    'symbol': symbol,
+                    'validation': validation,
+                    'source': event.source.value,
+                    'loop_id': self.loop_id,
+                },
+            )
+
         self.coordinator.mark_accepted(event)
         self.latest_snapshots[symbol] = snapshot
+        self.market_context_service.observe_accepted_snapshot(snapshot)
         if event.price_changed:
             self.market_journal.write(
                 'market_price_changed',

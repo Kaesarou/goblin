@@ -10,9 +10,9 @@ from app.journal.journal_policy import (
 )
 from app.journal.jsonl_journal import JsonlJournal
 
-
 PARTIAL_SUMMARY_INTERVAL_MINUTES = 15
 WRITE_PARTIAL_SUMMARY = True
+ENTRY_DECISION_SCHEMA_VERSION = 2
 
 
 class AnalysisJournal:
@@ -103,6 +103,15 @@ class AnalysisJournal:
                 selection_outcome=selection_outcome,
                 selection_reason=selection_reason,
                 strategy_profile=self.summary.profile,
+                selection_policy_version=payload.get(
+                    'selection_policy_version'
+                ),
+                shadow_policy_version=payload.get(
+                    'managed_v2_shadow_policy_version'
+                ),
+                deployment_status=payload.get(
+                    'managed_v2_deployment_status'
+                ),
             )
             if record is None:
                 continue
@@ -234,6 +243,9 @@ def _entry_decision_record(
     selection_outcome: str,
     selection_reason: Any,
     strategy_profile: Any,
+    selection_policy_version: Any = None,
+    shadow_policy_version: Any = None,
+    deployment_status: Any = None,
 ) -> dict[str, Any] | None:
     candidate = _attribute(evaluated, 'candidate')
     decision = _attribute(evaluated, 'entry_decision')
@@ -253,14 +265,27 @@ def _entry_decision_record(
         candidate,
         'multi_timeframe_context',
     )
+    managed_v2 = _attribute(candidate, 'managed_v2_metadata') or {}
+    managed_v2_floors = _attribute(managed_v2, 'floors') or {}
+    spread_context = _attribute(market_context, 'spread')
     return {
+        'schema_version': ENTRY_DECISION_SCHEMA_VERSION,
         'candidate_id': _attribute(candidate, 'candidate_id'),
         'origin_candidate_id': _attribute(candidate, 'origin_candidate_id'),
         'pending_entry_id': _attribute(candidate, 'pending_entry_id'),
         'candidate_timestamp': _attribute(snapshot, 'timestamp'),
         'symbol': _attribute(candidate, 'symbol'),
         'side': _attribute(signal, 'action'),
+        'segment': _enum_value(_attribute(candidate, 'segment')),
         'entry_reference_price': _attribute(snapshot, 'last'),
+        'bid': _attribute(snapshot, 'bid'),
+        'ask': _attribute(snapshot, 'ask'),
+        'last': _attribute(snapshot, 'last'),
+        'spread': _snapshot_spread_percent(snapshot),
+        'executable_entry_price': _executable_entry_price(
+            snapshot,
+            _attribute(signal, 'action'),
+        ),
         'profile_key': _profile_key(
             effective_sl_tp,
             outcome_probability,
@@ -345,6 +370,68 @@ def _entry_decision_record(
             'direction_break_even_probability',
         ),
         'direction_edge': _attribute(candidate, 'direction_edge'),
+        'managed_protection_probability': _attribute(
+            candidate,
+            'managed_protection_probability',
+        ),
+        'managed_positive_probability': _attribute(
+            candidate,
+            'managed_positive_probability',
+        ),
+        'managed_expected_net_return_percent': _attribute(
+            candidate,
+            'managed_expected_net_return_percent',
+        ),
+        'managed_edge': _attribute(candidate, 'managed_edge'),
+        'managed_outcome_model_version': _attribute(
+            candidate,
+            'managed_outcome_model_version',
+        ),
+        'managed_v2_opportunity_probability': _attribute(
+            candidate,
+            'managed_v2_opportunity_probability',
+        ),
+        'managed_v2_path_probability': _attribute(
+            candidate,
+            'managed_v2_path_probability',
+        ),
+        'managed_v2_expected_net_return_percent': _attribute(
+            candidate,
+            'managed_v2_expected_net_return_percent',
+        ),
+        'managed_v2_ranking_score': _attribute(
+            candidate,
+            'managed_v2_ranking_score',
+        ),
+        'managed_v2_opportunity_floor': _attribute(
+            managed_v2_floors,
+            'opportunity_probability',
+        ),
+        'managed_v2_path_floor': _attribute(
+            managed_v2_floors,
+            'path_probability',
+        ),
+        'managed_v2_economics_floor_percent': _attribute(
+            managed_v2_floors,
+            'expected_net_return_percent',
+        ),
+        'observed_spread_percent': _snapshot_spread_percent(snapshot),
+        'relative_spread_ratio': _attribute(
+            spread_context,
+            'relative_to_median',
+        ),
+        'relative_spread_percentile': _attribute(
+            spread_context,
+            'reference_percentile',
+        ),
+        'relative_spread_recent_change': _attribute(
+            spread_context,
+            'recent_change_ratio',
+        ),
+        'relative_spread_available': _attribute(
+            spread_context,
+            'available',
+        ),
         'entry_route_action': _enum_value(_attribute(decision, 'action')),
         'entry_route_reason': _attribute(decision, 'reason'),
         'selection_outcome': selection_outcome,
@@ -377,6 +464,53 @@ def _entry_decision_record(
         'outcome_probability_model_version': _attribute(
             candidate,
             'outcome_probability_model_version',
+        ),
+        'selection_policy_version': selection_policy_version,
+        'managed_v2_shadow_policy_version': shadow_policy_version,
+        'feature_contract_version': _attribute(
+            managed_v2,
+            'feature_contract_version',
+        ),
+        'label_contract_version': _attribute(
+            managed_v2,
+            'label_contract_version',
+        ),
+        'opportunity_model_version': _attribute(
+            managed_v2,
+            'opportunity_model_version',
+        ),
+        'path_model_version': _attribute(
+            managed_v2,
+            'path_model_version',
+        ),
+        'economics_model_version': _attribute(
+            managed_v2,
+            'economics_model_version',
+        ),
+        'managed_v2_artifact_sha256': _attribute(
+            managed_v2,
+            'artifact_sha256',
+        ),
+        'managed_v2_deployment_status': (
+            deployment_status
+            if deployment_status is not None
+            else _attribute(managed_v2, 'deployment_status')
+        ),
+        'managed_v2_gate_outcome': _attribute(
+            managed_v2,
+            'gate_outcome',
+        ),
+        'managed_v2_gate_rejection_reason': _attribute(
+            managed_v2,
+            'gate_rejection_reason',
+        ),
+        'managed_v2_shadow_selection_outcome': _attribute(
+            managed_v2,
+            'shadow_selection_outcome',
+        ),
+        'managed_v2_shadow_selection_reason': _attribute(
+            managed_v2,
+            'shadow_selection_reason',
         ),
         'entry_route_model_version': _attribute(
             decision,
@@ -430,3 +564,25 @@ def _attribute(value: Any, name: str) -> Any:
     if isinstance(value, dict):
         return value.get(name)
     return getattr(value, name, None)
+
+
+def _snapshot_spread_percent(snapshot: Any) -> float | None:
+    bid = _attribute(snapshot, 'bid')
+    ask = _attribute(snapshot, 'ask')
+    if bid is None or ask is None:
+        return None
+    midpoint = (float(bid) + float(ask)) / 2
+    if midpoint <= 0:
+        return None
+    return round((float(ask) - float(bid)) / midpoint * 100, 4)
+
+
+def _executable_entry_price(snapshot: Any, side: Any) -> float | None:
+    normalized_side = str(side or '').upper()
+    if normalized_side == 'BUY':
+        value = _attribute(snapshot, 'ask')
+    elif normalized_side == 'SELL':
+        value = _attribute(snapshot, 'bid')
+    else:
+        return None
+    return None if value is None else float(value)

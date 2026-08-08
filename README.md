@@ -14,7 +14,7 @@
 - **Validated data only** — rejected or quarantined snapshots cannot create candles or entries.
 - **Activity and direction remain separate** — `P_TOUCH` estimates whether a barrier will be reached; segmented `P_DIRECTION` estimates which barrier wins.
 - **Costs are part of the trade** — the conditional break-even probability uses net TP gain and net SL loss.
-- **One active policy** — no shadow selector, legacy score, hidden fallback or compatibility shim participates in runtime decisions.
+- **One execution policy** — `MANAGED_EDGE_V1` alone can send equity or crypto candidates onward; the V2 challenger is computed and journalled in shadow only.
 - **Every decision leaves evidence** — raw data, bars, candidates, model inputs, routes, summaries and manifests are retained.
 - **Doing nothing is valid** — zero trades can still be the correct outcome.
 
@@ -32,6 +32,8 @@ Goblin currently includes:
 - a frozen two-stage outcome model;
 - four trained equity direction segments and two explicit provisional crypto segments;
 - the frozen `MANAGED_EDGE_V1` selector applied before top-N;
+- a frozen, four-segment MANAGED V2 challenger with separate Opportunity, Path Quality and Economics estimates, retained in shadow only;
+- prior-only relative-spread context and adaptive anomalous-quote quarantine;
 - side-aware executable position economics: BUY exits at bid, SELL exits at ask;
 - one shared live/replay lifecycle for breakeven, trailing, TP, SL, stale and force close;
 - broker close-fill reconciliation with explicit uncertain-close states;
@@ -59,6 +61,8 @@ flowchart TD
     I -->|SKIP| L[Counterfactual journal]
     J --> M[Segmented P_DIRECTION diagnostics]
     M --> N[MANAGED_EDGE_V1]
+    J --> V[MANAGED V2 shadow]
+    V --> W[Audit journal only]
     N --> O[Managed probability and net-return gates]
     O --> P[Rank eligible then top-N]
     K --> G
@@ -142,6 +146,12 @@ managed_edge = EXPECTED_MANAGED_NET_RETURN - 0.05%
 Candidates must exceed their frozen segment floors for protection and positive
 outcome, then have non-negative managed edge.
 
+The segment-first MANAGED V2 challenger separately estimates whether the live
+protection threshold is reachable, whether it is reached before the initial
+stop, and the conditional net lifecycle return. It cannot replace, veto or
+backfill the active V1 selection. Its four equity segments and all feature,
+label, floor and artifact versions are recorded for a frozen shadow experiment.
+
 Selection order:
 
 1. apply entry route, readiness, feasibility and hard economics;
@@ -165,7 +175,7 @@ P_DIRECTION AUC:   0.643
 P_DIRECTION Brier: 0.202
 ```
 
-A stricter train-22–24/test-27–28 check produced approximately AUC 0.588 and Brier 0.217. These figures justify a demo experiment, not a profitability claim. The five-point margin was exploratory and must remain frozen during the next three complete demo sessions.
+A stricter train-22–24/test-27–28 check produced approximately AUC 0.588 and Brier 0.217. These figures justify a demo experiment, not a profitability claim. Strategic parameters and the MANAGED V2 shadow artifact remain frozen for the two complete demo weeks defined in the V2 protocol.
 
 ## Fixed profiles and managed exits
 
@@ -219,14 +229,27 @@ python scripts/replay_breakeven_profiles.py PLAN.json report.json \
   --output-markdown report.md --validate-archives
 ```
 
+Fit and replay the frozen MANAGED V2 research artifact:
+
+```bash
+python -m pip install -e ".[calibration]"
+python scripts/fit_managed_v2.py PLAN.json \
+  app/execution/scoring/models/managed_v2 fit-report.json \
+  --dataset-json managed-v2-dataset.json
+python scripts/replay_managed_v2.py PLAN.json replay-report.json \
+  --output-markdown replay-report.md
+```
+
 ## Analysis contract
 
-Run-manifest schema V12 records:
+Run-manifest schema V13 records:
 
 - model and feature-contract versions;
 - activity and direction dataset hashes;
 - all six direction segments and their provenance;
 - the managed selector and artifact provenance;
+- the MANAGED V2 segment contracts, frozen component models, artifact hash,
+  shadow status and quote-quality contract;
 - the executable-price, position-economics, lifecycle, cost, close-taxonomy and
   cooldown contract versions;
 - the selected breakeven profile and exact thresholds;
@@ -236,12 +259,13 @@ Run-manifest schema V12 records:
 
 Standalone `entry_decision` records include the complete nested outcome estimate, so raw/final direction probabilities and segment metadata remain auditable without duplicate shadow decisions.
 
-Daily summary schema V10 and analysis-ready schema V13 expose each closed
+Daily summary schema V10 and analysis-ready schema V14 expose each closed
 position’s signal price, executable estimate, broker fill provenance, bid/ask,
 observed spread, gross P&L, explicit costs, net P&L and executable MFE/MAE.
 
 See [Position lifecycle V2](docs/position-lifecycle-v2.md),
-[Managed Edge V1](docs/managed-edge-v1.md) and
+[Managed Edge V1](docs/managed-edge-v1.md),
+[MANAGED V2 segment-first](docs/managed-v2-segment-first.md) and
 [the breakeven replay decision](docs/breakeven-replay-v1.md).
 
 ## Pre-live status

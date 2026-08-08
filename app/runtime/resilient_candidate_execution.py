@@ -10,6 +10,9 @@ from app.execution.candidate_selector import (
     RejectedEvaluatedCandidateSelection,
     rank_evaluated_trade_candidates,
 )
+from app.execution.scoring.managed_v2_model_contract import (
+    MANAGED_V2_SELECTION_POLICY_VERSION,
+)
 from app.execution.sl_tp_profile import EffectiveSlTpResolver
 from app.risk.models import TradePlan
 from app.runtime.async_candidate_execution import (
@@ -28,12 +31,15 @@ from app.runtime.candidate_flow import (
     _candidate_selection_result_from_evaluated,
     _evaluate_risk_manager,
     _resolve_runtime_effective_sl_tp,
-    apply_outcome_probability_to_evaluated_candidates,
-    apply_tp_feasibility_to_evaluated_candidates,
     apply_trade_cooldown_guard,
-    attach_entry_decisions,
+    evaluate_candidate_batch,
     select_evaluated_trade_candidates_with_strategy_profile,
     select_trade_candidates_with_strategy_profile,
+)
+from app.runtime.managed_v2_shadow import (
+    annotate_managed_v2_shadow_shared_rejections,
+    apply_managed_v2_shadow_selection,
+    candidate_selection_contract_metadata,
 )
 from app.runtime.pending_candidate_lifecycle import (
     invalidate_pending_candidate,
@@ -88,35 +94,12 @@ class ResilientCandidateExecutionCoordinator(
             )
             ranked_candidates = selection_result.selected_candidates
         else:
-            evaluated = [
-                self.candidate_economics_estimator.evaluate(candidate, equity)
-                for candidate in candidates
-            ]
-            self.trade_journal.write(
-                'candidate_economics',
-                {'equity': equity, 'evaluated_candidates': evaluated},
-            )
-            evaluated = apply_tp_feasibility_to_evaluated_candidates(
-                evaluated_candidates=evaluated,
+            evaluated = evaluate_candidate_batch(
+                candidates=candidates,
+                equity=equity,
+                economics_estimator=self.candidate_economics_estimator,
                 risk_manager=self.risk_manager,
-            )
-            self.trade_journal.write(
-                'candidate_tp_feasibility',
-                {'equity': equity, 'evaluated_candidates': evaluated},
-            )
-            evaluated = attach_entry_decisions(evaluated)
-            evaluated = (
-                apply_outcome_probability_to_evaluated_candidates(
-                    evaluated_candidates=evaluated,
-                    risk_manager=self.risk_manager,
-                )
-            )
-            self.trade_journal.write(
-                'candidate_outcome_probability',
-                {
-                    'equity': equity,
-                    'evaluated_candidates': evaluated,
-                },
+                trade_journal=self.trade_journal,
             )
             allowed_evaluated, cooldown_rejections = (
                 self._filter_evaluated_candidates_by_cooldown(
@@ -124,6 +107,35 @@ class ResilientCandidateExecutionCoordinator(
                     now=now,
                 )
             )
+            shadow_selection = None
+            if self.strategy_profile is not None:
+                allowed_evaluated, shadow_selection = (
+                    apply_managed_v2_shadow_selection(
+                        evaluated_candidates=allowed_evaluated,
+                        risk_manager=self.risk_manager,
+                        strategy_profile=self.strategy_profile,
+                    )
+                )
+                cooldown_rejections = (
+                    annotate_managed_v2_shadow_shared_rejections(
+                        cooldown_rejections
+                    )
+                )
+                self.trade_journal.write(
+                    'candidate_managed_v2_shadow_selection',
+                    {
+                        'selection_policy_version': (
+                            MANAGED_V2_SELECTION_POLICY_VERSION
+                        ),
+                        'selected_evaluated_candidates': (
+                            shadow_selection.selected_candidates
+                        ),
+                        'rejected_evaluated_candidates': [
+                            *cooldown_rejections,
+                            *shadow_selection.rejected_candidates,
+                        ],
+                    },
+                )
             evaluated_selection = (
                 EvaluatedCandidateSelectionResult(
                     rank_evaluated_trade_candidates(allowed_evaluated),
@@ -158,6 +170,11 @@ class ResilientCandidateExecutionCoordinator(
         self.trade_journal.write(
             'candidate_selection',
             {
+                **candidate_selection_contract_metadata(
+                    managed_evaluation_enabled=(
+                        self.candidate_economics_estimator is not None
+                    ),
+                ),
                 'strategy_profile': self.strategy_profile.name,
                 'selected_candidates': selection_result.selected_candidates,
                 'rejected_candidates': selection_result.rejected_candidates,
