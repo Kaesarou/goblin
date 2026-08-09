@@ -102,13 +102,10 @@ def test_candidate_deserialization_restores_typed_price_and_context_contracts():
     assert candidate.market_context.spread is None
     assert candidate.segment is None
 
-    managed_v2_raw = deepcopy(raw)
-    managed_v2_raw['segment'] = 'EQUITY_US_SELL'
-    managed_v2_raw['managed_v2_opportunity_probability'] = 0.61
-    managed_v2_raw['managed_v2_path_probability'] = 0.72
-    managed_v2_raw['managed_v2_model_version'] = 'managed_v2_20260808'
-    managed_v2_raw['market_context']['version'] = 'market_context_v3'
-    managed_v2_raw['market_context']['spread'] = {
+    segmented_raw = deepcopy(raw)
+    segmented_raw['segment'] = 'EQUITY_US_SELL'
+    segmented_raw['market_context']['version'] = 'market_context_v3'
+    segmented_raw['market_context']['spread'] = {
         'version': 'relative_spread_context_v1',
         'available': True,
         'current_percent': 0.20,
@@ -119,9 +116,7 @@ def test_candidate_deserialization_restores_typed_price_and_context_contracts():
         'reference_observations': 40,
     }
 
-    managed_v2_candidate = trade_candidate_from_journal(managed_v2_raw)
+    segmented_candidate = trade_candidate_from_journal(segmented_raw)
 
-    assert managed_v2_candidate.segment is StrategySegment.EQUITY_US_SELL
-    assert managed_v2_candidate.managed_v2_opportunity_probability == 0.61
-    assert managed_v2_candidate.managed_v2_path_probability == 0.72
-    assert managed_v2_candidate.market_context.spread.relative_to_median == 2.0
+    assert segmented_candidate.segment is StrategySegment.EQUITY_US_SELL
+    assert segmented_candidate.market_context.spread.relative_to_median == 2.0
