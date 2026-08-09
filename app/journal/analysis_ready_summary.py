@@ -3,7 +3,7 @@ from typing import Any
 
 from app.journal.daily_summary import DailySummaryAggregator
 
-ANALYSIS_READY_SUMMARY_SCHEMA_VERSION = 14
+ANALYSIS_READY_SUMMARY_SCHEMA_VERSION = 13
 
 
 class AnalysisReadySummaryAggregator(DailySummaryAggregator):
@@ -28,14 +28,6 @@ class AnalysisReadySummaryAggregator(DailySummaryAggregator):
         self.entry_horizon_rejections_by_profile = Counter()
         self.entry_horizon_rejections_by_reason = Counter()
         self.managed_stop_updates_by_type = Counter()
-        self.managed_v2_evaluated_by_segment = Counter()
-        self.managed_v2_gate_outcomes_by_segment: dict[str, Counter] = {}
-        self.managed_v2_gate_rejections_by_reason = Counter()
-        self.managed_v2_shadow_selected_by_segment = Counter()
-        self.managed_v2_shadow_rejected_by_segment = Counter()
-        self.managed_v2_shadow_rejections_by_reason = Counter()
-        self.managed_v2_missing_features = Counter()
-        self.managed_v2_shadow_policy_versions = Counter()
 
     def record(self, event_type: str, payload: dict[str, Any]) -> None:
         super().record(event_type, payload)
@@ -65,10 +57,6 @@ class AnalysisReadySummaryAggregator(DailySummaryAggregator):
             self.managed_stop_updates_by_type[
                 str(payload.get('protection_type') or 'unknown')
             ] += 1
-        elif event_type == 'candidate_managed_v2_shadow':
-            self._record_managed_v2_estimates(payload)
-        elif event_type == 'candidate_managed_v2_shadow_selection':
-            self._record_managed_v2_shadow_selection(payload)
 
     def _record_decision(self, payload):
         approved_before = self.risk_approved
@@ -174,64 +162,6 @@ class AnalysisReadySummaryAggregator(DailySummaryAggregator):
         upper = lower + width
         counter[f'[{lower:.2f},{upper:.2f})'] += 1
 
-    def _record_managed_v2_estimates(
-        self,
-        payload: dict[str, Any],
-    ) -> None:
-        for item in _as_list(payload.get('evaluated_candidates')):
-            candidate = _attribute(item, 'candidate')
-            metadata = _attribute(candidate, 'managed_v2_metadata') or {}
-            segment = _managed_v2_segment(candidate, metadata)
-            if segment == 'unknown':
-                continue
-            self.managed_v2_evaluated_by_segment[segment] += 1
-            gate_outcome = str(
-                _attribute(metadata, 'gate_outcome') or 'unknown'
-            )
-            counter = self.managed_v2_gate_outcomes_by_segment.setdefault(
-                segment,
-                Counter(),
-            )
-            counter[gate_outcome] += 1
-            gate_reason = _attribute(metadata, 'gate_rejection_reason')
-            if gate_reason:
-                self.managed_v2_gate_rejections_by_reason[
-                    str(gate_reason)
-                ] += 1
-            for component in ('opportunity', 'path', 'economics'):
-                component_metadata = _attribute(metadata, component) or {}
-                for feature in _as_list(
-                    _attribute(component_metadata, 'missing_features')
-                ):
-                    self.managed_v2_missing_features[
-                        f'{segment}:{component}:{feature}'
-                    ] += 1
-
-    def _record_managed_v2_shadow_selection(
-        self,
-        payload: dict[str, Any],
-    ) -> None:
-        version = payload.get('selection_policy_version')
-        if version:
-            self.managed_v2_shadow_policy_versions[str(version)] += 1
-        for item in _as_list(payload.get('selected_evaluated_candidates')):
-            candidate = _attribute(item, 'candidate')
-            segment = _managed_v2_segment(
-                candidate,
-                _attribute(candidate, 'managed_v2_metadata') or {},
-            )
-            self.managed_v2_shadow_selected_by_segment[segment] += 1
-        for item in _as_list(payload.get('rejected_evaluated_candidates')):
-            evaluated = _attribute(item, 'evaluated_candidate') or item
-            candidate = _attribute(evaluated, 'candidate')
-            segment = _managed_v2_segment(
-                candidate,
-                _attribute(candidate, 'managed_v2_metadata') or {},
-            )
-            self.managed_v2_shadow_rejected_by_segment[segment] += 1
-            reason = _attribute(item, 'reason') or 'unknown_rejection'
-            self.managed_v2_shadow_rejections_by_reason[str(reason)] += 1
-
     def to_dict(self) -> dict[str, Any]:
         summary = super().to_dict()
         summary['schema_version'] = ANALYSIS_READY_SUMMARY_SCHEMA_VERSION
@@ -284,32 +214,6 @@ class AnalysisReadySummaryAggregator(DailySummaryAggregator):
         summary['managed_stops'] = {
             'updates_by_type': dict(self.managed_stop_updates_by_type),
         }
-        summary['managed_v2'] = {
-            'evaluated_by_segment': dict(
-                self.managed_v2_evaluated_by_segment
-            ),
-            'gate_outcomes_by_segment': {
-                segment: dict(counter)
-                for segment, counter
-                in self.managed_v2_gate_outcomes_by_segment.items()
-            },
-            'gate_rejections_by_reason': dict(
-                self.managed_v2_gate_rejections_by_reason
-            ),
-            'shadow_selected_by_segment': dict(
-                self.managed_v2_shadow_selected_by_segment
-            ),
-            'shadow_rejected_by_segment': dict(
-                self.managed_v2_shadow_rejected_by_segment
-            ),
-            'shadow_rejections_by_reason': dict(
-                self.managed_v2_shadow_rejections_by_reason
-            ),
-            'missing_features': dict(self.managed_v2_missing_features),
-            'selection_policy_versions': dict(
-                self.managed_v2_shadow_policy_versions
-            ),
-        }
         return summary
 
 
@@ -327,11 +231,3 @@ def _as_list(value: Any) -> list[Any]:
     if isinstance(value, (list, tuple, set)):
         return list(value)
     return list(value)
-
-
-def _managed_v2_segment(candidate: Any, metadata: Any) -> str:
-    segment = _attribute(metadata, 'segment') or _attribute(
-        candidate,
-        'segment',
-    )
-    return str(_attribute(segment, 'value') or segment or 'unknown')
