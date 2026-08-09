@@ -137,11 +137,17 @@ class PositionTracker:
         *,
         force_close: bool = False,
         force_close_metadata: dict[str, Any] | None = None,
+        position_ids: set[str] | None = None,
     ) -> list[PositionCloseSignal]:
         close_signals: list[PositionCloseSignal] = []
         self._managed_stop_updates.clear()
         for previous in list(self.positions.values()):
             if previous.symbol != snapshot.symbol:
+                continue
+            if (
+                position_ids is not None
+                and previous.position_id not in position_ids
+            ):
                 continue
             result = self.lifecycle_engine.evaluate(
                 position=previous,

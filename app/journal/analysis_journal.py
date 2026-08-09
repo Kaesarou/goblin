@@ -1,6 +1,9 @@
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from app.execution.scoring.managed_outcome_model_contract import (
+    MANAGED_SELECTION_POLICY_VERSION,
+)
 from app.journal.analysis_ready_summary import AnalysisReadySummaryAggregator
 from app.journal.journal_policy import (
     normalize_detail_level,
@@ -10,9 +13,9 @@ from app.journal.journal_policy import (
 )
 from app.journal.jsonl_journal import JsonlJournal
 
-
 PARTIAL_SUMMARY_INTERVAL_MINUTES = 15
 WRITE_PARTIAL_SUMMARY = True
+ENTRY_DECISION_SCHEMA_VERSION = 2
 
 
 class AnalysisJournal:
@@ -253,14 +256,25 @@ def _entry_decision_record(
         candidate,
         'multi_timeframe_context',
     )
+    spread_context = _attribute(market_context, 'spread')
     return {
+        'schema_version': ENTRY_DECISION_SCHEMA_VERSION,
         'candidate_id': _attribute(candidate, 'candidate_id'),
         'origin_candidate_id': _attribute(candidate, 'origin_candidate_id'),
         'pending_entry_id': _attribute(candidate, 'pending_entry_id'),
         'candidate_timestamp': _attribute(snapshot, 'timestamp'),
         'symbol': _attribute(candidate, 'symbol'),
         'side': _attribute(signal, 'action'),
+        'segment': _enum_value(_attribute(candidate, 'segment')),
         'entry_reference_price': _attribute(snapshot, 'last'),
+        'bid': _attribute(snapshot, 'bid'),
+        'ask': _attribute(snapshot, 'ask'),
+        'last': _attribute(snapshot, 'last'),
+        'spread': _snapshot_spread_percent(snapshot),
+        'executable_entry_price': _executable_entry_price(
+            snapshot,
+            _attribute(signal, 'action'),
+        ),
         'profile_key': _profile_key(
             effective_sl_tp,
             outcome_probability,
@@ -345,6 +359,40 @@ def _entry_decision_record(
             'direction_break_even_probability',
         ),
         'direction_edge': _attribute(candidate, 'direction_edge'),
+        'managed_protection_probability': _attribute(
+            candidate,
+            'managed_protection_probability',
+        ),
+        'managed_positive_probability': _attribute(
+            candidate,
+            'managed_positive_probability',
+        ),
+        'managed_expected_net_return_percent': _attribute(
+            candidate,
+            'managed_expected_net_return_percent',
+        ),
+        'managed_edge': _attribute(candidate, 'managed_edge'),
+        'managed_outcome_model_version': _attribute(
+            candidate,
+            'managed_outcome_model_version',
+        ),
+        'observed_spread_percent': _snapshot_spread_percent(snapshot),
+        'relative_spread_ratio': _attribute(
+            spread_context,
+            'relative_to_median',
+        ),
+        'relative_spread_percentile': _attribute(
+            spread_context,
+            'reference_percentile',
+        ),
+        'relative_spread_recent_change': _attribute(
+            spread_context,
+            'recent_change_ratio',
+        ),
+        'relative_spread_available': _attribute(
+            spread_context,
+            'available',
+        ),
         'entry_route_action': _enum_value(_attribute(decision, 'action')),
         'entry_route_reason': _attribute(decision, 'reason'),
         'selection_outcome': selection_outcome,
@@ -378,6 +426,7 @@ def _entry_decision_record(
             candidate,
             'outcome_probability_model_version',
         ),
+        'selection_policy_version': MANAGED_SELECTION_POLICY_VERSION,
         'entry_route_model_version': _attribute(
             decision,
             'model_version',
@@ -430,3 +479,25 @@ def _attribute(value: Any, name: str) -> Any:
     if isinstance(value, dict):
         return value.get(name)
     return getattr(value, name, None)
+
+
+def _snapshot_spread_percent(snapshot: Any) -> float | None:
+    bid = _attribute(snapshot, 'bid')
+    ask = _attribute(snapshot, 'ask')
+    if bid is None or ask is None:
+        return None
+    midpoint = (float(bid) + float(ask)) / 2
+    if midpoint <= 0:
+        return None
+    return round((float(ask) - float(bid)) / midpoint * 100, 4)
+
+
+def _executable_entry_price(snapshot: Any, side: Any) -> float | None:
+    normalized_side = str(side or '').upper()
+    if normalized_side == 'BUY':
+        value = _attribute(snapshot, 'ask')
+    elif normalized_side == 'SELL':
+        value = _attribute(snapshot, 'bid')
+    else:
+        return None
+    return None if value is None else float(value)

@@ -1,17 +1,21 @@
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Mapping
 
 from app.instruments.instrument_registry import InstrumentRegistry
 from app.instruments.models import AssetClass, MarketContextConfig
 from app.instruments.sector_map import DEFAULT_SECTOR_BY_SYMBOL
 from app.market.models import MarketSnapshot
+from app.market.relative_spread import (
+    SPREAD_REFERENCE_MAX_OBSERVATIONS,
+    SpreadContext,
+    build_relative_spread_context,
+)
 from app.market.session_rules import TradingSessionDecision
 
-
-MARKET_CONTEXT_VERSION = 'market_context_v2'
+MARKET_CONTEXT_VERSION = 'market_context_v3'
 MARKET_CONTEXT_HISTORY_RETENTION_SECONDS = 24 * 60 * 60
 
 
@@ -87,6 +91,7 @@ class CandidateMarketContext:
     symbol_session_return_percent: float | None
     symbol_relative_strength_percent: float | None
     reasons: tuple[str, ...]
+    spread: SpreadContext | None = None
 
 
 @dataclass(frozen=True)
@@ -114,6 +119,8 @@ class MarketContextService:
         }
         self._latest: dict[str, MarketSnapshot] = {}
         self._history: dict[str, deque[_HistoricalSnapshot]] = {}
+        self._spread_latest: dict[str, MarketSnapshot] = {}
+        self._spread_history: dict[str, deque[MarketSnapshot]] = {}
         self._asset_class_by_symbol: dict[str, AssetClass] = {}
         self._session_key_by_symbol: dict[str, str] = {}
         self._session_open: dict[tuple[str, str], float] = {}
@@ -122,6 +129,14 @@ class MarketContextService:
         }
 
     def reset_session(self, session_key: str) -> None:
+        completed_symbols = {
+            symbol
+            for symbol, key in self._session_key_by_symbol.items()
+            if key == session_key
+        }
+        for symbol in completed_symbols:
+            self._spread_latest.pop(symbol, None)
+            self._spread_history.pop(symbol, None)
         self._session_open = {
             key: value for key, value in self._session_open.items() if key[0] != session_key
         }
@@ -134,6 +149,11 @@ class MarketContextService:
             symbol: deque(item for item in history if item.session_key != session_key)
             for symbol, history in self._history.items()
         }
+
+    def observe_accepted_snapshot(self, snapshot: MarketSnapshot) -> None:
+        """Retain every accepted quote for prior-only spread context."""
+
+        self._observe_spread_snapshot(snapshot.symbol, snapshot)
 
     def update(
         self,
@@ -170,6 +190,7 @@ class MarketContextService:
             if asset_class is None:
                 continue
 
+            self._observe_spread_snapshot(symbol, snapshot)
             self._latest[symbol] = snapshot
             self._asset_class_by_symbol[symbol] = asset_class
             session_key = self._session_key_by_symbol.get(symbol) or active_session_by_asset.get(asset_class)
@@ -225,6 +246,7 @@ class MarketContextService:
             regime=regime,
             alignment=alignment,
         )
+        spread = self._spread_context(normalized_symbol)
         return CandidateMarketContext(
             version=MARKET_CONTEXT_VERSION,
             as_of=actual_as_of,
@@ -237,7 +259,40 @@ class MarketContextService:
             symbol_session_return_percent=_round_optional(symbol_return),
             symbol_relative_strength_percent=_round_optional(relative_strength),
             reasons=reasons,
+            spread=spread,
         )
+
+    def _spread_context(self, symbol: str) -> SpreadContext:
+        current = self._spread_latest.get(symbol)
+        current_timestamp = (
+            None if current is None else _as_utc(current.timestamp)
+        )
+        prior = [
+            item
+            for item in self._spread_history.get(symbol, ())
+            if current_timestamp is not None
+            and _as_utc(item.timestamp) < current_timestamp
+        ]
+        return build_relative_spread_context(
+            current=current,
+            prior_snapshots=prior,
+        )
+
+    def _observe_spread_snapshot(
+        self,
+        raw_symbol: str,
+        snapshot: MarketSnapshot,
+    ) -> None:
+        symbol = raw_symbol.strip().upper()
+        previous = self._spread_latest.get(symbol)
+        self._spread_latest[symbol] = snapshot
+        if previous is not None and _same_quote(previous, snapshot):
+            return
+        history = self._spread_history.setdefault(
+            symbol,
+            deque(maxlen=SPREAD_REFERENCE_MAX_OBSERVATIONS + 1),
+        )
+        history.append(snapshot)
 
     def _benchmark_context(
         self,
@@ -575,5 +630,14 @@ def _round_optional(value: float | None) -> float | None:
 
 def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _same_quote(left: MarketSnapshot, right: MarketSnapshot) -> bool:
+    return (
+        _as_utc(left.timestamp) == _as_utc(right.timestamp)
+        and left.bid == right.bid
+        and left.ask == right.ask
+        and left.last == right.last
+    )

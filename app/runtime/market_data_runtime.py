@@ -144,6 +144,7 @@ class EventDrivenMarketRuntime(
             trade_journal=trade_journal,
             market_data_coordinator=self.coordinator,
             is_broker_authorization_error=is_broker_authorization_error,
+            instrument_registry=instrument_registry,
             reconciliation_grace_seconds=(
                 POSITION_RECONCILIATION_GRACE_SECONDS
             ),

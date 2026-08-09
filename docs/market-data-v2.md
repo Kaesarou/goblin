@@ -21,6 +21,14 @@ versioned scoring policy.
 - reject WebSocket events older than the last accepted WebSocket timestamp for
   the symbol;
 - validate quotes before advancing the accepted timestamp watermark;
+- after 20 accepted symbol changes, quarantine an isolated jump above the
+  adaptive `quote_quality_v2` threshold before it can reach candles, candidates
+  or position lifecycle handling;
+- accept an ordinary quote immediately, and accept a genuine discontinuous
+  level on its next confirming quote rather than imposing universal
+  double-confirmation;
+- keep a follow-up that confirms neither the baseline nor the pending level in
+  quarantine, rebasing the pending level for the next observation;
 - block new entries while an open-position symbol is in REST fallback,
   recovering, or blocked;
 - keep REST fallback snapshots outside candles, signals, market context and the
@@ -36,6 +44,16 @@ versioned scoring policy.
 - bound the transport queue and fail visibly on overflow;
 - coordinate candidates by closed M1 minute before applying cross-symbol
   ranking.
+
+The jump and confirmation distance use the largest absolute percentage move
+across bid, ask and last, so executable-price anomalies cannot hide behind a
+stable last price. Quote-quality decisions retain their rolling reference size,
+median change, effective threshold, pending quote timestamp and
+confirmation/recovery reason in the trade journal.
+
+Position-only REST fallback uses an independent validator warmed by accepted
+WebSocket quotes. A fallback anomaly therefore cannot drive lifecycle handling,
+and fallback timestamps cannot advance the canonical WebSocket validator.
 
 ## Deliberately unchanged
 

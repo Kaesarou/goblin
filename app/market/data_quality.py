@@ -1,4 +1,5 @@
 import math
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -6,8 +7,12 @@ from typing import Mapping
 
 from app.market.models import MarketSnapshot
 
-
 _LIVE_CLOCK_WINDOW_SECONDS = 300
+QUOTE_QUALITY_CONTRACT_VERSION = 'quote_quality_v2'
+SUSPECT_REFERENCE_OBSERVATIONS = 128
+SUSPECT_MINIMUM_OBSERVATIONS = 20
+SUSPECT_MINIMUM_JUMP_PERCENT = 0.75
+SUSPECT_MEDIAN_MULTIPLIER = 20.0
 
 
 class MarketDataStatus(StrEnum):
@@ -37,6 +42,12 @@ class MarketDataValidationResult:
     spread_percent: float | None = None
     price_change_percent: float | None = None
     previous_snapshot_timestamp: datetime | None = None
+    quality_contract_version: str = QUOTE_QUALITY_CONTRACT_VERSION
+    suspect_quote: bool = False
+    suspicion_threshold_percent: float | None = None
+    reference_median_abs_change_percent: float | None = None
+    reference_observations: int = 0
+    quarantined_snapshot_timestamp: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -61,11 +72,27 @@ class MarketDataValidator:
     def __init__(self) -> None:
         self._last_accepted: dict[str, MarketSnapshot] = {}
         self._quarantined: dict[str, MarketSnapshot] = {}
+        self._accepted_abs_changes: dict[str, deque[float]] = {}
 
     def reset_symbol(self, symbol: str) -> None:
         normalized = symbol.strip().upper()
         self._last_accepted.pop(normalized, None)
         self._quarantined.pop(normalized, None)
+        self._accepted_abs_changes.pop(normalized, None)
+
+    def observe_accepted(self, snapshot: MarketSnapshot) -> None:
+        """Mirror a snapshot already accepted by another source gate.
+
+        Position REST fallback has a separate validator so its timestamps can
+        never advance the canonical WebSocket validator. Mirroring accepted
+        WebSocket quotes keeps the fallback gate warm without revalidating or
+        forwarding the quote a second time.
+        """
+
+        normalized_symbol = snapshot.symbol.strip().upper()
+        previous = self._last_accepted.get(normalized_symbol)
+        self._quarantined.pop(normalized_symbol, None)
+        self._accept_snapshot(normalized_symbol, previous, snapshot)
 
     def validate(
         self,
@@ -87,11 +114,7 @@ class MarketDataValidator:
             previous=previous,
             config=config,
         )
-        change = (
-            _price_change_percent(previous.last, snapshot.last)
-            if previous
-            else None
-        )
+        change = _quote_change_percent(previous, snapshot) if previous else None
         if reasons:
             return MarketDataValidationResult(
                 symbol=normalized_symbol,
@@ -112,42 +135,98 @@ class MarketDataValidator:
             previous = None
             change = None
             self._quarantined.pop(normalized_symbol, None)
+            self._accepted_abs_changes.pop(normalized_symbol, None)
 
+        pending = self._quarantined.get(normalized_symbol)
         if (
             previous is not None
-            and change is not None
-            and abs(change) > config.max_jump_percent
-        ):
-            pending = self._quarantined.get(normalized_symbol)
-            if pending is not None and self._confirms_quarantined_level(
+            and pending is not None
+            and self._confirms_quarantined_level(
                 snapshot=snapshot,
                 quarantined=pending,
                 config=config,
-            ):
-                self._quarantined.pop(normalized_symbol, None)
-                self._last_accepted[normalized_symbol] = snapshot
-                return MarketDataValidationResult(
-                    symbol=normalized_symbol,
-                    status=MarketDataStatus.ACCEPTED,
-                    snapshot=snapshot,
-                    reasons=('price_jump_confirmed',),
-                    spread_percent=_round_optional(spread),
-                    price_change_percent=_round_optional(change),
-                    previous_snapshot_timestamp=previous.timestamp,
-                )
+            )
+        ):
+            self._quarantined.pop(normalized_symbol, None)
+            self._accept_snapshot(normalized_symbol, previous, snapshot)
+            diagnostics = self._suspect_diagnostics(normalized_symbol)
+            return MarketDataValidationResult(
+                symbol=normalized_symbol,
+                status=MarketDataStatus.ACCEPTED,
+                snapshot=snapshot,
+                reasons=('suspect_quote_level_confirmed',),
+                spread_percent=_round_optional(spread),
+                price_change_percent=_round_optional(change),
+                previous_snapshot_timestamp=previous.timestamp,
+                suspect_quote=True,
+                quarantined_snapshot_timestamp=pending.timestamp,
+                **diagnostics,
+            )
+
+        if (
+            previous is not None
+            and pending is not None
+            and self._returns_to_baseline(
+                snapshot=snapshot,
+                baseline=previous,
+                config=config,
+            )
+        ):
+            self._quarantined.pop(normalized_symbol, None)
+            self._accept_snapshot(normalized_symbol, previous, snapshot)
+            diagnostics = self._suspect_diagnostics(normalized_symbol)
+            return MarketDataValidationResult(
+                symbol=normalized_symbol,
+                status=MarketDataStatus.ACCEPTED,
+                snapshot=snapshot,
+                reasons=('isolated_suspect_quote_rejected',),
+                spread_percent=_round_optional(spread),
+                price_change_percent=_round_optional(change),
+                previous_snapshot_timestamp=previous.timestamp,
+                suspect_quote=False,
+                quarantined_snapshot_timestamp=pending.timestamp,
+                **diagnostics,
+            )
+
+        if previous is not None and pending is not None:
+            self._quarantined[normalized_symbol] = snapshot
+            diagnostics = self._suspect_diagnostics(normalized_symbol)
+            return MarketDataValidationResult(
+                symbol=normalized_symbol,
+                status=MarketDataStatus.QUARANTINED,
+                snapshot=snapshot,
+                reasons=('suspect_quote_resolution_pending',),
+                spread_percent=_round_optional(spread),
+                price_change_percent=_round_optional(change),
+                previous_snapshot_timestamp=previous.timestamp,
+                suspect_quote=True,
+                quarantined_snapshot_timestamp=snapshot.timestamp,
+                **diagnostics,
+            )
+
+        suspect, diagnostics = self._is_suspect_change(
+            normalized_symbol,
+            change,
+            config,
+        )
+        if previous is not None and suspect:
             self._quarantined[normalized_symbol] = snapshot
             return MarketDataValidationResult(
                 symbol=normalized_symbol,
                 status=MarketDataStatus.QUARANTINED,
                 snapshot=snapshot,
-                reasons=('unconfirmed_price_jump',),
+                reasons=('suspect_quote_requires_confirmation',),
                 spread_percent=_round_optional(spread),
                 price_change_percent=_round_optional(change),
                 previous_snapshot_timestamp=previous.timestamp,
+                suspect_quote=True,
+                quarantined_snapshot_timestamp=snapshot.timestamp,
+                **diagnostics,
             )
 
         self._quarantined.pop(normalized_symbol, None)
-        self._last_accepted[normalized_symbol] = snapshot
+        self._accept_snapshot(normalized_symbol, previous, snapshot)
+        diagnostics = self._suspect_diagnostics(normalized_symbol)
         return MarketDataValidationResult(
             symbol=normalized_symbol,
             status=MarketDataStatus.ACCEPTED,
@@ -157,7 +236,64 @@ class MarketDataValidator:
             previous_snapshot_timestamp=(
                 previous.timestamp if previous else None
             ),
+            **diagnostics,
         )
+
+    def _accept_snapshot(
+        self,
+        symbol: str,
+        previous: MarketSnapshot | None,
+        snapshot: MarketSnapshot,
+    ) -> None:
+        if previous is not None:
+            change = _quote_change_percent(previous, snapshot)
+            if change is not None:
+                history = self._accepted_abs_changes.setdefault(
+                    symbol,
+                    deque(maxlen=SUSPECT_REFERENCE_OBSERVATIONS),
+                )
+                history.append(abs(change))
+        self._last_accepted[symbol] = snapshot
+
+    def _is_suspect_change(
+        self,
+        symbol: str,
+        change: float | None,
+        config: MarketDataQualityConfig,
+    ) -> tuple[bool, dict[str, float | int | None]]:
+        diagnostics = self._suspect_diagnostics(symbol)
+        if change is None:
+            return False, diagnostics
+        threshold = diagnostics['suspicion_threshold_percent']
+        fixed_jump = abs(change) > config.max_jump_percent
+        adaptive_jump = (
+            threshold is not None and abs(change) > float(threshold)
+        )
+        return fixed_jump or adaptive_jump, diagnostics
+
+    def _suspect_diagnostics(
+        self,
+        symbol: str,
+    ) -> dict[str, float | int | None]:
+        history = self._accepted_abs_changes.get(symbol, ())
+        observations = len(history)
+        median_change = _median(tuple(history))
+        threshold = (
+            None
+            if observations < SUSPECT_MINIMUM_OBSERVATIONS
+            or median_change is None
+            else max(
+                SUSPECT_MINIMUM_JUMP_PERCENT,
+                median_change * SUSPECT_MEDIAN_MULTIPLIER,
+            )
+        )
+        return {
+            'suspicion_threshold_percent': _round_optional(threshold),
+            'reference_median_abs_change_percent': _round_optional(
+                median_change
+            ),
+            'reference_observations': observations,
+        }
 
     def validate_batch(
         self,
@@ -284,17 +420,42 @@ class MarketDataValidator:
         quarantined: MarketSnapshot,
         config: MarketDataQualityConfig,
     ) -> bool:
-        confirmation_distance = abs(
-            _price_change_percent(
-                quarantined.last,
-                snapshot.last,
-            )
-            or 0.0
+        confirmation_distance = _quote_distance_percent(
+            quarantined,
+            snapshot,
         )
         return (
             confirmation_distance
             <= config.jump_confirmation_tolerance_percent
         )
+
+    def _returns_to_baseline(
+        self,
+        *,
+        snapshot: MarketSnapshot,
+        baseline: MarketSnapshot,
+        config: MarketDataQualityConfig,
+    ) -> bool:
+        distance = _quote_distance_percent(baseline, snapshot)
+        return distance <= config.jump_confirmation_tolerance_percent
+
+
+def quote_quality_contract_metadata() -> dict[str, float | int | str]:
+    return {
+        'version': QUOTE_QUALITY_CONTRACT_VERSION,
+        'reference_observations': SUSPECT_REFERENCE_OBSERVATIONS,
+        'minimum_observations': SUSPECT_MINIMUM_OBSERVATIONS,
+        'minimum_jump_percent': SUSPECT_MINIMUM_JUMP_PERCENT,
+        'median_multiplier': SUSPECT_MEDIAN_MULTIPLIER,
+        'change_basis': 'max_abs_percent_change_across_bid_ask_last',
+        'confirmation_basis': 'max_abs_percent_distance_across_bid_ask_last',
+        'ambiguous_follow_up': (
+            'quarantine_and_rebase_pending_until_level_or_baseline_confirmation'
+        ),
+        'confirmation_tolerance_source': (
+            'instrument_market_data_quality.jump_confirmation_tolerance_percent'
+        ),
+    }
 
 
 def _validation_time(request_started_at: datetime | None) -> datetime:
@@ -336,6 +497,40 @@ def _price_change_percent(
     if previous <= 0:
         return None
     return ((current - previous) / previous) * 100
+
+
+def _quote_change_percent(
+    previous: MarketSnapshot,
+    current: MarketSnapshot,
+) -> float | None:
+    changes = [
+        change
+        for before, after in (
+            (previous.bid, current.bid),
+            (previous.ask, current.ask),
+            (previous.last, current.last),
+        )
+        for change in [_price_change_percent(before, after)]
+        if change is not None
+    ]
+    return max(changes, key=abs) if changes else None
+
+
+def _quote_distance_percent(
+    reference: MarketSnapshot,
+    current: MarketSnapshot,
+) -> float:
+    return abs(_quote_change_percent(reference, current) or 0.0)
+
+
+def _median(values: tuple[float, ...]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2
 
 
 def _round_optional(value: float | None) -> float | None:

@@ -1,8 +1,10 @@
+from copy import deepcopy
 from datetime import UTC, datetime
 
 from app.backtesting.journal_deserialization import (
     trade_candidate_from_journal,
 )
+from app.execution.strategy_segment import StrategySegment
 from app.instruments.models import AssetClass
 
 
@@ -97,3 +99,24 @@ def test_candidate_deserialization_restores_typed_price_and_context_contracts():
     assert candidate.market_context is not None
     assert candidate.market_context.asset_class is AssetClass.EQUITY_US
     assert candidate.market_context.benchmark.momentum_percent == -0.1
+    assert candidate.market_context.spread is None
+    assert candidate.segment is None
+
+    segmented_raw = deepcopy(raw)
+    segmented_raw['segment'] = 'EQUITY_US_SELL'
+    segmented_raw['market_context']['version'] = 'market_context_v3'
+    segmented_raw['market_context']['spread'] = {
+        'version': 'relative_spread_context_v1',
+        'available': True,
+        'current_percent': 0.20,
+        'reference_median_percent': 0.10,
+        'relative_to_median': 2.0,
+        'reference_percentile': 0.90,
+        'recent_change_ratio': 0.10,
+        'reference_observations': 40,
+    }
+
+    segmented_candidate = trade_candidate_from_journal(segmented_raw)
+
+    assert segmented_candidate.segment is StrategySegment.EQUITY_US_SELL
+    assert segmented_candidate.market_context.spread.relative_to_median == 2.0

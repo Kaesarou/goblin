@@ -7,7 +7,7 @@ from app.market.market_context import MARKET_CONTEXT_VERSION
 from app.strategies.balanced_strategy_config import BalancedStrategyConfig
 
 
-def test_manifest_records_market_context_v2_and_default_benchmarks():
+def test_manifest_records_market_context_v3_and_default_benchmarks():
     settings = Settings(
         WATCHLIST='AAPL',
         EQUITY_US_SYMBOLS='AAPL',
@@ -27,7 +27,9 @@ def test_manifest_records_market_context_v2_and_default_benchmarks():
         started_at=datetime(2026, 7, 14, 13, 30, tzinfo=timezone.utc),
     )
 
-    assert manifest['models']['market_context'] == MARKET_CONTEXT_VERSION == 'market_context_v2'
+    assert manifest['models']['market_context'] == (
+        MARKET_CONTEXT_VERSION
+    ) == 'market_context_v3'
     assert manifest['runtime']['context_benchmarks'] == {
         'CRYPTO': ['CRYPTO10'],
         'EQUITY_US': ['SPX500'],

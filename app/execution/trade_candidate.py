@@ -3,9 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from app.execution.strategy_segment import StrategySegment
 from app.market.models import Candle, MarketSnapshot
 from app.strategies.signals import Signal
-
 
 if TYPE_CHECKING:
     from app.instruments.models import EntryDecisionConfig
@@ -57,6 +57,7 @@ class TradeCandidate:
     managed_edge: float | None = None
     managed_outcome_model_version: str | None = None
     managed_outcome_metadata: dict[str, Any] = field(default_factory=dict)
+    segment: StrategySegment | None = None
     candidate_id: str = ''
     origin_candidate_id: str = ''
     pending_entry_id: str | None = None

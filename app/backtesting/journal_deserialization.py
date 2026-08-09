@@ -4,6 +4,7 @@ from dataclasses import fields
 from datetime import UTC, datetime
 from typing import Any
 
+from app.execution.strategy_segment import StrategySegment
 from app.execution.trade_candidate import TradeCandidate
 from app.instruments.models import AssetClass, EntryDecisionConfig
 from app.market.market_context import (
@@ -27,6 +28,7 @@ from app.market.multi_timeframe import (
     OpeningRangeWindow,
     TimeframeFeatures,
 )
+from app.market.relative_spread import SpreadContext
 from app.market.timeframes import (
     MultiTimeframeAlignment,
     OpeningRangeStatus,
@@ -51,6 +53,7 @@ def trade_candidate_from_journal(value: dict[str, Any]) -> TradeCandidate:
             "market_context",
             "multi_timeframe_context",
             "entry_decision_config",
+            "segment",
         }
     }
     return TradeCandidate(
@@ -65,6 +68,11 @@ def trade_candidate_from_journal(value: dict[str, Any]) -> TradeCandidate:
         entry_decision_config=(
             EntryDecisionConfig(**value["entry_decision_config"])
             if value.get("entry_decision_config")
+            else None
+        ),
+        segment=(
+            StrategySegment(value["segment"])
+            if value.get("segment") is not None
             else None
         ),
     )
@@ -169,6 +177,28 @@ def candidate_market_context_from_journal(
             value.get("symbol_relative_strength_percent")
         ),
         reasons=tuple(str(item) for item in value.get("reasons", [])),
+        spread=_spread_context_from_journal(value.get("spread")),
+    )
+
+
+def _spread_context_from_journal(
+    value: dict[str, Any] | None,
+) -> SpreadContext | None:
+    if value is None:
+        return None
+    return SpreadContext(
+        version=str(value["version"]),
+        available=bool(value["available"]),
+        current_percent=_optional_float(value.get("current_percent")),
+        reference_median_percent=_optional_float(
+            value.get("reference_median_percent")
+        ),
+        relative_to_median=_optional_float(value.get("relative_to_median")),
+        reference_percentile=_optional_float(
+            value.get("reference_percentile")
+        ),
+        recent_change_ratio=_optional_float(value.get("recent_change_ratio")),
+        reference_observations=int(value.get("reference_observations", 0)),
     )
 
 

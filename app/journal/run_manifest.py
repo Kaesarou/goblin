@@ -39,7 +39,16 @@ from app.execution.scoring.tp_feasibility import (
     TP_FEASIBILITY_MODEL_VERSION,
 )
 from app.instruments.instrument_registry import InstrumentRegistry
+from app.journal.analysis_journal import ENTRY_DECISION_SCHEMA_VERSION
+from app.journal.analysis_ready_summary import (
+    ANALYSIS_READY_SUMMARY_SCHEMA_VERSION,
+)
+from app.journal.daily_summary import DAILY_SUMMARY_SCHEMA_VERSION
 from app.journal.serialization import serialize_value
+from app.market.data_quality import (
+    QUOTE_QUALITY_CONTRACT_VERSION,
+    quote_quality_contract_metadata,
+)
 from app.market.market_context import MARKET_CONTEXT_VERSION
 from app.market.models import EXECUTABLE_PRICE_CONTRACT_VERSION
 from app.market.timeframes import (
@@ -51,7 +60,7 @@ from app.risk.trade_cooldown import TRADE_COOLDOWN_CONTRACT_VERSION
 from app.risk.trade_cost_model import TRADE_COST_CONTRACT_VERSION
 
 _SENSITIVE_SETTINGS = {'ETORO_API_KEY', 'ETORO_USER_KEY'}
-RUN_MANIFEST_SCHEMA_VERSION = 12
+RUN_MANIFEST_SCHEMA_VERSION = 13
 
 
 def build_run_id(started_at: datetime | None = None) -> str:
@@ -169,9 +178,7 @@ def build_run_manifest(
                 outcome_probability_model.artifact_sha256
             ),
             'outcome_probability_direction_dataset_sha256': (
-                outcome_probability_model.provenance.get(
-                    'dataset_sha256'
-                )
+                outcome_probability_model.provenance.get('dataset_sha256')
             ),
             'outcome_probability_activity_dataset_sha256': (
                 outcome_probability_model.provenance.get(
@@ -184,9 +191,7 @@ def build_run_manifest(
             'outcome_probability_supported_segments': list(
                 outcome_probability_model.supported_segments
             ),
-            'outcome_probability_direction_margin': (
-                MINIMUM_DIRECTION_EDGE
-            ),
+            'outcome_probability_direction_margin': MINIMUM_DIRECTION_EDGE,
             'outcome_probability_direction_segments': direction_segments,
             'managed_outcome': MANAGED_OUTCOME_MODEL_VERSION,
             'managed_outcome_features': (
@@ -204,6 +209,7 @@ def build_run_manifest(
             'managed_outcome_provenance': dict(
                 managed_outcome_model.provenance
             ),
+            'managed_outcome_runtime_role': 'active_equity_and_crypto',
         },
         'strategy': {
             'name': 'TrendStrategy',
@@ -230,6 +236,7 @@ def build_run_manifest(
                     POSITION_CLOSE_TAXONOMY_VERSION
                 ),
                 'trade_cooldown': TRADE_COOLDOWN_CONTRACT_VERSION,
+                'quote_quality': QUOTE_QUALITY_CONTRACT_VERSION,
             },
             'economic_convention': {
                 'signal_and_candle_price': 'last_execution',
@@ -239,6 +246,7 @@ def build_run_manifest(
                 'post_trade_deducted_costs': 'explicit_only',
                 'broker_close_fill_priority': True,
             },
+            'quote_quality_policy': quote_quality_contract_metadata(),
             'watchlist': symbols,
             'context_benchmarks': benchmark_symbols,
             'symbol_profiles': symbol_profiles,
@@ -263,6 +271,13 @@ def build_run_manifest(
         },
         'analysis_sources': {
             'run_id': run_id,
+            'schemas': {
+                'entry_decision': ENTRY_DECISION_SCHEMA_VERSION,
+                'daily_summary': DAILY_SUMMARY_SCHEMA_VERSION,
+                'analysis_ready_summary': (
+                    ANALYSIS_READY_SUMMARY_SCHEMA_VERSION
+                ),
+            },
             'market_stream': settings.market_log_path,
             'candle_stream': settings.candle_journal_path,
             'trade_stream': settings.journal_path,
@@ -277,18 +292,24 @@ def build_run_manifest(
             'managed_stop_updates_retained': True,
             'entry_horizon_rejections_retained': True,
             'analysis_ready_entry_fields': [
+                'schema_version',
                 'candidate_id',
                 'origin_candidate_id',
                 'pending_entry_id',
                 'candidate_timestamp',
                 'symbol',
                 'side',
+                'segment',
+                'entry_reference_price',
                 'signal_price',
                 'executable_entry_estimate',
                 'broker_entry_fill_price',
                 'pnl_entry_price',
                 'bid',
                 'ask',
+                'last',
+                'spread',
+                'executable_entry_price',
                 'observed_spread_percent',
                 'profile_key',
                 'sl_tp_source',
@@ -323,6 +344,16 @@ def build_run_manifest(
                 'direction_edge',
                 'outcome_probability',
                 'outcome_probability_model_version',
+                'managed_protection_probability',
+                'managed_positive_probability',
+                'managed_expected_net_return_percent',
+                'managed_edge',
+                'managed_outcome_model_version',
+                'selection_policy_version',
+                'relative_spread_ratio',
+                'relative_spread_percentile',
+                'relative_spread_recent_change',
+                'relative_spread_available',
             ],
         },
         'files': {

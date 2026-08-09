@@ -6,7 +6,6 @@ from app.market.market_context import MARKET_CONTEXT_VERSION, MarketContextServi
 from app.market.models import MarketSnapshot
 from app.runtime.trading_session_window import TradingSessionDecision
 
-
 START = datetime(2026, 7, 14, 13, 30, tzinfo=timezone.utc)
 SESSION_KEY = 'EQUITY_US:2026-07-14'
 
@@ -77,7 +76,7 @@ def test_benchmark_momentum_uses_the_configured_rolling_window():
 
     context = service.build_candidate_context(symbol='AAPL', side='BUY', as_of=now)
 
-    assert context.version == MARKET_CONTEXT_VERSION == 'market_context_v2'
+    assert context.version == MARKET_CONTEXT_VERSION == 'market_context_v3'
     assert context.benchmark.session_return_percent == 2.0
     assert context.benchmark.momentum_percent == 0.9901
     assert context.benchmark.momentum_percent != context.benchmark.session_return_percent

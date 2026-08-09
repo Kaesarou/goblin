@@ -148,6 +148,25 @@ def test_sell_ignores_last_and_bid_until_ask_reaches_tp():
     ) == []
 
 
+def test_replay_can_limit_lifecycle_evaluation_to_due_positions():
+    tracker = PositionTracker()
+    open_position(tracker, 'BUY', position_id='not-due')
+    open_position(tracker, 'BUY', position_id='due')
+
+    signals = tracker.evaluate_snapshot(
+        snapshot(bid=102.0, ask=102.2),
+        position_ids={'due'},
+    )
+
+    assert [signal.position_id for signal in signals] == ['due']
+    untouched = next(
+        item
+        for item in tracker.open_positions_snapshot()
+        if item.position_id == 'not-due'
+    )
+    assert untouched.highest_executable_price == untouched.pnl_entry_price
+
+
 @pytest.mark.parametrize('side', ['BUY', 'SELL'])
 def test_breakeven_activation_and_trigger_are_side_aware(side: str):
     tracker = PositionTracker()
