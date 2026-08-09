@@ -54,6 +54,13 @@ class MarketDataSessionFlow:
             )
         for symbol in started_symbols:
             self.market_data_validator.reset_symbol(symbol)
+            reset_fallback_quality = getattr(
+                self.broker_operations,
+                'reset_market_data_quality_symbol',
+                None,
+            )
+            if reset_fallback_quality is not None:
+                reset_fallback_quality(symbol)
             self.coordinator.reset_symbol(symbol, now=now)
             self.decision_windows.reset_symbol(symbol)
             self._write_partial_timeframe_bars(

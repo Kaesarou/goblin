@@ -18,6 +18,7 @@ from app.journal.run_manifest import (
     run_artifact_path,
     sanitized_settings_snapshot,
 )
+from app.market.data_quality import QUOTE_QUALITY_CONTRACT_VERSION
 from app.strategies.balanced_strategy_config import BalancedStrategyConfig
 
 
@@ -42,7 +43,7 @@ def test_run_manifest_captures_segmented_probability_contract():
         started_at=datetime(2026, 7, 29, 8, 0, tzinfo=UTC),
     )
 
-    assert manifest['schema_version'] == 12
+    assert manifest['schema_version'] == 13
     assert 'ETORO_API_KEY' not in manifest['runtime']['settings']
     assert 'ETORO_USER_KEY' not in manifest['runtime']['settings']
     models = manifest['models']
@@ -72,10 +73,43 @@ def test_run_manifest_captures_segmented_probability_contract():
     assert models['outcome_probability_direction_segments'][
         'EQUITY_US_BUY'
     ]['training_status'] == 'trained'
-    assert 'outcome_probability' in manifest['analysis_sources'][
+    assert models['managed_outcome_runtime_role'] == 'active_equity_and_crypto'
+    assert not any(key.startswith('managed_v2') for key in models)
+
+    entry_fields = manifest['analysis_sources'][
         'analysis_ready_entry_fields'
     ]
+    assert {
+        'schema_version',
+        'segment',
+        'entry_reference_price',
+        'bid',
+        'ask',
+        'last',
+        'spread',
+        'executable_entry_price',
+        'managed_protection_probability',
+        'managed_positive_probability',
+        'managed_expected_net_return_percent',
+        'managed_edge',
+        'managed_outcome_model_version',
+        'selection_policy_version',
+        'relative_spread_ratio',
+        'relative_spread_percentile',
+        'relative_spread_recent_change',
+        'relative_spread_available',
+    } <= set(entry_fields)
+    assert not any('managed_v2' in field for field in entry_fields)
+
     assert manifest['strategy']['selection_policy'] == 'managed_edge_v1'
+    assert not any(
+        key.startswith('managed_v2') for key in manifest['strategy']
+    )
+    assert manifest['analysis_sources']['schemas'] == {
+        'entry_decision': 2,
+        'daily_summary': 10,
+        'analysis_ready_summary': 13,
+    }
     assert manifest['strategy']['breakeven_profile'] == (
         BreakevenProfileName.CORRECTED_BASELINE_V1
     )
@@ -92,6 +126,12 @@ def test_run_manifest_captures_segmented_probability_contract():
         'post_trade_deducted_costs': 'explicit_only',
         'broker_close_fill_priority': True,
     }
+    assert manifest['runtime']['contracts']['quote_quality'] == (
+        QUOTE_QUALITY_CONTRACT_VERSION
+    )
+    assert manifest['runtime']['quote_quality_policy']['version'] == (
+        QUOTE_QUALITY_CONTRACT_VERSION
+    )
 
 
 def test_removed_runtime_settings_are_rejected():

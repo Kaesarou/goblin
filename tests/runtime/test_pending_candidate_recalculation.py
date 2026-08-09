@@ -13,6 +13,7 @@ from app.execution.candidate_selector import (
     select_evaluated_trade_candidates,
 )
 from app.execution.entry_decision import EntryAction, EntryDecision
+from app.execution.strategy_segment import StrategySegment
 from app.execution.trade_candidate import TradeCandidate
 from app.market.models import Candle, MarketSnapshot
 from app.runtime.candidate_flow import attach_entry_decisions
@@ -21,7 +22,6 @@ from app.runtime.pending_candidate_lifecycle import (
 )
 from app.runtime.pending_entry import PendingEntryManager, PendingEntryState
 from app.strategies.signals import Signal
-
 
 NOW = datetime(2026, 7, 10, 15, 0, tzinfo=timezone.utc)
 
@@ -86,6 +86,7 @@ def evaluated_candidate(
         ),
         origin_candidate_id=origin_candidate_id,
         pending_entry_id=pending_entry_id,
+        segment=StrategySegment.EQUITY_US_BUY,
     )
     economics = CandidateEconomics(
         position_value=100.0,

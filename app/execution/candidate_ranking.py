@@ -8,11 +8,12 @@ from app.execution.scoring.signal_scorer import (
     directional_score_breakdown,
     float_metadata,
 )
+from app.execution.strategy_segment import StrategySegment
 from app.execution.trade_candidate import TradeCandidate
+from app.instruments.models import AssetClass
 from app.market.models import Candle, MarketSnapshot
 from app.strategies.signals import Signal
 from app.utils.commons import spread_percent
-
 
 if TYPE_CHECKING:
     from app.instruments.models import EntryDecisionConfig
@@ -36,6 +37,7 @@ def build_trade_candidate(
     market_context: 'CandidateMarketContext | None' = None,
     multi_timeframe_context: 'MultiTimeframeContext | None' = None,
     entry_decision_config: 'EntryDecisionConfig | None' = None,
+    asset_class: AssetClass | None = None,
 ) -> TradeCandidate:
     score_breakdown = _score_breakdown(
         snapshot=snapshot,
@@ -61,6 +63,18 @@ def build_trade_candidate(
         session_key=session_key,
         candle=candle,
         pending_entry_id=pending_entry_id,
+    )
+    segment_asset_class = (
+        asset_class
+        or (market_context.asset_class if market_context is not None else None)
+    )
+    segment = (
+        None
+        if segment_asset_class is None
+        else StrategySegment.from_asset_and_side(
+            segment_asset_class,
+            signal.action,
+        )
     )
 
     return TradeCandidate(
@@ -107,6 +121,7 @@ def build_trade_candidate(
         market_context=market_context,
         multi_timeframe_context=multi_timeframe_context,
         entry_decision_config=entry_decision_config,
+        segment=segment,
     )
 
 

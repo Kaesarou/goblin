@@ -49,6 +49,7 @@ Every candidate may carry an immutable `CandidateMarketContext` containing:
 - sector breadth where available;
 - symbol session return;
 - symbol relative strength versus benchmark;
+- current spread relative to the symbol's prior accepted-spread distribution;
 - descriptive regime and alignment.
 
 The labels `risk_on`, `risk_off`, `mixed`, `aligned`, `neutral` and `opposed` remain diagnostic. No business branch is allowed to use `opposed` as a veto.
@@ -170,13 +171,18 @@ This is the canonical source for post-run TP-before-SL, MFE, MAE and net-outcome
 
 ## Versioned contracts
 
-PR5-B records:
+The current runtime records:
 
-- `market_context_v2`;
+- `market_context_v3`;
+- `relative_spread_context_v1`;
 - `market_context_score_v1`;
 - `multi_timeframe_features_v2`;
 - `multi_timeframe_score_v1`;
 - `tp_feasibility_score_v2`;
 - `heuristic_v3`;
 - `entry_router_v5`;
-- summary and manifest schema v7.
+- entry-decision schema v2 and run-manifest schema v13.
+
+Relative-spread references exclude the current quote and require 20 prior
+observations. Missing history is explicit; relative spread is a model feature,
+never a standalone hard gate.

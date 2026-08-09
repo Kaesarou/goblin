@@ -17,7 +17,12 @@ from app.execution.position_close_reason import PositionCloseReason
 from app.execution.position_models import PositionCloseSignal, TrackedPosition
 from app.execution.position_tracker import PositionTracker
 from app.execution.trade_executor import TradeExecutor
+from app.instruments.instrument_registry import InstrumentRegistry
 from app.journal.jsonl_journal import JsonlJournal
+from app.market.data_quality import (
+    MarketDataStatus,
+    MarketDataValidator,
+)
 from app.market.models import MarketSnapshot
 from app.market_data.contracts import RestMarketDataClient
 from app.market_data.coordinator import MarketDataCoordinator
@@ -78,6 +83,8 @@ class AsyncBrokerOperationsCoordinator:
         trade_journal: JsonlJournal,
         market_data_coordinator: MarketDataCoordinator,
         is_broker_authorization_error: BrokerAuthorizationErrorChecker,
+        instrument_registry: InstrumentRegistry | None = None,
+        fallback_market_data_validator: MarketDataValidator | None = None,
         reconciliation_grace_seconds: float = 30.0,
         reconciliation_required_misses: int = 3,
         reconciliation_miss_interval_seconds: float = 10.0,
@@ -97,6 +104,14 @@ class AsyncBrokerOperationsCoordinator:
         self.trade_journal = trade_journal
         self.market_data_coordinator = market_data_coordinator
         self.is_broker_authorization_error = is_broker_authorization_error
+        self.instrument_registry = instrument_registry
+        self.fallback_market_data_validator = (
+            fallback_market_data_validator
+            if fallback_market_data_validator is not None
+            else MarketDataValidator()
+            if instrument_registry is not None
+            else None
+        )
         self.rest_control_anomaly_percent = max(0.0, rest_control_anomaly_percent)
         self.close_confirmation_delayed_seconds = max(
             0.0,
@@ -112,6 +127,10 @@ class AsyncBrokerOperationsCoordinator:
             minimum_miss_interval_seconds=reconciliation_miss_interval_seconds,
         )
         self._pending_closes: dict[str, PendingClose] = {}
+
+    def reset_market_data_quality_symbol(self, symbol: str) -> None:
+        if self.fallback_market_data_validator is not None:
+            self.fallback_market_data_validator.reset_symbol(symbol)
 
     def restore_pending_closes(
         self,
@@ -254,6 +273,11 @@ class AsyncBrokerOperationsCoordinator:
         session_decision: Any = None,
         source: str = 'websocket',
     ) -> None:
+        if (
+            source != 'rest_fallback'
+            and self.fallback_market_data_validator is not None
+        ):
+            self.fallback_market_data_validator.observe_accepted(snapshot)
         force_close = bool(
             session_decision is not None
             and getattr(session_decision, 'force_close_required', False)
@@ -718,11 +742,57 @@ class AsyncBrokerOperationsCoordinator:
             },
         )
         for snapshot in snapshots.values():
+            if not self._position_fallback_snapshot_is_accepted(
+                snapshot,
+                now=now,
+            ):
+                continue
             self.on_snapshot(
                 snapshot=snapshot,
                 session_decision=None,
                 source='rest_fallback',
             )
+
+    def _position_fallback_snapshot_is_accepted(
+        self,
+        snapshot: MarketSnapshot,
+        *,
+        now: datetime,
+    ) -> bool:
+        validator = self.fallback_market_data_validator
+        registry = self.instrument_registry
+        if validator is None or registry is None:
+            return True
+        validation = validator.validate(
+            snapshot,
+            registry.config_for(snapshot.symbol).market_data_quality,
+            now=now,
+        )
+        if validation.status is not MarketDataStatus.ACCEPTED:
+            event_type = (
+                'market_data_quarantined'
+                if validation.status is MarketDataStatus.QUARANTINED
+                else 'market_data_rejected'
+            )
+            self.trade_journal.write(
+                event_type,
+                {
+                    'symbol': snapshot.symbol,
+                    'validation': validation,
+                    'source': 'rest_fallback',
+                },
+            )
+            return False
+        if validation.reasons:
+            self.trade_journal.write(
+                'market_data_quality_resolved',
+                {
+                    'symbol': snapshot.symbol,
+                    'validation': validation,
+                    'source': 'rest_fallback',
+                },
+            )
+        return True
 
     def _handle_close(
         self,

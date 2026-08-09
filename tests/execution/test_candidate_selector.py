@@ -14,6 +14,7 @@ from app.execution.candidate_selector import (
     select_evaluated_trade_candidates,
     select_trade_candidates,
 )
+from app.execution.strategy_segment import StrategySegment
 from app.execution.trade_candidate import TradeCandidate
 from app.market.models import Candle, MarketSnapshot
 from app.strategies.signals import Signal
@@ -98,6 +99,7 @@ def evaluated(
             'minimum_positive_probability': 0.30,
             'minimum_expected_net_return_percent': 0.05,
         },
+        segment=StrategySegment.EQUITY_US_BUY,
     )
     return EvaluatedTradeCandidate(
         candidate=item,

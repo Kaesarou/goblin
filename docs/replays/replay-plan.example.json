@@ -76,6 +76,34 @@
       ]
     },
     {
+      "date": "2026-07-29",
+      "incomplete": false,
+      "sources": [
+        {
+          "run_id": "run_20260729T010827_207768Z",
+          "parts": [
+            "archives/goblin-logs-20260731.part-000",
+            "archives/goblin-logs-20260731.part-001",
+            "archives/goblin-logs-20260731.part-002"
+          ]
+        }
+      ]
+    },
+    {
+      "date": "2026-07-30",
+      "incomplete": false,
+      "sources": [
+        {
+          "run_id": "run_20260729T214038_597493Z",
+          "parts": [
+            "archives/goblin-logs-20260731.part-000",
+            "archives/goblin-logs-20260731.part-001",
+            "archives/goblin-logs-20260731.part-002"
+          ]
+        }
+      ]
+    },
+    {
       "date": "2026-07-31",
       "incomplete": false,
       "sources": [
@@ -93,6 +121,81 @@
             "archives/goblin-logs-20260731.part-000",
             "archives/goblin-logs-20260731.part-001",
             "archives/goblin-logs-20260731.part-002"
+          ]
+        }
+      ]
+    },
+    {
+      "date": "2026-08-03",
+      "incomplete": false,
+      "sources": [
+        {
+          "run_id": "run_20260801T173539_648998Z",
+          "parts": [
+            "archives/goblin-logs-week-2.part-000",
+            "archives/goblin-logs-week-2.part-001",
+            "archives/goblin-logs-week-2.part-002",
+            "archives/goblin-logs-week-2.part-003"
+          ]
+        }
+      ]
+    },
+    {
+      "date": "2026-08-04",
+      "incomplete": false,
+      "sources": [
+        {
+          "run_id": "run_20260801T173539_648998Z",
+          "parts": [
+            "archives/goblin-logs-week-2.part-000",
+            "archives/goblin-logs-week-2.part-001",
+            "archives/goblin-logs-week-2.part-002",
+            "archives/goblin-logs-week-2.part-003"
+          ]
+        }
+      ]
+    },
+    {
+      "date": "2026-08-05",
+      "incomplete": false,
+      "sources": [
+        {
+          "run_id": "run_20260801T173539_648998Z",
+          "parts": [
+            "archives/goblin-logs-week-2.part-000",
+            "archives/goblin-logs-week-2.part-001",
+            "archives/goblin-logs-week-2.part-002",
+            "archives/goblin-logs-week-2.part-003"
+          ]
+        }
+      ]
+    },
+    {
+      "date": "2026-08-06",
+      "incomplete": false,
+      "sources": [
+        {
+          "run_id": "run_20260801T173539_648998Z",
+          "parts": [
+            "archives/goblin-logs-week-2.part-000",
+            "archives/goblin-logs-week-2.part-001",
+            "archives/goblin-logs-week-2.part-002",
+            "archives/goblin-logs-week-2.part-003"
+          ]
+        }
+      ]
+    },
+    {
+      "date": "2026-08-07",
+      "incomplete": false,
+      "sources": [
+        {
+          "run_id": "run_20260801T173539_648998Z",
+          "parts": [
+            "archives/goblin-logs-week-2.part-000",
+            "archives/goblin-logs-week-2.part-001",
+            "archives/goblin-logs-week-2.part-002",
+            "archives/goblin-logs-week-2.part-003"
           ]
         }
       ]

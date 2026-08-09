@@ -111,6 +111,7 @@ def advance_pending_entry(
         market_context=market_context,
         multi_timeframe_context=multi_timeframe_context,
         entry_decision_config=entry_decision_config,
+        asset_class=risk_manager.instrument_profile_for(symbol).asset_class,
     )
     trade_journal.write(
         'candidate_detected',
