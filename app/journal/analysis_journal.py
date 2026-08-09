@@ -1,6 +1,9 @@
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from app.execution.scoring.managed_outcome_model_contract import (
+    MANAGED_SELECTION_POLICY_VERSION,
+)
 from app.journal.analysis_ready_summary import AnalysisReadySummaryAggregator
 from app.journal.journal_policy import (
     normalize_detail_level,
@@ -103,15 +106,6 @@ class AnalysisJournal:
                 selection_outcome=selection_outcome,
                 selection_reason=selection_reason,
                 strategy_profile=self.summary.profile,
-                selection_policy_version=payload.get(
-                    'selection_policy_version'
-                ),
-                shadow_policy_version=payload.get(
-                    'managed_v2_shadow_policy_version'
-                ),
-                deployment_status=payload.get(
-                    'managed_v2_deployment_status'
-                ),
             )
             if record is None:
                 continue
@@ -243,9 +237,6 @@ def _entry_decision_record(
     selection_outcome: str,
     selection_reason: Any,
     strategy_profile: Any,
-    selection_policy_version: Any = None,
-    shadow_policy_version: Any = None,
-    deployment_status: Any = None,
 ) -> dict[str, Any] | None:
     candidate = _attribute(evaluated, 'candidate')
     decision = _attribute(evaluated, 'entry_decision')
@@ -265,8 +256,6 @@ def _entry_decision_record(
         candidate,
         'multi_timeframe_context',
     )
-    managed_v2 = _attribute(candidate, 'managed_v2_metadata') or {}
-    managed_v2_floors = _attribute(managed_v2, 'floors') or {}
     spread_context = _attribute(market_context, 'spread')
     return {
         'schema_version': ENTRY_DECISION_SCHEMA_VERSION,
@@ -387,34 +376,6 @@ def _entry_decision_record(
             candidate,
             'managed_outcome_model_version',
         ),
-        'managed_v2_opportunity_probability': _attribute(
-            candidate,
-            'managed_v2_opportunity_probability',
-        ),
-        'managed_v2_path_probability': _attribute(
-            candidate,
-            'managed_v2_path_probability',
-        ),
-        'managed_v2_expected_net_return_percent': _attribute(
-            candidate,
-            'managed_v2_expected_net_return_percent',
-        ),
-        'managed_v2_ranking_score': _attribute(
-            candidate,
-            'managed_v2_ranking_score',
-        ),
-        'managed_v2_opportunity_floor': _attribute(
-            managed_v2_floors,
-            'opportunity_probability',
-        ),
-        'managed_v2_path_floor': _attribute(
-            managed_v2_floors,
-            'path_probability',
-        ),
-        'managed_v2_economics_floor_percent': _attribute(
-            managed_v2_floors,
-            'expected_net_return_percent',
-        ),
         'observed_spread_percent': _snapshot_spread_percent(snapshot),
         'relative_spread_ratio': _attribute(
             spread_context,
@@ -465,53 +426,7 @@ def _entry_decision_record(
             candidate,
             'outcome_probability_model_version',
         ),
-        'selection_policy_version': selection_policy_version,
-        'managed_v2_shadow_policy_version': shadow_policy_version,
-        'feature_contract_version': _attribute(
-            managed_v2,
-            'feature_contract_version',
-        ),
-        'label_contract_version': _attribute(
-            managed_v2,
-            'label_contract_version',
-        ),
-        'opportunity_model_version': _attribute(
-            managed_v2,
-            'opportunity_model_version',
-        ),
-        'path_model_version': _attribute(
-            managed_v2,
-            'path_model_version',
-        ),
-        'economics_model_version': _attribute(
-            managed_v2,
-            'economics_model_version',
-        ),
-        'managed_v2_artifact_sha256': _attribute(
-            managed_v2,
-            'artifact_sha256',
-        ),
-        'managed_v2_deployment_status': (
-            deployment_status
-            if deployment_status is not None
-            else _attribute(managed_v2, 'deployment_status')
-        ),
-        'managed_v2_gate_outcome': _attribute(
-            managed_v2,
-            'gate_outcome',
-        ),
-        'managed_v2_gate_rejection_reason': _attribute(
-            managed_v2,
-            'gate_rejection_reason',
-        ),
-        'managed_v2_shadow_selection_outcome': _attribute(
-            managed_v2,
-            'shadow_selection_outcome',
-        ),
-        'managed_v2_shadow_selection_reason': _attribute(
-            managed_v2,
-            'shadow_selection_reason',
-        ),
+        'selection_policy_version': MANAGED_SELECTION_POLICY_VERSION,
         'entry_route_model_version': _attribute(
             decision,
             'model_version',
