@@ -58,12 +58,6 @@ class TradeCandidate:
     managed_outcome_model_version: str | None = None
     managed_outcome_metadata: dict[str, Any] = field(default_factory=dict)
     segment: StrategySegment | None = None
-    managed_v2_opportunity_probability: float | None = None
-    managed_v2_path_probability: float | None = None
-    managed_v2_expected_net_return_percent: float | None = None
-    managed_v2_ranking_score: float | None = None
-    managed_v2_model_version: str | None = None
-    managed_v2_metadata: dict[str, Any] = field(default_factory=dict)
     candidate_id: str = ''
     origin_candidate_id: str = ''
     pending_entry_id: str | None = None
