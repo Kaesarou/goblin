@@ -18,10 +18,6 @@ from app.execution.candidate_selector import (
     select_trade_candidates,
 )
 from app.execution.entry_decision import EntryDecisionEngine
-from app.execution.scoring.managed_v2 import CandidateManagedV2Evaluator
-from app.execution.scoring.managed_v2_model_contract import (
-    ACTIVE_EQUITY_SELECTION_POLICY_VERSION,
-)
 from app.execution.scoring.outcome_probability import (
     CandidateOutcomeProbabilityEvaluator,
 )
@@ -73,8 +69,6 @@ def select_evaluated_trade_candidates_with_strategy_profile(
     evaluated_candidates: list[EvaluatedTradeCandidate],
     risk_manager: RiskManager,
     strategy_profile: StrategyProfileConfig,
-    *,
-    selection_policy_version: str = ACTIVE_EQUITY_SELECTION_POLICY_VERSION,
 ) -> EvaluatedCandidateSelectionResult:
     grouped: dict[
         AssetClass,
@@ -94,15 +88,11 @@ def select_evaluated_trade_candidates_with_strategy_profile(
             strategy_profile.candidate_selection_config_for_asset_class(
                 asset_class
             ),
-            selection_policy_version=selection_policy_version,
         )
         selected.extend(result.selected_candidates)
         rejected.extend(result.rejected_candidates)
     return EvaluatedCandidateSelectionResult(
-        rank_evaluated_trade_candidates(
-            selected,
-            selection_policy_version=selection_policy_version,
-        ),
+        rank_evaluated_trade_candidates(selected),
         rejected,
     )
 
@@ -227,27 +217,6 @@ def apply_outcome_probability_to_evaluated_candidates(
     ]
 
 
-def apply_managed_v2_shadow_to_evaluated_candidates(
-    *,
-    evaluated_candidates: list[EvaluatedTradeCandidate],
-    evaluator: CandidateManagedV2Evaluator | None = None,
-) -> list[EvaluatedTradeCandidate]:
-    actual_evaluator = evaluator or CandidateManagedV2Evaluator()
-    result: list[EvaluatedTradeCandidate] = []
-    for item in evaluated_candidates:
-        segment = item.candidate.segment
-        if segment is None:
-            raise RuntimeError(
-                'MANAGED V2 shadow evaluation requires an explicit segment.'
-            )
-        result.append(
-            actual_evaluator.evaluate(evaluated_candidate=item)
-            if segment.is_equity
-            else item
-        )
-    return result
-
-
 def evaluate_candidate_batch(
     *,
     candidates: list[TradeCandidate],
@@ -286,13 +255,6 @@ def evaluate_candidate_batch(
     )
     trade_journal.write(
         'candidate_outcome_probability',
-        {'equity': equity, 'evaluated_candidates': evaluated},
-    )
-    evaluated = apply_managed_v2_shadow_to_evaluated_candidates(
-        evaluated_candidates=evaluated,
-    )
-    trade_journal.write(
-        'candidate_managed_v2_shadow',
         {'equity': equity, 'evaluated_candidates': evaluated},
     )
     return evaluated
@@ -410,16 +372,5 @@ def _candidate_log_item(
             candidate.direction_break_even_probability
         ),
         'direction_edge': candidate.direction_edge,
-        'managed_v2_opportunity_probability': (
-            candidate.managed_v2_opportunity_probability
-        ),
-        'managed_v2_path_probability': (
-            candidate.managed_v2_path_probability
-        ),
-        'managed_v2_expected_net_return_percent': (
-            candidate.managed_v2_expected_net_return_percent
-        ),
-        'managed_v2_ranking_score': candidate.managed_v2_ranking_score,
-        'managed_v2_model_version': candidate.managed_v2_model_version,
         'reason': candidate.rank_reason,
     }
