@@ -206,7 +206,7 @@ bash scripts/start_goblin.sh
 Local execution:
 
 ```bash
-python -m venv
+python -m venv .venv
 source .venv/bin/activate
 python -m pip install -e ".[dev]"
 python -m app.main
