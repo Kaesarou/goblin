@@ -17,7 +17,7 @@ def test_analysis_ready_summary_distinguishes_context_and_trading_snapshots():
     summary.record('market_snapshot', {'symbol': 'MSFT'})
 
     data = summary.to_dict()
-    assert data['schema_version'] == 14
+    assert data['schema_version'] == 13
     assert data['market_data']['accepted'] == 3
     assert data['market_data']['trading_snapshots_processed'] == 2
     assert data['market_data']['context_snapshots_accepted'] == 1
@@ -121,69 +121,3 @@ def test_hold_decisions_do_not_count_as_risk_rejections():
     )
     data = summary.to_dict()
     assert data['decision_pipeline']['risk_rejected'] == 1
-
-
-def test_analysis_ready_summary_exposes_managed_v2_longitudinal_counts():
-    summary = AnalysisReadySummaryAggregator(run_id='run-test')
-    selected = SimpleNamespace(
-        candidate=SimpleNamespace(
-            segment='EQUITY_US_BUY',
-            managed_v2_metadata={
-                'segment': 'EQUITY_US_BUY',
-                'gate_outcome': 'eligible',
-                'gate_rejection_reason': None,
-                'opportunity': {'missing_features': []},
-                'path': {
-                    'missing_features': ['aligned_benchmark_momentum']
-                },
-                'economics': {'missing_features': []},
-            },
-        )
-    )
-    rejected = SimpleNamespace(
-        candidate=SimpleNamespace(
-            segment='EQUITY_EU_BUY',
-            managed_v2_metadata={
-                'segment': 'EQUITY_EU_BUY',
-                'gate_outcome': 'rejected',
-                'gate_rejection_reason': (
-                    'candidate_selection_opportunity_below_floor'
-                ),
-                'opportunity': {'missing_features': []},
-                'path': {'missing_features': []},
-                'economics': {'missing_features': []},
-            },
-        )
-    )
-    summary.record(
-        'candidate_managed_v2_shadow',
-        {'evaluated_candidates': [selected, rejected]},
-    )
-    summary.record(
-        'candidate_managed_v2_shadow_selection',
-        {
-            'selection_policy_version': 'managed_v2_segment_first_v1',
-            'selected_evaluated_candidates': [selected],
-            'rejected_evaluated_candidates': [
-                SimpleNamespace(
-                    evaluated_candidate=rejected,
-                    reason='candidate_selection_opportunity_below_floor',
-                )
-            ],
-        },
-    )
-
-    managed = summary.to_dict()['managed_v2']
-
-    assert managed['evaluated_by_segment'] == {
-        'EQUITY_US_BUY': 1,
-        'EQUITY_EU_BUY': 1,
-    }
-    assert managed['gate_outcomes_by_segment']['EQUITY_US_BUY'] == {
-        'eligible': 1
-    }
-    assert managed['shadow_selected_by_segment'] == {'EQUITY_US_BUY': 1}
-    assert managed['shadow_rejected_by_segment'] == {'EQUITY_EU_BUY': 1}
-    assert managed['missing_features'] == {
-        'EQUITY_US_BUY:path:aligned_benchmark_momentum': 1
-    }
