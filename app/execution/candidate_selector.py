@@ -9,19 +9,6 @@ from app.execution.scoring.managed_outcome import (
 )
 from app.execution.scoring.managed_outcome_model_contract import (
     MANAGED_OUTCOME_MODEL_VERSION,
-    MANAGED_SELECTION_POLICY_VERSION,
-)
-from app.execution.scoring.managed_v2 import CandidateManagedV2Evaluator
-from app.execution.scoring.managed_v2_model_contract import (
-    ACTIVE_EQUITY_SELECTION_POLICY_VERSION,
-    MANAGED_V2_SELECTION_POLICY_VERSION,
-)
-from app.execution.scoring.managed_v2_selection import (
-    ensure_managed_v2_estimate,
-    is_managed_v2_equity_candidate,
-    managed_v2_floor,
-    managed_v2_gate_rejection,
-    managed_v2_ranking_key,
 )
 from app.execution.trade_candidate import TradeCandidate
 from app.instruments.models import EntryDecisionConfig
@@ -45,9 +32,6 @@ class RejectedEvaluatedCandidateSelection:
     minimum_managed_protection_probability_used: float | None = None
     minimum_managed_positive_probability_used: float | None = None
     minimum_managed_expected_net_return_percent_used: float | None = None
-    minimum_opportunity_probability_used: float | None = None
-    minimum_path_probability_used: float | None = None
-    minimum_economics_return_percent_used: float | None = None
     selection_threshold_source: str | None = None
 
 
@@ -89,22 +73,11 @@ def select_trade_candidates(
 def select_evaluated_trade_candidates(
     evaluated_candidates: list[EvaluatedTradeCandidate],
     config: CandidateSelectionConfig,
-    *,
-    selection_policy_version: str = ACTIVE_EQUITY_SELECTION_POLICY_VERSION,
 ) -> EvaluatedCandidateSelectionResult:
-    if selection_policy_version not in {
-        MANAGED_V2_SELECTION_POLICY_VERSION,
-        MANAGED_SELECTION_POLICY_VERSION,
-    }:
-        raise ValueError(
-            f'Unsupported candidate selection policy: '
-            f'{selection_policy_version}.'
-        )
     eligible_candidates: list[EvaluatedTradeCandidate] = []
     rejected_candidates: list[RejectedEvaluatedCandidateSelection] = []
     decision_engine = EntryDecisionEngine()
     managed_evaluator: CandidateManagedOutcomeEvaluator | None = None
-    managed_v2_evaluator: CandidateManagedV2Evaluator | None = None
 
     for original in evaluated_candidates:
         decision_config = (
@@ -158,30 +131,12 @@ def select_evaluated_trade_candidates(
                 )
             )
             continue
-        if candidate.segment is None:
-            rejected_candidates.append(
-                RejectedEvaluatedCandidateSelection(
-                    evaluated_candidate=evaluated_candidate,
-                    reason='candidate_selection_segment_missing',
-                    selection_threshold_source='segment_contract',
-                )
-            )
-            continue
-        outcome_missing = (
-            candidate.touch_probability is None
-            if selection_policy_version == MANAGED_V2_SELECTION_POLICY_VERSION
-            and candidate.segment.is_equity
-            else any(
-                value is None
-                for value in (
-                    candidate.tp_probability,
-                    candidate.touch_probability,
-                    candidate.direction_probability,
-                    candidate.direction_edge,
-                )
-            )
-        )
-        if outcome_missing:
+        if (
+            candidate.tp_probability is None
+            or candidate.touch_probability is None
+            or candidate.direction_probability is None
+            or candidate.direction_edge is None
+        ):
             rejected_candidates.append(
                 RejectedEvaluatedCandidateSelection(
                     evaluated_candidate=evaluated_candidate,
@@ -203,36 +158,6 @@ def select_evaluated_trade_candidates(
                     selection_threshold_source='hard_economics',
                 )
             )
-            continue
-
-        if (
-            selection_policy_version == MANAGED_V2_SELECTION_POLICY_VERSION
-            and candidate.segment.is_equity
-        ):
-            if managed_v2_evaluator is None:
-                managed_v2_evaluator = CandidateManagedV2Evaluator()
-            evaluated_candidate = ensure_managed_v2_estimate(
-                evaluated_candidate,
-                managed_v2_evaluator,
-            )
-            gate = managed_v2_gate_rejection(evaluated_candidate)
-            if gate is not None:
-                rejected_candidates.append(
-                    RejectedEvaluatedCandidateSelection(
-                        evaluated_candidate=gate.evaluated_candidate,
-                        reason=gate.reason,
-                        minimum_opportunity_probability_used=(
-                            gate.opportunity_floor
-                        ),
-                        minimum_path_probability_used=gate.path_floor,
-                        minimum_economics_return_percent_used=(
-                            gate.economics_floor_percent
-                        ),
-                        selection_threshold_source=gate.threshold_source,
-                    )
-                )
-                continue
-            eligible_candidates.append(evaluated_candidate)
             continue
 
         if (
@@ -323,10 +248,7 @@ def select_evaluated_trade_candidates(
             continue
         eligible_candidates.append(evaluated_candidate)
 
-    ranked_eligible = rank_evaluated_trade_candidates(
-        eligible_candidates,
-        selection_policy_version=selection_policy_version,
-    )
+    ranked_eligible = rank_evaluated_trade_candidates(eligible_candidates)
     if config.top_n > 0:
         kept_candidates = ranked_eligible[: config.top_n]
         overflow_candidates = ranked_eligible[config.top_n :]
@@ -348,26 +270,7 @@ def select_evaluated_trade_candidates(
                         'minimum_expected_net_return_percent',
                     )
                 ),
-                selection_threshold_source=(
-                    'managed_v2_ranking_top_n'
-                    if is_managed_v2_equity_candidate(
-                        selection_policy_version,
-                        item.candidate,
-                    )
-                    else 'managed_edge_top_n'
-                ),
-                minimum_opportunity_probability_used=managed_v2_floor(
-                    item,
-                    'opportunity_probability',
-                ),
-                minimum_path_probability_used=managed_v2_floor(
-                    item,
-                    'path_probability',
-                ),
-                minimum_economics_return_percent_used=managed_v2_floor(
-                    item,
-                    'expected_net_return_percent',
-                ),
+                selection_threshold_source='managed_edge_top_n',
             )
             for item in overflow_candidates
         )
@@ -382,26 +285,17 @@ def select_evaluated_trade_candidates(
 
 def rank_evaluated_trade_candidates(
     evaluated_candidates: list[EvaluatedTradeCandidate],
-    *,
-    selection_policy_version: str = ACTIVE_EQUITY_SELECTION_POLICY_VERSION,
 ) -> list[EvaluatedTradeCandidate]:
     return sorted(
         evaluated_candidates,
-        key=lambda item: _evaluated_candidate_ranking_key(
-            item,
-            selection_policy_version=selection_policy_version,
-        ),
+        key=_evaluated_candidate_ranking_key,
     )
 
 
 def _evaluated_candidate_ranking_key(
     evaluated_candidate: EvaluatedTradeCandidate,
-    *,
-    selection_policy_version: str,
 ) -> tuple[float, float, float, float, str]:
     candidate = evaluated_candidate.candidate
-    if is_managed_v2_equity_candidate(selection_policy_version, candidate):
-        return managed_v2_ranking_key(evaluated_candidate)
     return (
         -_ranking_value(candidate.managed_edge),
         -_ranking_value(candidate.managed_protection_probability),
