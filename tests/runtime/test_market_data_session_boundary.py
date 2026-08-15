@@ -69,7 +69,7 @@ class RecordingResearchPipeline:
     def observe_payload_schema(self, event) -> None:
         self.payload_events.append(event)
 
-    def observe_accepted_snapshot(self, snapshot) -> None:
+    def observe_accepted_snapshot(self, snapshot, *, source) -> None:
         self.accepted_snapshots.append(snapshot)
 
 

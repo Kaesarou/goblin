@@ -62,7 +62,6 @@ def test_windows_are_half_open_and_both_timestamps_are_strictly_causal():
     assert features['micro_10s_quote_count'] == 1
     assert features['micro_30s_quote_count'] == 2
     assert features['micro_60s_quote_count'] == 3
-    assert accumulator.latest_before('AAPL', STATE_AT).bid == 100.1
 
 
 def test_interpretable_feature_formulas_are_frozen():

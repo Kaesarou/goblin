@@ -86,7 +86,10 @@ class MarketDataEventFlow:
                 },
             )
         if research_pipeline is not None:
-            research_pipeline.observe_accepted_snapshot(snapshot)
+            research_pipeline.observe_accepted_snapshot(
+                snapshot,
+                source=event.source,
+            )
 
         position_session_decision = self.session_decisions.get(symbol)
         self.broker_operations.on_snapshot(

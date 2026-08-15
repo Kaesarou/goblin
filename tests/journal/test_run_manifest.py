@@ -150,8 +150,16 @@ def test_run_manifest_captures_segmented_probability_contract():
     )
     assert research['research_state']['cadence_minutes'] == 5
     assert research['research_state']['side_neutral'] is True
+    assert research['research_state']['candidate_required'] is False
+    assert research['research_state']['quote_or_candle_required'] is False
+    assert research['research_state']['collection_start_convention'] == (
+        'state_at > runtime_started_at'
+    )
     assert research['microstructure']['version'] == (
         MICROSTRUCTURE_CONTRACT_VERSION
+    )
+    assert research['microstructure']['input'] == (
+        'accepted_websocket_market_snapshots_only'
     )
     assert research['payload_schema_observer']['version'] == (
         ETORO_PAYLOAD_SCHEMA_OBSERVER_VERSION

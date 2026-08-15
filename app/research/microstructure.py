@@ -178,19 +178,6 @@ class EtoroMicrostructureAccumulator:
     def reset_symbol(self, symbol: str) -> None:
         self._observations.pop(symbol.strip().upper(), None)
 
-    def latest_before(
-        self,
-        symbol: str,
-        state_at: datetime,
-    ) -> _QuoteObservation | None:
-        cutoff = _as_utc(state_at)
-        for observation in reversed(
-            self._observations.get(symbol.strip().upper(), ())
-        ):
-            if _causally_available(observation, cutoff):
-                return observation
-        return None
-
     def features(
         self,
         *,
@@ -227,6 +214,7 @@ class EtoroMicrostructureAccumulator:
 def microstructure_contract_metadata() -> dict[str, object]:
     return {
         'version': MICROSTRUCTURE_CONTRACT_VERSION,
+        'input': 'accepted_websocket_market_snapshots_only',
         'windows_seconds': list(MICROSTRUCTURE_WINDOWS_SECONDS),
         'window_convention': '[state_at-window, state_at)',
         'availability_convention': (

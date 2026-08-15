@@ -6,6 +6,7 @@ from app.market.market_context import MarketRegime
 from app.market.models import Candle, MarketSnapshot
 from app.market.multi_timeframe import TimeframeBar
 from app.market.timeframes import BarCompleteness, Timeframe
+from app.market_data.models import MarketDataSource
 from app.research.pipeline import SideNeutralResearchPipeline
 
 STATE_AT = datetime(2026, 8, 17, 14, 30, tzinfo=UTC)
@@ -123,6 +124,7 @@ def _decision(
     return SimpleNamespace(
         asset_class=asset_class,
         session_active=True,
+        collect_snapshots=True,
         new_entries_allowed=new_entries_allowed,
         session_key=f'{asset_class.value}:session',
         session_start_time=start,
@@ -200,7 +202,6 @@ def test_eu_and_us_emit_without_candidate_or_portfolio_capacity():
         assert pipeline.maybe_emit(
             symbol=symbol,
             state_at=STATE_AT,
-            closed_candle=_candle(symbol),
             session_decision=decisions[symbol],
         )
 
@@ -222,7 +223,9 @@ def test_cadence_and_last_hour_boundaries_are_exact():
         (31, 120.0, True, False),
         (30, 60.0, False, False),
         (30, 60.0001, True, True),
-        (30, 120.0, False, False),
+        # The decision can have been evaluated just after state_at. Finite
+        # session eligibility is therefore recomputed at state_at.
+        (30, 120.0, False, True),
     ):
         pipeline, _ = _pipeline()
         state_at = STATE_AT.replace(minute=minute)
@@ -251,7 +254,6 @@ def test_cadence_and_last_hour_boundaries_are_exact():
         emitted = pipeline.maybe_emit(
             symbol='AAPL',
             state_at=state_at,
-            closed_candle=_candle('AAPL', state_at),
             session_decision=decision,
         )
 
@@ -271,8 +273,19 @@ def test_cutoff_recomputes_remaining_time_instead_of_using_stale_decision():
     assert pipeline.maybe_emit(
         symbol='AAPL',
         state_at=STATE_AT,
-        closed_candle=_candle('AAPL'),
         session_decision=decision,
+    ) is False
+
+
+def test_state_at_or_before_collection_start_is_not_backfilled():
+    pipeline, decisions = _pipeline()
+    pipeline.collection_started_at = STATE_AT
+    _observe_quote(pipeline, 'AAPL')
+
+    assert pipeline.maybe_emit(
+        symbol='AAPL',
+        state_at=STATE_AT,
+        session_decision=decisions['AAPL'],
     ) is False
 
 
@@ -299,7 +312,6 @@ def test_quote_cutoff_rejects_future_market_or_receive_timestamp():
     assert pipeline.maybe_emit(
         symbol='AAPL',
         state_at=STATE_AT,
-        closed_candle=_candle('AAPL'),
         session_decision=decisions['AAPL'],
     )
     record = pipeline.journal.events[0][1]
@@ -315,7 +327,6 @@ def test_missing_causal_quote_still_records_state_and_availability():
     assert pipeline.maybe_emit(
         symbol='AAPL',
         state_at=STATE_AT,
-        closed_candle=_candle('AAPL'),
         session_decision=decisions['AAPL'],
     )
     record = pipeline.journal.events[0][1]
@@ -329,6 +340,52 @@ def test_missing_causal_quote_still_records_state_and_availability():
     assert record['micro_60s_quote_count'] == 0
 
 
+def test_state_is_emitted_when_the_boundary_candle_is_missing():
+    pipeline, decisions = _pipeline()
+    pipeline.multi_timeframe_service.bars_by_symbol['AAPL'] = []
+    _observe_quote(pipeline, 'AAPL')
+
+    assert pipeline.maybe_emit(
+        symbol='AAPL',
+        state_at=STATE_AT,
+        session_decision=decisions['AAPL'],
+    )
+    record = pipeline.journal.events[0][1]
+
+    assert record['latest_candle_available'] is False
+    assert record['latest_closed_candle_timestamp'] is None
+    assert record['latest_candle_sample_count'] is None
+    assert record['candle_coverage_60m_ratio'] == 0.0
+
+
+def test_rest_fallback_quote_is_provenanced_but_excluded_from_ws_microstructure():
+    pipeline, decisions = _pipeline()
+    _observe_quote(pipeline, 'AAPL', seconds_before=3)
+    fallback_at = STATE_AT - timedelta(seconds=1)
+    pipeline.observe_accepted_snapshot(
+        MarketSnapshot(
+            symbol='AAPL',
+            bid=100.9,
+            ask=101.1,
+            last=101.0,
+            timestamp=fallback_at,
+            received_at=fallback_at,
+        ),
+        source=MarketDataSource.REST_FALLBACK,
+    )
+
+    assert pipeline.maybe_emit(
+        symbol='AAPL',
+        state_at=STATE_AT,
+        session_decision=decisions['AAPL'],
+    )
+    record = pipeline.journal.events[0][1]
+
+    assert record['latest_market_source'] == 'rest_fallback'
+    assert record['last'] == 101.0
+    assert record['micro_10s_quote_count'] == 1
+
+
 def test_research_journal_failure_is_contained_and_observable():
     journal = RecordingJournal(raises=True)
     pipeline, decisions = _pipeline(journal=journal)
@@ -337,7 +394,6 @@ def test_research_journal_failure_is_contained_and_observable():
     emitted = pipeline.maybe_emit(
         symbol='AAPL',
         state_at=STATE_AT,
-        closed_candle=_candle('AAPL'),
         session_decision=decisions['AAPL'],
     )
 

@@ -128,8 +128,8 @@ class RecordingResearchSidecar:
     def observe_payload_schema(self, event):
         self.payload_events.append(event)
 
-    def observe_accepted_snapshot(self, snapshot):
-        self.accepted_snapshots.append(snapshot)
+    def observe_accepted_snapshot(self, snapshot, *, source):
+        self.accepted_snapshots.append((snapshot, source))
 
     def maybe_emit(self, **kwargs):
         self.states.append(kwargs)
@@ -224,6 +224,7 @@ def _events():
 def _run(runtime, events):
     for event in events:
         runtime._handle_event(event, event.received_at)
+        runtime._finalize_clocked_candles(event.received_at)
     trace = runtime.decision_windows
     return serialize_value(
         {
@@ -307,3 +308,18 @@ def test_trading_decision_packages_do_not_import_research_runtime():
                 offenders.append(source.relative_to(repository).as_posix())
 
     assert offenders == []
+
+
+def test_fixed_cadence_scheduler_does_not_require_a_quote_or_candle():
+    runtime = TraceRuntime(research_enabled=True)
+    due_at = START + timedelta(minutes=5, seconds=1.1)
+
+    runtime._finalize_clocked_candles(due_at)
+    runtime._finalize_clocked_candles(due_at + timedelta(milliseconds=100))
+
+    assert len(runtime.research_pipeline.states) == 1
+    assert runtime.research_pipeline.states[0]['symbol'] == 'AAPL'
+    assert runtime.research_pipeline.states[0]['state_at'] == (
+        START + timedelta(minutes=5)
+    )
+    assert 'closed_candle' not in runtime.research_pipeline.states[0]

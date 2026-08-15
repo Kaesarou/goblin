@@ -107,7 +107,6 @@ def test_production_context_and_mtf_services_build_a_causal_flat_state():
     assert pipeline.maybe_emit(
         symbol='AAPL',
         state_at=state_at,
-        closed_candle=latest_candle,
         session_decision=decision,
     )
     record = journal.events[0][1]

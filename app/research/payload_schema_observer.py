@@ -97,6 +97,7 @@ class EtoroPayloadSchemaObserver:
         self._write_failure_count = 0
         self._dirty = False
         self._last_write_at: datetime | None = None
+        self._last_write_attempt_at: datetime | None = None
 
     def observe(
         self,
@@ -182,10 +183,11 @@ class EtoroPayloadSchemaObserver:
             return True
         if (
             not force
-            and self._last_write_at is not None
-            and now - self._last_write_at < self.flush_interval
+            and self._last_write_attempt_at is not None
+            and now - self._last_write_attempt_at < self.flush_interval
         ):
             return True
+        self._last_write_attempt_at = now
         payload = self.snapshot(updated_at=now)
         all_written = True
         for path in self.paths:

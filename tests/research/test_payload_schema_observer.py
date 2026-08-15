@@ -214,3 +214,45 @@ def test_schema_persistence_failure_is_contained_and_counted(tmp_path):
 
     assert snapshot['write_failure_count'] == 1
     assert observer.flush(force=True, observed_at=OBSERVED_AT) is False
+
+
+def test_schema_write_failure_is_rate_limited_instead_of_retrying_each_quote(
+    tmp_path,
+):
+    blocked_parent = tmp_path / 'blocked'
+    blocked_parent.write_text('not-a-directory', encoding='utf-8')
+    observer = EtoroPayloadSchemaObserver(
+        run_id='run-test',
+        paths=(blocked_parent / 'schema.json',),
+        flush_interval_seconds=60,
+    )
+
+    observer.observe(
+        _sample(patch={'Unknown': 1}, merged={'Unknown': 1}),
+        asset_class=AssetClass.EQUITY_US,
+    )
+    observer.observe(
+        _sample(
+            patch={'Unknown': 1},
+            merged={'Unknown': 1},
+            seconds=1,
+        ),
+        asset_class=AssetClass.EQUITY_US,
+    )
+
+    assert observer.snapshot(updated_at=OBSERVED_AT)[
+        'write_failure_count'
+    ] == 1
+
+    observer.observe(
+        _sample(
+            patch={'Unknown': 1},
+            merged={'Unknown': 1},
+            seconds=61,
+        ),
+        asset_class=AssetClass.EQUITY_US,
+    )
+
+    assert observer.snapshot(updated_at=OBSERVED_AT)[
+        'write_failure_count'
+    ] == 2

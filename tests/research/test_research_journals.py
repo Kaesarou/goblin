@@ -116,9 +116,10 @@ def test_reproducible_compressed_log_budget_is_below_ten_percent(tmp_path):
     )
     started_at = datetime(2026, 8, 17, 13, 30, tzinfo=UTC)
 
-    # One accepted price-changing quote per second is a conservative normal
-    # one-hour slice; research persists only one state every five minutes.
-    for second in range(3600):
+    # One accepted price-changing quote every four seconds is slightly sparser
+    # than the 29 July archive (886,713 market records / 51,691 symbol-minutes).
+    # Research persists only one state every five minutes.
+    for second in range(0, 3600, 4):
         observed_at = started_at + timedelta(seconds=second)
         price = 100.0 + (second % 997) / 10_000
         market.write(
@@ -163,6 +164,7 @@ def test_reproducible_compressed_log_budget_is_below_ten_percent(tmp_path):
                     - timedelta(seconds=1),
                     'latest_market_received_at': observed_at
                     - timedelta(milliseconds=500),
+                    'latest_market_source': 'websocket',
                     'latest_closed_candle_timestamp': observed_at,
                     'symbol': 'AAPL',
                     'asset_class': 'EQUITY_US',
@@ -184,6 +186,7 @@ def test_reproducible_compressed_log_budget_is_below_ten_percent(tmp_path):
                     'last_is_broker_execution': True,
                     'quote_freshness_seconds': 1.0,
                     'quote_receive_freshness_seconds': 0.5,
+                    'latest_candle_available': True,
                     'latest_candle_sample_count': 60,
                     'latest_candle_carried_forward': False,
                     'latest_candle_quality_degraded': False,

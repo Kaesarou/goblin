@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from collections import defaultdict, deque
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
@@ -10,7 +11,7 @@ from typing import Any
 from app.instruments.models import AssetClass
 from app.journal.jsonl_journal import JsonlJournal
 from app.market.market_context import SideNeutralResearchMarketContext
-from app.market.models import Candle, MarketSnapshot
+from app.market.models import MarketSnapshot, PriceSource
 from app.market.timeframes import Timeframe
 from app.market_data.models import MarketDataEvent
 from app.research.microstructure import (
@@ -31,6 +32,7 @@ from app.research.research_state import (
 logger = logging.getLogger(__name__)
 
 RESEARCH_EVENT_TYPE = 'research_state'
+RESEARCH_LATEST_QUOTE_MAX_OBSERVATIONS_PER_SYMBOL = 4096
 RESEARCH_FEATURE_NAMES = (
     *RESEARCH_BASE_FEATURE_NAMES,
     *MICROSTRUCTURE_FEATURE_NAMES,
@@ -55,6 +57,7 @@ class SideNeutralResearchPipeline:
         payload_schema_observer: EtoroPayloadSchemaObserver,
         market_context_service,
         multi_timeframe_service,
+        collection_started_at: datetime | None = None,
     ) -> None:
         self.research_symbols = {
             symbol.strip().upper(): asset_class
@@ -69,7 +72,20 @@ class SideNeutralResearchPipeline:
         self.payload_schema_observer = payload_schema_observer
         self.market_context_service = market_context_service
         self.multi_timeframe_service = multi_timeframe_service
+        self.collection_started_at = (
+            datetime.min.replace(tzinfo=UTC)
+            if collection_started_at is None
+            else _as_utc(collection_started_at)
+        )
         self.microstructure = EtoroMicrostructureAccumulator()
+        self._accepted_snapshots: dict[
+            str,
+            deque[tuple[MarketSnapshot, str]],
+        ] = defaultdict(
+            lambda: deque(
+                maxlen=RESEARCH_LATEST_QUOTE_MAX_OBSERVATIONS_PER_SYMBOL
+            )
+        )
         self._emitted_state_ids_by_symbol: dict[str, set[str]] = {}
         self.failure_count = 0
         self.journal_failure_count = 0
@@ -88,11 +104,22 @@ class SideNeutralResearchPipeline:
         except Exception as exc:  # noqa: BLE001 - isolation boundary
             self._record_failure('payload_schema_observer', exc)
 
-    def observe_accepted_snapshot(self, snapshot: MarketSnapshot) -> None:
-        if snapshot.symbol not in self.research_symbols:
+    def observe_accepted_snapshot(
+        self,
+        snapshot: MarketSnapshot,
+        *,
+        source: object = 'websocket',
+    ) -> None:
+        normalized_symbol = snapshot.symbol.strip().upper()
+        if normalized_symbol not in self.research_symbols:
             return
         try:
-            self.microstructure.observe(snapshot)
+            source_name = str(getattr(source, 'value', source)).lower()
+            self._accepted_snapshots[normalized_symbol].append(
+                (snapshot, source_name)
+            )
+            if source_name == 'websocket':
+                self.microstructure.observe(snapshot)
         except Exception as exc:  # noqa: BLE001 - isolation boundary
             self._record_failure('microstructure_observe', exc)
 
@@ -101,14 +128,12 @@ class SideNeutralResearchPipeline:
         *,
         symbol: str,
         state_at: datetime,
-        closed_candle: Candle,
         session_decision,
     ) -> bool:
         try:
             return self._maybe_emit(
                 symbol=symbol,
                 state_at=state_at,
-                closed_candle=closed_candle,
                 session_decision=session_decision,
             )
         except Exception as exc:  # noqa: BLE001 - isolation boundary
@@ -119,6 +144,7 @@ class SideNeutralResearchPipeline:
         try:
             normalized_symbol = symbol.strip().upper()
             self.microstructure.reset_symbol(normalized_symbol)
+            self._accepted_snapshots.pop(normalized_symbol, None)
             self._emitted_state_ids_by_symbol.pop(normalized_symbol, None)
         except Exception as exc:  # noqa: BLE001 - isolation boundary
             self._record_failure('research_symbol_reset', exc)
@@ -135,13 +161,14 @@ class SideNeutralResearchPipeline:
         *,
         symbol: str,
         state_at: datetime,
-        closed_candle: Candle,
         session_decision,
     ) -> bool:
         normalized_symbol = symbol.strip().upper()
         asset_class = self.research_symbols.get(normalized_symbol)
         cutoff = _as_utc(state_at)
         if asset_class is None or not _is_cadence_boundary(cutoff):
+            return False
+        if cutoff <= self.collection_started_at:
             return False
         if not _session_is_research_tradable(session_decision, cutoff):
             return False
@@ -158,7 +185,7 @@ class SideNeutralResearchPipeline:
         if state_id in emitted_state_ids:
             return False
 
-        latest = self.microstructure.latest_before(
+        latest_snapshot, latest_source = self._latest_accepted_before(
             normalized_symbol,
             cutoff,
         )
@@ -196,29 +223,35 @@ class SideNeutralResearchPipeline:
             for name in RESEARCH_FEATURE_NAMES
         )
         expected_count = len(RESEARCH_FEATURE_NAMES)
-        latest_closed = max(
+        latest_closed_bar = max(
             (
-                _as_utc(bar.candle.closed_at)
+                bar
                 for bar in bars
+                if bar.session_key == session_key
                 if _as_utc(bar.candle.closed_at) <= cutoff
             ),
-            default=(
-                _as_utc(closed_candle.closed_at)
-                if _as_utc(closed_candle.closed_at) <= cutoff
-                else None
-            ),
+            key=lambda bar: _as_utc(bar.candle.closed_at),
+            default=None,
         )
-        mid = None if latest is None else (latest.bid + latest.ask) / 2
-        spread = None if latest is None else latest.ask - latest.bid
-        last = (
+        latest_candle = (
+            None if latest_closed_bar is None else latest_closed_bar.candle
+        )
+        latest_closed = (
             None
-            if latest is None
-            else (
-                latest.last_execution
-                if latest.last_execution is not None
-                else latest.mid
-            )
+            if latest_candle is None
+            else _as_utc(latest_candle.closed_at)
         )
+        mid = (
+            None
+            if latest_snapshot is None
+            else (latest_snapshot.bid + latest_snapshot.ask) / 2
+        )
+        spread = (
+            None
+            if latest_snapshot is None
+            else latest_snapshot.ask - latest_snapshot.bid
+        )
+        last = None if latest_snapshot is None else latest_snapshot.last
         record: dict[str, Any] = {
             'schema_version': RESEARCH_STATE_SCHEMA_VERSION,
             'research_contract_version': (
@@ -237,11 +270,14 @@ class SideNeutralResearchPipeline:
                 RESEARCH_CAUSAL_CUTOFF_CONVENTION
             ),
             'latest_market_timestamp': (
-                None if latest is None else latest.market_timestamp
+                None if latest_snapshot is None else latest_snapshot.timestamp
             ),
             'latest_market_received_at': (
-                None if latest is None else latest.observed_at
+                None
+                if latest_snapshot is None
+                else latest_snapshot.received_at or latest_snapshot.timestamp
             ),
+            'latest_market_source': latest_source,
             'latest_closed_candle_timestamp': latest_closed,
             'symbol': normalized_symbol,
             'asset_class': asset_class.value,
@@ -265,8 +301,12 @@ class SideNeutralResearchPipeline:
             ),
             'weekday_utc': cutoff.weekday(),
             'minute_of_day_utc': cutoff.hour * 60 + cutoff.minute,
-            'bid': None if latest is None else _round(latest.bid),
-            'ask': None if latest is None else _round(latest.ask),
+            'bid': (
+                None if latest_snapshot is None else _round(latest_snapshot.bid)
+            ),
+            'ask': (
+                None if latest_snapshot is None else _round(latest_snapshot.ask)
+            ),
             'last': None if last is None else _round(last),
             'mid': None if mid is None else _round(mid),
             'observed_spread': (
@@ -277,33 +317,51 @@ class SideNeutralResearchPipeline:
                 if mid is None or mid <= 0 or spread is None
                 else _round((spread / mid) * 100)
             ),
-            'quote_available': latest is not None,
+            'quote_available': latest_snapshot is not None,
             'last_is_broker_execution': (
-                latest is not None and latest.last_execution is not None
+                latest_snapshot is not None
+                and latest_snapshot.price_source is PriceSource.BROKER_LAST
             ),
             'quote_freshness_seconds': (
                 None
-                if latest is None
+                if latest_snapshot is None
                 else _round(
-                    (cutoff - latest.market_timestamp).total_seconds()
+                    (
+                        cutoff - _as_utc(latest_snapshot.timestamp)
+                    ).total_seconds()
                 )
             ),
             'quote_receive_freshness_seconds': (
                 None
-                if latest is None
+                if latest_snapshot is None
                 else _round(
-                    (cutoff - latest.observed_at).total_seconds()
+                    (
+                        cutoff
+                        - _as_utc(
+                            latest_snapshot.received_at
+                            or latest_snapshot.timestamp
+                        )
+                    ).total_seconds()
                 )
             ),
-            'latest_candle_sample_count': closed_candle.sample_count,
+            'latest_candle_available': latest_candle is not None,
+            'latest_candle_sample_count': (
+                None if latest_candle is None else latest_candle.sample_count
+            ),
             'latest_candle_carried_forward': (
-                closed_candle.carried_forward
+                None
+                if latest_candle is None
+                else latest_candle.carried_forward
             ),
             'latest_candle_quality_degraded': (
-                closed_candle.quality_degraded
+                None
+                if latest_candle is None
+                else latest_candle.quality_degraded
             ),
             'latest_candle_source_price_age_seconds': (
-                closed_candle.source_price_age_seconds
+                None
+                if latest_candle is None
+                else latest_candle.source_price_age_seconds
             ),
             'feature_expected_count': expected_count,
             'feature_available_count': available_count,
@@ -330,6 +388,22 @@ class SideNeutralResearchPipeline:
             return False
         emitted_state_ids.add(state_id)
         return True
+
+    def _latest_accepted_before(
+        self,
+        symbol: str,
+        state_at: datetime,
+    ) -> tuple[MarketSnapshot | None, str | None]:
+        for snapshot, source in reversed(
+            self._accepted_snapshots.get(symbol, ())
+        ):
+            received_at = snapshot.received_at or snapshot.timestamp
+            if (
+                _as_utc(snapshot.timestamp) < state_at
+                and _as_utc(received_at) < state_at
+            ):
+                return snapshot, source
+        return None, None
 
     def _record_failure(self, stage: str, _exc: Exception) -> None:
         self.failure_count += 1
@@ -417,17 +491,22 @@ def _is_cadence_boundary(value: datetime) -> bool:
 def _session_is_research_tradable(decision, state_at: datetime) -> bool:
     if decision is None:
         return False
-    if not decision.session_active or not decision.new_entries_allowed:
+    if not decision.session_active or not decision.collect_snapshots:
         return False
     if decision.session_key is None:
+        return False
+    if (
+        decision.session_start_time is not None
+        and state_at < _as_utc(decision.session_start_time)
+    ):
         return False
     remaining = _time_until_session_end_minutes(
         state_at,
         decision.session_end_time,
     )
-    if remaining is None:
-        remaining = decision.time_until_session_end_minutes
-    return remaining is None or remaining > 60
+    if remaining is not None:
+        return remaining > 60
+    return bool(decision.new_entries_allowed)
 
 
 def _time_until_session_end_minutes(

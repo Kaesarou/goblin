@@ -253,9 +253,15 @@ def build_candle_research_features(
             )
 
     session_candles = [bar.candle for bar in relevant]
-    if session_candles[0].open > 0:
+    first_session_candle = session_candles[0]
+    session_open_is_observed = (
+        session_start_time is None
+        or _as_utc(first_session_candle.opened_at)
+        == _as_utc(session_start_time)
+    )
+    if session_open_is_observed and first_session_candle.open > 0:
         result['session_return_percent'] = _round(
-            ((latest.close / session_candles[0].open) - 1) * 100
+            ((latest.close / first_session_candle.open) - 1) * 100
         )
     if session_start_time is not None:
         for minutes in _OPENING_RANGE_WINDOWS:
@@ -277,6 +283,9 @@ def research_state_contract_metadata() -> dict[str, object]:
         'version': RESEARCH_STATE_CONTRACT_VERSION,
         'cadence_minutes': RESEARCH_SAMPLING_CADENCE_MINUTES,
         'side_neutral': True,
+        'candidate_required': False,
+        'quote_or_candle_required': False,
+        'collection_start_convention': 'state_at > runtime_started_at',
         'causal_cutoff_convention': RESEARCH_CAUSAL_CUTOFF_CONVENTION,
         'base_feature_names': list(RESEARCH_BASE_FEATURE_NAMES),
         'base_feature_set_sha256': RESEARCH_BASE_FEATURE_SET_SHA256,

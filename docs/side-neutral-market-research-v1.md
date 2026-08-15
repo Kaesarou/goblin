@@ -28,14 +28,22 @@ and `NEITHER`.
 
 ## Read-only architecture
 
-Only accepted `MarketDataEvent.snapshot` values enter the microstructure
-accumulator. Rejected and quarantined quotes never enter it. The payload-schema
-observer receives the server field schema separately, because its purpose is to
-discover transmission shape rather than to define a valid price observation.
+The latest-quote provenance buffer receives accepted `MarketDataEvent.snapshot`
+values from every current eToro market-data source. The microstructure
+accumulator receives only accepted **WebSocket** snapshots. Rejected and
+quarantined quotes enter neither. This keeps REST fallback observable in the
+base state without presenting its slower cadence as sub-minute WebSocket
+microstructure. The payload-schema observer receives the server field schema
+separately, because its purpose is to discover transmission shape rather than
+to define a valid price observation.
 
-At each finalized M1 candle, the sidecar checks whether the candle close is an
-exact five-minute boundary. For every EU or US equity in the watchlist, it can
-then write one flat state to the dedicated research journal.
+After the existing one-second candle grace and all due business-candle
+processing, a runtime-clock scheduler checks the latest exact five-minute
+boundary. For every active-session EU or US equity in the watchlist it attempts
+one flat state, even when that symbol has no quote or no boundary candle. Such a
+state remains useful as an explicit incomplete observation rather than silently
+removing a poor-data market state from the research population. A boundary at
+or before runtime startup is never backfilled.
 
 The sidecar has no return path into:
 
@@ -66,6 +74,10 @@ prospective protocol is active after deployment.
 - candidate independence: a state does not require a Goblin candidate;
 - side neutrality: no BUY/SELL alignment, candidate side or preferred side is
   an input;
+- availability independence: a missing quote or candle does not suppress the
+  state; availability fields and null features expose the gap;
+- prospective start: only `state_at > runtime_started_at` is eligible, so a
+  restart cannot manufacture observations for boundaries it did not observe;
 - active-session requirement: the current `TradingSessionService` decision
   must allow a new entry;
 - last-hour exclusion: remaining session time is recomputed at `state_at` and
@@ -115,10 +127,10 @@ objects.
 - temporal context: session start/end, session minute, recomputed minutes to
   close, progress, UTC weekday and minute of day;
 - latest causal quote: bid, ask, broker last when available, midpoint, absolute
-  and percentage spread, `quote_available`, broker-last provenance and
-  freshness;
-- latest candle quality: sample count, carried-forward/degraded flags and
-  source-price age;
+  and percentage spread, `quote_available`, market-data source, broker-last
+  provenance and freshness;
+- latest candle availability and quality: timestamp, sample count,
+  carried-forward/degraded flags and source-price age;
 - availability: expected/available feature counts, completeness ratio and
   window/context flags;
 - compact M1, side-neutral market-context and microstructure features.
@@ -155,10 +167,11 @@ BUY or SELL side.
 
 ## `MICROSTRUCTURE_CONTRACT_V1`
 
-The runtime name is `etoro_microstructure_v1`. Its primary windows are 10, 30
-and 60 seconds. Updates are bounded in memory to 4,096 observations per symbol
-with a 120-second retention horizon. Quote ingestion is O(1); feature
-calculation scans the bounded buffer only at the five-minute state cadence.
+The runtime name is `etoro_microstructure_v1`. Its input is accepted eToro
+WebSocket snapshots only. Its primary windows are 10, 30 and 60 seconds.
+Updates are bounded in memory to 4,096 observations per symbol with a
+120-second retention horizon. Quote ingestion is O(1); feature calculation
+scans the bounded buffer only at the five-minute state cadence.
 
 For observations `i = 0..N-1`, define:
 
@@ -236,6 +249,9 @@ password, secret, token, API key or user key never retain examples. Objects,
 arrays, nulls and non-finite numbers also retain no example. State is bounded to
 256 fields. A new field, type or asset class triggers an immediate atomic
 replace; ordinary count updates flush at most once per minute and at shutdown.
+After an I/O failure, ordinary updates also respect this one-minute attempt
+interval instead of retrying disk I/O on every quote; a genuinely new field or
+type still requests an immediate attempt.
 
 The files remain small aggregates. No raw payload is appended.
 
@@ -275,13 +291,20 @@ in-memory accumulator. One record is persisted every five minutes per eligible
 symbol, with compact JSON and gzip. The payload observer overwrites one bounded
 JSON aggregate instead of appending payloads.
 
-`tests/research/test_research_journals.py` writes a reproducible one-hour,
-one-quote-per-second market slice through the production gzip journal and one
-full research record every five minutes. It asserts that compressed research
-size remains below 10% of compressed market size. The implementation run
-generated 1,135,688 bytes for 3,600 market records and 19,742 bytes for 11
-research records: 1.738330% (small timestamp-compression variation is expected
-between runs).
+`tests/research/test_research_journals.py` writes a reproducible one-hour market
+slice through the production gzip journal, with one price-changing quote every
+four seconds and one full research record every five minutes. Four seconds is
+slightly sparser, and therefore more demanding for this ratio, than the 29 July
+archive (886,713 market records over 51,691 symbol-minutes). The implementation
+run generated 283,642 bytes for 900 market records and 19,927 bytes for 11
+research records: **7.025405%** (small timestamp-compression variation is
+expected between runs).
+
+An archive-shaped upper-bound measurement also wrote one full synthetic state
+for every five-minute candle in the 29 July run, including states that the live
+last-hour rule would actually exclude: 10,283 states produced 18,675,543 bytes
+against 330,444,788 bytes of `market.jsonl.gz`, or **5.651638%**. The deployed
+ratio should therefore be lower than this deliberately over-inclusive bound.
 
 ## Historical reconstruction check
 
@@ -291,9 +314,15 @@ The archived 29 July 2026 run
 - 886,713 `market_price_changed` records, 330,444,788 compressed bytes;
 - 51,691 finalized M1 candles across 115 symbols, 32,873,509 compressed bytes;
 - SAP.DE at 08:05 UTC: 65 historical M1 bars, all 38 candle-state features
-  available, 100% 60-minute coverage;
+  available, 100% 60-minute coverage; the retained price-change stream also
+  yields 30 causal records in the prior 60 seconds and all 72 microstructure
+  fields are defined;
 - AAPL at 14:35 UTC: 65 historical M1 bars, all 38 candle-state features
-  available, 100% 60-minute coverage.
+  available, 100% 60-minute coverage, but the boundary candle is explicitly
+  degraded/carried-forward with a 675.722118-second source age. There are no
+  retained AAPL price changes in the prior 120 seconds, so only the 12
+  zero/availability microstructure fields are defined and movement fields are
+  null.
 
 Thus the M1/base state is reproducible from historical candle logs and the
 prior-only quote path can be replayed from historical market logs. Exact
@@ -329,10 +358,13 @@ written back into the causal live state.
 
 ## Interpretation and limits
 
-- **Certain bug:** none is asserted by the research hypotheses themselves.
-- **Contract inconsistency fixed here:** a state cutoff recomputes remaining
-  session time at `state_at`, preventing a sub-second stale session decision
-  from admitting the exact last-hour boundary.
+- **Certain implementation bug fixed before publication:** a failed schema
+  write could otherwise be retried by every subsequent quote; failed ordinary
+  attempts are now rate-limited.
+- **Contract inconsistencies fixed here:** finite-session eligibility is
+  recomputed at `state_at` rather than copied from a sub-second-later decision;
+  cadence states no longer depend on a quote or boundary candle; and session
+  return is null unless the actual session-open M1 candle is present.
 - **Technical debt:** the payload schema cannot reveal fields absent from the
   prospective observer and old logs cannot restore omitted PATCH presence.
 - **Assumed strategic choice:** five-minute side-neutral sampling and exclusion

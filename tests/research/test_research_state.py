@@ -118,6 +118,17 @@ def test_latest_candle_must_be_closed_at_the_state_cutoff():
     assert features['opening_range_15m_range_percent'] is None
 
 
+def test_session_return_is_missing_when_the_session_open_candle_is_missing():
+    features = build_candle_research_features(
+        bars=_bars()[1:],
+        state_at=STATE_AT,
+        session_key=SESSION_KEY,
+        session_start_time=SESSION_START,
+    )
+
+    assert features['session_return_percent'] is None
+
+
 def test_research_state_identifier_is_stable_and_segmented():
     first = build_research_state_id(
         symbol='aapl',

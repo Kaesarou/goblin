@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timedelta
 
 from app.market.models import MarketSnapshot
 from app.market_data.models import CandleBuildResult
+from app.research.research_state import RESEARCH_SAMPLING_CADENCE_MINUTES
 from app.runtime.runtime_policy import (
     CANDLE_CLOCK_GRACE_SECONDS,
     CANDLE_MAX_CARRY_FORWARD_AGE_SECONDS,
@@ -38,6 +39,7 @@ class ClockedCandleFlow:
                     now=now,
                     source='clock',
                 )
+        self._emit_due_research_states(now)
 
     def _process_candle_result(
         self,
@@ -124,17 +126,36 @@ class ClockedCandleFlow:
                 },
             )
         self._last_bucket_by_symbol[symbol] = enriched_candle.opened_at
+
+    def _emit_due_research_states(self, now: datetime) -> None:
         research_pipeline = getattr(self, 'research_pipeline', None)
-        if research_pipeline is not None:
+        if research_pipeline is None:
+            return
+        state_at = _latest_due_research_boundary(now)
+        if state_at == getattr(self, '_last_research_boundary', None):
+            return
+        self._last_research_boundary = state_at
+        session_decisions = getattr(self, 'session_decisions', {})
+        for symbol in list(getattr(self, 'active_symbols', ())):
             research_pipeline.maybe_emit(
                 symbol=symbol,
-                state_at=enriched_candle.closed_at,
-                closed_candle=enriched_candle,
-                session_decision=session_decision,
+                state_at=state_at,
+                session_decision=session_decisions.get(symbol),
             )
+
+
+def _latest_due_research_boundary(value: datetime) -> datetime:
+    eligible = _as_utc(value) - timedelta(
+        seconds=CANDLE_CLOCK_GRACE_SECONDS
+    )
+    minute = (
+        eligible.minute
+        - eligible.minute % RESEARCH_SAMPLING_CADENCE_MINUTES
+    )
+    return eligible.replace(minute=minute, second=0, microsecond=0)
 
 
 def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)

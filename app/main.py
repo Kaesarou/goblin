@@ -367,6 +367,7 @@ def main() -> None:
             ),
             market_context_service=market_context_service,
             multi_timeframe_service=multi_timeframe_service,
+            collection_started_at=started_at,
         )
     heartbeat = RuntimeHeartbeat(settings.runtime_heartbeat_minutes)
     runtime = EventDrivenMarketRuntime(
