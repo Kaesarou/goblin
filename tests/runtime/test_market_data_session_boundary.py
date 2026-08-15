@@ -61,6 +61,18 @@ class RecordingMarketContext:
         self.calls.append(dict(snapshots))
 
 
+class RecordingResearchPipeline:
+    def __init__(self) -> None:
+        self.payload_events = []
+        self.accepted_snapshots: list[MarketSnapshot] = []
+
+    def observe_payload_schema(self, event) -> None:
+        self.payload_events.append(event)
+
+    def observe_accepted_snapshot(self, snapshot) -> None:
+        self.accepted_snapshots.append(snapshot)
+
+
 class BoundaryRuntime(
     MarketDataEventFlow,
     MarketDataMaintenance,
@@ -222,6 +234,8 @@ def test_in_session_snapshot_enters_strategy_candles_and_context():
 
 def test_quarantined_quote_never_reaches_position_or_strategy_flow():
     runtime = BoundaryRuntime()
+    research = RecordingResearchPipeline()
+    runtime.research_pipeline = research
     for index in range(21):
         observed_at = SESSION_START + timedelta(seconds=index + 1)
         runtime._handle_event(
@@ -234,6 +248,7 @@ def test_quarantined_quote_never_reaches_position_or_strategy_flow():
             observed_at,
         )
     accepted_count = len(runtime.broker_operations.snapshots)
+    research_accepted_count = len(research.accepted_snapshots)
     suspect_at = SESSION_START + timedelta(seconds=22)
 
     runtime._handle_event(
@@ -248,6 +263,7 @@ def test_quarantined_quote_never_reaches_position_or_strategy_flow():
 
     assert len(runtime.broker_operations.snapshots) == accepted_count
     assert len(runtime.strategies['AMZN'].snapshots) == accepted_count
+    assert len(research.accepted_snapshots) == research_accepted_count
     assert runtime.latest_snapshots['AMZN'].last == 100.10
     assert any(
         event_type == 'market_data_quarantined'
@@ -266,6 +282,9 @@ def test_quarantined_quote_never_reaches_position_or_strategy_flow():
     )
 
     assert len(runtime.broker_operations.snapshots) == accepted_count + 1
+    assert len(research.accepted_snapshots) == research_accepted_count + 1
+    assert research.accepted_snapshots[-1].last == 100.105
+    assert len(research.payload_events) == 23
     assert any(
         event_type == 'market_data_quality_resolved'
         for event_type, _ in runtime.trade_journal.events

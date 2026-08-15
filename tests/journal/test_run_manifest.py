@@ -19,6 +19,11 @@ from app.journal.run_manifest import (
     sanitized_settings_snapshot,
 )
 from app.market.data_quality import QUOTE_QUALITY_CONTRACT_VERSION
+from app.research.microstructure import MICROSTRUCTURE_CONTRACT_VERSION
+from app.research.payload_schema_observer import (
+    ETORO_PAYLOAD_SCHEMA_OBSERVER_VERSION,
+)
+from app.research.research_state import RESEARCH_STATE_CONTRACT_VERSION
 from app.strategies.balanced_strategy_config import BalancedStrategyConfig
 
 
@@ -43,7 +48,7 @@ def test_run_manifest_captures_segmented_probability_contract():
         started_at=datetime(2026, 7, 29, 8, 0, tzinfo=UTC),
     )
 
-    assert manifest['schema_version'] == 13
+    assert manifest['schema_version'] == 14
     assert 'ETORO_API_KEY' not in manifest['runtime']['settings']
     assert 'ETORO_USER_KEY' not in manifest['runtime']['settings']
     models = manifest['models']
@@ -109,6 +114,7 @@ def test_run_manifest_captures_segmented_probability_contract():
         'entry_decision': 2,
         'daily_summary': 10,
         'analysis_ready_summary': 13,
+        'research_state': 1,
     }
     assert manifest['strategy']['breakeven_profile'] == (
         BreakevenProfileName.CORRECTED_BASELINE_V1
@@ -131,6 +137,37 @@ def test_run_manifest_captures_segmented_probability_contract():
     )
     assert manifest['runtime']['quote_quality_policy']['version'] == (
         QUOTE_QUALITY_CONTRACT_VERSION
+    )
+    research = manifest['runtime']['research']
+    assert research['activation_status'] == 'active'
+    assert research['strictly_read_only'] is True
+    assert research['candidate_generator_independent'] is True
+    assert research['journal_encoding'] == 'compact_jsonl_gzip'
+    assert research['last_hour_excluded'] is True
+    assert len(research['combined_feature_set_sha256']) == 64
+    assert research['research_state']['version'] == (
+        RESEARCH_STATE_CONTRACT_VERSION
+    )
+    assert research['research_state']['cadence_minutes'] == 5
+    assert research['research_state']['side_neutral'] is True
+    assert research['microstructure']['version'] == (
+        MICROSTRUCTURE_CONTRACT_VERSION
+    )
+    assert research['payload_schema_observer']['version'] == (
+        ETORO_PAYLOAD_SCHEMA_OBSERVER_VERSION
+    )
+    assert research['payload_schema_observer']['raw_payload_retained'] is False
+    contracts = manifest['runtime']['contracts']
+    assert contracts['research_state'] == RESEARCH_STATE_CONTRACT_VERSION
+    assert contracts['microstructure'] == MICROSTRUCTURE_CONTRACT_VERSION
+    assert contracts['etoro_payload_schema_observer'] == (
+        ETORO_PAYLOAD_SCHEMA_OBSERVER_VERSION
+    )
+    assert manifest['analysis_sources']['research_stream'].startswith(
+        'data/logs/'
+    )
+    assert manifest['analysis_sources']['etoro_payload_schema'].startswith(
+        'data/logs/'
     )
 
 
@@ -161,6 +198,10 @@ def test_sanitized_settings_keeps_non_sensitive_operational_values():
     assert snapshot['WATCHLIST'] == 'AAPL'
     assert snapshot['BROKER'] == 'paper'
     assert snapshot['JOURNAL_DETAIL_LEVEL'] == 'debug'
+
+
+def test_research_sidecar_can_be_explicitly_disabled():
+    assert Settings(RESEARCH_ENABLED=False).research_enabled is False
 
 
 def test_run_artifact_path_creates_stable_per_run_location():

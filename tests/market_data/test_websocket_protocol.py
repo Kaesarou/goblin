@@ -6,7 +6,6 @@ from app.brokers.etoro.websocket_protocol import (
     parse_websocket_events,
 )
 
-
 NOW = datetime(2026, 7, 20, 0, 0, tzinfo=timezone.utc)
 
 
@@ -72,3 +71,11 @@ def test_partial_messages_reconstruct_quote_and_do_not_use_rate_id_as_identity()
     assert second_events[0].snapshot.last == 100.5
     assert first_events[0].price_rate_id == second_events[0].price_rate_id
     assert first_events[0].message_id != second_events[0].message_id
+    assert {
+        field.field_name
+        for field in second_events[0].payload_schema.patch_fields
+    } == {'LastExecution', 'Date', 'PriceRateID'}
+    assert {
+        field.field_name
+        for field in second_events[0].payload_schema.merged_fields
+    } == {'Bid', 'Ask', 'LastExecution', 'Date', 'PriceRateID'}
