@@ -38,6 +38,8 @@ Goblin currently includes:
 - canonical typed close reasons and cooldown policies;
 - versioned baseline and delayed-equity breakeven profiles;
 - SQLite position/cooldown persistence and JSONL audit journals;
+- a read-only, side-neutral five-minute market-research sidecar with bounded
+  eToro microstructure and payload-schema observability;
 - a broad pytest suite validated by GitHub Actions.
 
 ## Decision pipeline
@@ -221,7 +223,7 @@ python scripts/replay_breakeven_profiles.py PLAN.json report.json \
 
 ## Analysis contract
 
-Run-manifest schema V12 records:
+Run-manifest schema V14 records:
 
 - model and feature-contract versions;
 - activity and direction dataset hashes;
@@ -233,6 +235,8 @@ Run-manifest schema V12 records:
 - the broker-fill-priority and explicit-cost-only convention;
 - the packaged artifact SHA-256;
 - code fingerprint, watchlist, profiles and runtime settings.
+- the side-neutral research, microstructure and payload-schema contracts,
+  causal cutoff, cadence, feature hashes and paths.
 
 Standalone `entry_decision` records include the complete nested outcome estimate, so raw/final direction probabilities and segment metadata remain auditable without duplicate shadow decisions.
 
@@ -242,7 +246,9 @@ observed spread, gross P&L, explicit costs, net P&L and executable MFE/MAE.
 
 See [Position lifecycle V2](docs/position-lifecycle-v2.md),
 [Managed Edge V1](docs/managed-edge-v1.md) and
-[the breakeven replay decision](docs/breakeven-replay-v1.md).
+[the breakeven replay decision](docs/breakeven-replay-v1.md). The separate
+[Side-neutral market research V1](docs/side-neutral-market-research-v1.md)
+contract documents the read-only prospective dataset and its limits.
 
 ## Pre-live status
 
