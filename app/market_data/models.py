@@ -3,6 +3,9 @@ from datetime import datetime
 from enum import StrEnum
 
 from app.market.models import Candle, MarketSnapshot
+from app.research.payload_schema_observer import (
+    WebSocketPayloadSchemaSample,
+)
 
 MARKET_DATA_MODEL_VERSION = 'market_data_v2_ws_clocked_2'
 
@@ -34,6 +37,7 @@ class MarketDataEvent:
     connection_id: str | None = None
     price_changed: bool = True
     state_reconstructed: bool = False
+    payload_schema: WebSocketPayloadSchemaSample | None = None
 
 
 @dataclass(frozen=True)

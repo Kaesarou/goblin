@@ -56,11 +56,25 @@ from app.market.timeframes import (
     MULTI_TIMEFRAME_MODEL_VERSION,
     SUPPORTED_TIMEFRAMES,
 )
+from app.research.microstructure import (
+    MICROSTRUCTURE_CONTRACT_VERSION,
+    microstructure_contract_metadata,
+)
+from app.research.payload_schema_observer import (
+    ETORO_PAYLOAD_SCHEMA_OBSERVER_VERSION,
+    payload_schema_contract_metadata,
+)
+from app.research.pipeline import RESEARCH_FEATURE_SET_SHA256
+from app.research.research_state import (
+    RESEARCH_STATE_CONTRACT_VERSION,
+    RESEARCH_STATE_SCHEMA_VERSION,
+    research_state_contract_metadata,
+)
 from app.risk.trade_cooldown import TRADE_COOLDOWN_CONTRACT_VERSION
 from app.risk.trade_cost_model import TRADE_COST_CONTRACT_VERSION
 
 _SENSITIVE_SETTINGS = {'ETORO_API_KEY', 'ETORO_USER_KEY'}
-RUN_MANIFEST_SCHEMA_VERSION = 13
+RUN_MANIFEST_SCHEMA_VERSION = 14
 
 
 def build_run_id(started_at: datetime | None = None) -> str:
@@ -137,6 +151,9 @@ def build_run_manifest(
     }
     actual_manifest_path = manifest_path or settings.run_manifest_path
     actual_summary_path = summary_path or settings.daily_summary_path
+    logs_root = Path(settings.journal_path).parent
+    research_path = logs_root / 'research.jsonl.gz'
+    payload_schema_path = logs_root / 'etoro_payload_schema.json'
     outcome_probability_model = FrozenOutcomeProbabilityModel.load()
     managed_outcome_model = FrozenManagedOutcomeModel.load()
     direction_segments = {
@@ -237,6 +254,11 @@ def build_run_manifest(
                 ),
                 'trade_cooldown': TRADE_COOLDOWN_CONTRACT_VERSION,
                 'quote_quality': QUOTE_QUALITY_CONTRACT_VERSION,
+                'research_state': RESEARCH_STATE_CONTRACT_VERSION,
+                'microstructure': MICROSTRUCTURE_CONTRACT_VERSION,
+                'etoro_payload_schema_observer': (
+                    ETORO_PAYLOAD_SCHEMA_OBSERVER_VERSION
+                ),
             },
             'economic_convention': {
                 'signal_and_candle_price': 'last_execution',
@@ -268,6 +290,30 @@ def build_run_manifest(
                     for symbol in symbols
                 },
             },
+            'research': {
+                'activation_status': (
+                    'active' if settings.research_enabled else 'disabled'
+                ),
+                'strictly_read_only': True,
+                'candidate_generator_independent': True,
+                'journal_encoding': 'compact_jsonl_gzip',
+                'portfolio_constraints_ignored': [
+                    'max_open_positions',
+                    'position_already_open',
+                    'cooldown',
+                    'max_trades_per_session',
+                    'portfolio_capacity',
+                ],
+                'last_hour_excluded': True,
+                'combined_feature_set_sha256': (
+                    RESEARCH_FEATURE_SET_SHA256
+                ),
+                'research_state': research_state_contract_metadata(),
+                'microstructure': microstructure_contract_metadata(),
+                'payload_schema_observer': (
+                    payload_schema_contract_metadata()
+                ),
+            },
         },
         'analysis_sources': {
             'run_id': run_id,
@@ -277,11 +323,14 @@ def build_run_manifest(
                 'analysis_ready_summary': (
                     ANALYSIS_READY_SUMMARY_SCHEMA_VERSION
                 ),
+                'research_state': RESEARCH_STATE_SCHEMA_VERSION,
             },
             'market_stream': settings.market_log_path,
             'candle_stream': settings.candle_journal_path,
             'trade_stream': settings.journal_path,
             'error_stream': settings.errors_journal_path,
+            'research_stream': str(research_path),
+            'etoro_payload_schema': str(payload_schema_path),
             'raw_market_retained': True,
             'raw_candles_retained': True,
             'multi_timeframe_bars_retained': True,
@@ -367,6 +416,8 @@ def build_run_manifest(
             'market': settings.market_log_path,
             'candles': settings.candle_journal_path,
             'debug_decisions': settings.debug_decisions_journal_path,
+            'research': str(research_path),
+            'etoro_payload_schema': str(payload_schema_path),
         },
     }
 

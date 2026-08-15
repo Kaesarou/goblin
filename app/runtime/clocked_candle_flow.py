@@ -124,6 +124,14 @@ class ClockedCandleFlow:
                 },
             )
         self._last_bucket_by_symbol[symbol] = enriched_candle.opened_at
+        research_pipeline = getattr(self, 'research_pipeline', None)
+        if research_pipeline is not None:
+            research_pipeline.maybe_emit(
+                symbol=symbol,
+                state_at=enriched_candle.closed_at,
+                closed_candle=enriched_candle,
+                session_decision=session_decision,
+            )
 
 
 def _as_utc(value: datetime) -> datetime:

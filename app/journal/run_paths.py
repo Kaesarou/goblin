@@ -13,6 +13,8 @@ class RunJournalPaths:
     candles: Path
     errors: Path
     debug_decisions: Path
+    research: Path
+    etoro_payload_schema: Path
     summary: Path
     partial_summary: Path
     manifest: Path
@@ -32,6 +34,8 @@ def build_run_journal_paths(
         candles=base / 'candles.jsonl.gz',
         errors=base / 'errors.jsonl.gz',
         debug_decisions=base / 'debug_decisions.jsonl.gz',
+        research=base / 'research.jsonl.gz',
+        etoro_payload_schema=base / 'etoro_payload_schema.json',
         summary=base / 'summary.json',
         partial_summary=base / 'summary.partial.json',
         manifest=base / 'manifest.json',

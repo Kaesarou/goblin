@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from app.market.models import MarketSnapshot, PriceSource, TimestampSource
 from app.market_data.models import MarketDataEvent, MarketDataSource
+from app.research.payload_schema_observer import build_payload_schema_sample
 
 
 def build_authentication_request(
@@ -124,6 +125,11 @@ def parse_websocket_events(
                     or current_prices != previous_prices
                 ),
                 state_reconstructed=bool(previous),
+                payload_schema=build_payload_schema_sample(
+                    patch=patch,
+                    merged=merged,
+                    observed_at=received_at,
+                ),
             )
         )
     return result

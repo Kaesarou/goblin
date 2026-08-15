@@ -58,6 +58,10 @@ class Settings(BaseSettings):
         alias='JOURNAL_DETAIL_LEVEL',
     )
     journal_max_runs: int = Field(default=30, alias='JOURNAL_MAX_RUNS')
+    research_enabled: bool = Field(
+        default=True,
+        alias='RESEARCH_ENABLED',
+    )
     runtime_heartbeat_minutes: int = Field(
         default=5,
         alias='RUNTIME_HEARTBEAT_MINUTES',

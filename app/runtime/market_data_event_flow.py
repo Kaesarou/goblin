@@ -26,6 +26,9 @@ class MarketDataEventFlow:
                 'loop_id': self.loop_id,
             },
         )
+        research_pipeline = getattr(self, 'research_pipeline', None)
+        if research_pipeline is not None:
+            research_pipeline.observe_payload_schema(event)
         if not precheck.accepted:
             self._record_precheck_rejection(symbol, event, precheck.reason)
             return
@@ -82,6 +85,8 @@ class MarketDataEventFlow:
                     'loop_id': self.loop_id,
                 },
             )
+        if research_pipeline is not None:
+            research_pipeline.observe_accepted_snapshot(snapshot)
 
         position_session_decision = self.session_decisions.get(symbol)
         self.broker_operations.on_snapshot(

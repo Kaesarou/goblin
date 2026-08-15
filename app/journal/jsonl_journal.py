@@ -17,10 +17,12 @@ class JsonlJournal:
         *,
         run_id: str | None = None,
         stream_name: str | None = None,
+        compact: bool = False,
     ):
         self.path = Path(path)
         self.run_id = run_id
         self.stream_name = stream_name or self.path.name
+        self.compact = compact
         self.sequence = 0
         self.written_count = 0
         self.failed_count = 0
@@ -39,7 +41,14 @@ class JsonlJournal:
                 'payload': serialize_value(payload),
             }
             with self._open_append() as file:
-                file.write(json.dumps(record, ensure_ascii=False) + '\n')
+                file.write(
+                    json.dumps(
+                        record,
+                        ensure_ascii=False,
+                        separators=(',', ':') if self.compact else None,
+                    )
+                    + '\n'
+                )
 
             self.sequence = next_sequence
             self.written_count += 1
