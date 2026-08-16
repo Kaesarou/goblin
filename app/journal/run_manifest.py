@@ -65,10 +65,18 @@ from app.research.payload_schema_observer import (
     payload_schema_contract_metadata,
 )
 from app.research.pipeline import RESEARCH_FEATURE_SET_SHA256
+from app.research.reconstructibility import (
+    RESEARCH_RECONSTRUCTIBILITY_CONTRACT_VERSION,
+    reconstructibility_contract_metadata,
+)
 from app.research.research_state import (
     RESEARCH_STATE_CONTRACT_VERSION,
     RESEARCH_STATE_SCHEMA_VERSION,
     research_state_contract_metadata,
+)
+from app.research.summary import (
+    RESEARCH_SUMMARY_SCHEMA_VERSION,
+    research_summary_contract_metadata,
 )
 from app.risk.trade_cooldown import TRADE_COOLDOWN_CONTRACT_VERSION
 from app.risk.trade_cost_model import TRADE_COST_CONTRACT_VERSION
@@ -153,6 +161,7 @@ def build_run_manifest(
     actual_summary_path = summary_path or settings.daily_summary_path
     logs_root = Path(settings.journal_path).parent
     research_path = logs_root / 'research.jsonl.gz'
+    research_summary_path = logs_root / 'research_summary.json'
     payload_schema_path = logs_root / 'etoro_payload_schema.json'
     outcome_probability_model = FrozenOutcomeProbabilityModel.load()
     managed_outcome_model = FrozenManagedOutcomeModel.load()
@@ -255,6 +264,10 @@ def build_run_manifest(
                 'trade_cooldown': TRADE_COOLDOWN_CONTRACT_VERSION,
                 'quote_quality': QUOTE_QUALITY_CONTRACT_VERSION,
                 'research_state': RESEARCH_STATE_CONTRACT_VERSION,
+                'research_summary': RESEARCH_SUMMARY_SCHEMA_VERSION,
+                'research_reconstructibility': (
+                    RESEARCH_RECONSTRUCTIBILITY_CONTRACT_VERSION
+                ),
                 'microstructure': MICROSTRUCTURE_CONTRACT_VERSION,
                 'etoro_payload_schema_observer': (
                     ETORO_PAYLOAD_SCHEMA_OBSERVER_VERSION
@@ -310,6 +323,10 @@ def build_run_manifest(
                 ),
                 'research_state': research_state_contract_metadata(),
                 'microstructure': microstructure_contract_metadata(),
+                'reconstructibility': (
+                    reconstructibility_contract_metadata()
+                ),
+                'health_summary': research_summary_contract_metadata(),
                 'payload_schema_observer': (
                     payload_schema_contract_metadata()
                 ),
@@ -324,12 +341,17 @@ def build_run_manifest(
                     ANALYSIS_READY_SUMMARY_SCHEMA_VERSION
                 ),
                 'research_state': RESEARCH_STATE_SCHEMA_VERSION,
+                'research_summary': RESEARCH_SUMMARY_SCHEMA_VERSION,
+                'research_reconstructibility': (
+                    RESEARCH_RECONSTRUCTIBILITY_CONTRACT_VERSION
+                ),
             },
             'market_stream': settings.market_log_path,
             'candle_stream': settings.candle_journal_path,
             'trade_stream': settings.journal_path,
             'error_stream': settings.errors_journal_path,
             'research_stream': str(research_path),
+            'research_summary': str(research_summary_path),
             'etoro_payload_schema': str(payload_schema_path),
             'raw_market_retained': True,
             'raw_candles_retained': True,
@@ -417,6 +439,7 @@ def build_run_manifest(
             'candles': settings.candle_journal_path,
             'debug_decisions': settings.debug_decisions_journal_path,
             'research': str(research_path),
+            'research_summary': str(research_summary_path),
             'etoro_payload_schema': str(payload_schema_path),
         },
     }

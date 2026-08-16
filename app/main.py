@@ -33,6 +33,10 @@ from app.research.payload_schema_observer import (
     EtoroPayloadSchemaObserver,
 )
 from app.research.pipeline import SideNeutralResearchPipeline
+from app.research.summary import (
+    empty_research_summary,
+    write_research_summary,
+)
 from app.risk.position_sizing import FixedPercentPositionSizing
 from app.risk.risk_manager import RiskManager
 from app.risk.trade_cooldown_guard import TradeCooldownGuard
@@ -199,6 +203,28 @@ def _build_analysis_journal(
     )
 
 
+def _write_disabled_research_summary(
+    *,
+    path: Path,
+    run_id: str,
+    updated_at: datetime,
+) -> None:
+    try:
+        write_research_summary(
+            path,
+            empty_research_summary(
+                run_id=run_id,
+                enabled=False,
+                updated_at=updated_at,
+            ),
+        )
+    except Exception:
+        logger.exception(
+            'Disabled research summary write failed | path=%s',
+            path,
+        )
+
+
 def main() -> None:
     started_at = datetime.now(timezone.utc)
     run_id = build_run_id(started_at)
@@ -248,6 +274,7 @@ def main() -> None:
     manifest['runtime']['research'].update(
         {
             'research_journal_path': str(run_paths.research),
+            'research_summary_path': str(run_paths.research_summary),
             'payload_schema_observer_path': str(
                 run_paths.etoro_payload_schema
             ),
@@ -259,10 +286,16 @@ def main() -> None:
     manifest['analysis_sources']['research_stream'] = str(
         run_paths.research
     )
+    manifest['analysis_sources']['research_summary'] = str(
+        run_paths.research_summary
+    )
     manifest['analysis_sources']['etoro_payload_schema'] = str(
         run_paths.etoro_payload_schema
     )
     manifest['files']['research'] = str(run_paths.research)
+    manifest['files']['research_summary'] = str(
+        run_paths.research_summary
+    )
     manifest['files']['etoro_payload_schema'] = str(
         run_paths.etoro_payload_schema
     )
@@ -283,7 +316,6 @@ def main() -> None:
     write_run_manifest(archived_manifest_path, manifest)
     write_run_manifest(settings.run_manifest_path, manifest)
 
-    clients = build_runtime_clients(settings)
     strategies = build_strategies(symbols, instrument_registry)
     candle_builders = build_candle_builders(symbols)
     trading_session_service = trading_session_service_from_settings(settings)
@@ -292,7 +324,6 @@ def main() -> None:
     candidate_economics_estimator = build_candidate_economics_estimator(
         instrument_registry
     )
-    executor = TradeExecutor(clients.execution_broker)
     position_tracker = PositionTracker()
     position_store = PositionStore(settings.position_store_path)
     pending_close_store = PendingCloseStore(settings.position_store_path)
@@ -368,7 +399,25 @@ def main() -> None:
             market_context_service=market_context_service,
             multi_timeframe_service=multi_timeframe_service,
             collection_started_at=started_at,
+            run_id=run_id,
+            summary_path=str(run_paths.research_summary),
         )
+        research_pipeline.flush()
+    else:
+        _write_disabled_research_summary(
+            path=run_paths.research_summary,
+            run_id=run_id,
+            updated_at=started_at,
+        )
+    clients = build_runtime_clients(
+        settings,
+        websocket_payload_observer=(
+            None
+            if research_pipeline is None
+            else research_pipeline.observe_websocket_payload
+        ),
+    )
+    executor = TradeExecutor(clients.execution_broker)
     heartbeat = RuntimeHeartbeat(settings.runtime_heartbeat_minutes)
     runtime = EventDrivenMarketRuntime(
         settings=settings,
@@ -461,6 +510,12 @@ def main() -> None:
             run_status = 'completed'
         if research_pipeline is not None:
             research_pipeline.flush()
+        else:
+            _write_disabled_research_summary(
+                path=run_paths.research_summary,
+                run_id=run_id,
+                updated_at=datetime.now(timezone.utc),
+            )
         for symbol in symbols:
             runtime._write_partial_timeframe_bars(
                 symbol,

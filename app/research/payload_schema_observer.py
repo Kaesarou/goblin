@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,8 +15,9 @@ from app.journal.serialization import serialize_value
 
 logger = logging.getLogger(__name__)
 
-ETORO_PAYLOAD_SCHEMA_OBSERVER_VERSION = 'etoro_payload_schema_v1'
+ETORO_PAYLOAD_SCHEMA_OBSERVER_VERSION = 'etoro_payload_schema_v2'
 PAYLOAD_SCHEMA_MAX_FIELDS = 256
+PAYLOAD_SCHEMA_MAX_DEPTH = 2
 PAYLOAD_SCHEMA_MAX_EXAMPLES_PER_FIELD = 3
 PAYLOAD_SCHEMA_EXAMPLE_MAX_CHARACTERS = 80
 PAYLOAD_SCHEMA_FIELD_NAME_MAX_CHARACTERS = 128
@@ -37,6 +39,7 @@ class WebSocketPayloadFieldSample:
     field_name: str
     observed_type: str
     numeric_value: float | None
+    container_size: int | None
     example: str | int | float | bool | None
 
 
@@ -45,24 +48,34 @@ class WebSocketPayloadSchemaSample:
     observed_at: datetime
     patch_fields: tuple[WebSocketPayloadFieldSample, ...]
     merged_fields: tuple[WebSocketPayloadFieldSample, ...]
+    patch_paths_truncated: bool
+    merged_paths_truncated: bool
 
 
 def build_payload_schema_sample(
     *,
-    patch: dict[str, object],
-    merged: dict[str, object],
+    patch: Mapping[str, object],
+    merged: Mapping[str, object],
     observed_at: datetime,
+    maximum_paths: int = PAYLOAD_SCHEMA_MAX_FIELDS,
+    maximum_depth: int = PAYLOAD_SCHEMA_MAX_DEPTH,
 ) -> WebSocketPayloadSchemaSample:
+    patch_fields, patch_paths_truncated = _field_samples(
+        patch,
+        maximum_paths=maximum_paths,
+        maximum_depth=maximum_depth,
+    )
+    merged_fields, merged_paths_truncated = _field_samples(
+        merged,
+        maximum_paths=maximum_paths,
+        maximum_depth=maximum_depth,
+    )
     return WebSocketPayloadSchemaSample(
         observed_at=_as_utc(observed_at),
-        patch_fields=tuple(
-            _field_sample(field_name, value)
-            for field_name, value in sorted(patch.items())
-        ),
-        merged_fields=tuple(
-            _field_sample(field_name, value)
-            for field_name, value in sorted(merged.items())
-        ),
+        patch_fields=patch_fields,
+        merged_fields=merged_fields,
+        patch_paths_truncated=patch_paths_truncated,
+        merged_paths_truncated=merged_paths_truncated,
     )
 
 
@@ -95,9 +108,40 @@ class EtoroPayloadSchemaObserver:
         self._dropped_field_observations = 0
         self._write_count = 0
         self._write_failure_count = 0
+        self._observation_failure_count = 0
         self._dirty = False
         self._last_write_at: datetime | None = None
         self._last_write_attempt_at: datetime | None = None
+
+    @property
+    def failure_count(self) -> int:
+        return self._write_failure_count + self._observation_failure_count
+
+    @property
+    def write_failure_count(self) -> int:
+        return self._write_failure_count
+
+    def observe_payload(
+        self,
+        *,
+        patch: Mapping[str, object],
+        merged: Mapping[str, object],
+        observed_at: datetime,
+        asset_class: AssetClass | None,
+    ) -> None:
+        try:
+            self.observe(
+                build_payload_schema_sample(
+                    patch=patch,
+                    merged=merged,
+                    observed_at=observed_at,
+                    maximum_paths=self.maximum_fields,
+                ),
+                asset_class=asset_class,
+            )
+        except Exception:
+            self._observation_failure_count += 1
+            logger.exception('eToro payload schema observation failed')
 
     def observe(
         self,
@@ -107,6 +151,9 @@ class EtoroPayloadSchemaObserver:
     ) -> None:
         observed_at = _as_utc(sample.observed_at)
         self._message_count += 1
+        self._dropped_field_observations += int(
+            sample.patch_paths_truncated
+        ) + int(sample.merged_paths_truncated)
         significant_change = False
         patch_names = {field.field_name for field in sample.patch_fields}
         merged_names = {field.field_name for field in sample.merged_fields}
@@ -130,6 +177,8 @@ class EtoroPayloadSchemaObserver:
                     'asset_classes': set(),
                     'numeric_min': None,
                     'numeric_max': None,
+                    'container_size_min': None,
+                    'container_size_max': None,
                     'examples': [],
                 }
                 self._fields[field_name] = state
@@ -157,6 +206,15 @@ class EtoroPayloadSchemaObserver:
                     state['numeric_max'] = _maximum(
                         state['numeric_max'],
                         field.numeric_value,
+                    )
+                if field.container_size is not None:
+                    state['container_size_min'] = _minimum(
+                        state['container_size_min'],
+                        field.container_size,
+                    )
+                    state['container_size_max'] = _maximum(
+                        state['container_size_max'],
+                        field.container_size,
                     )
                 if (
                     field.example is not None
@@ -225,6 +283,8 @@ class EtoroPayloadSchemaObserver:
                     'asset_classes': sorted(state['asset_classes']),
                     'numeric_min': state['numeric_min'],
                     'numeric_max': state['numeric_max'],
+                    'container_size_min': state['container_size_min'],
+                    'container_size_max': state['container_size_max'],
                     'examples': list(state['examples']),
                 }
             )
@@ -241,6 +301,7 @@ class EtoroPayloadSchemaObserver:
             ),
             'write_count_before_this_snapshot': self._write_count,
             'write_failure_count': self._write_failure_count,
+            'observation_failure_count': self._observation_failure_count,
             'fields': fields,
         }
 
@@ -249,6 +310,7 @@ def payload_schema_contract_metadata() -> dict[str, object]:
     return {
         'version': ETORO_PAYLOAD_SCHEMA_OBSERVER_VERSION,
         'maximum_fields': PAYLOAD_SCHEMA_MAX_FIELDS,
+        'maximum_depth': PAYLOAD_SCHEMA_MAX_DEPTH,
         'maximum_examples_per_field': (
             PAYLOAD_SCHEMA_MAX_EXAMPLES_PER_FIELD
         ),
@@ -262,8 +324,47 @@ def payload_schema_contract_metadata() -> dict[str, object]:
             PAYLOAD_SCHEMA_FLUSH_INTERVAL_SECONDS
         ),
         'raw_payload_retained': False,
+        'array_elements_inspected': False,
+        'container_size_retained': True,
         'patch_and_merged_presence_distinguished': True,
     }
+
+
+def _field_samples(
+    payload: Mapping[str, object],
+    *,
+    maximum_paths: int,
+    maximum_depth: int,
+) -> tuple[tuple[WebSocketPayloadFieldSample, ...], bool]:
+    samples: list[WebSocketPayloadFieldSample] = []
+    paths_truncated = False
+
+    def visit(path: str, value: object, depth: int) -> None:
+        nonlocal paths_truncated
+        if len(samples) >= maximum_paths:
+            paths_truncated = True
+            return
+        samples.append(_field_sample(path, value))
+        if depth >= maximum_depth or not isinstance(value, dict):
+            return
+        for child_name, child_value in sorted(
+            value.items(),
+            key=lambda item: str(item[0]),
+        ):
+            if len(samples) >= maximum_paths:
+                paths_truncated = True
+                return
+            visit(f'{path}.{child_name}', child_value, depth + 1)
+
+    for field_name, value in sorted(
+        payload.items(),
+        key=lambda item: str(item[0]),
+    ):
+        if len(samples) >= maximum_paths:
+            paths_truncated = True
+            break
+        visit(str(field_name), value, 1)
+    return tuple(samples), paths_truncated
 
 
 def _field_sample(
@@ -273,10 +374,14 @@ def _field_sample(
     normalized_field_name = _bounded_field_name(str(field_name))
     observed_type = _observed_type(value)
     numeric_value = _finite_float(value, observed_type)
+    container_size = (
+        len(value) if isinstance(value, (dict, list, tuple)) else None
+    )
     return WebSocketPayloadFieldSample(
         field_name=normalized_field_name,
         observed_type=observed_type,
         numeric_value=numeric_value,
+        container_size=container_size,
         example=_safe_example(
             normalized_field_name,
             value,

@@ -15,6 +15,7 @@ def test_run_paths_are_compressed_and_isolated(tmp_path):
     assert paths.errors.name == 'errors.jsonl.gz'
     assert paths.debug_decisions.name == 'debug_decisions.jsonl.gz'
     assert paths.research.name == 'research.jsonl.gz'
+    assert paths.research_summary.name == 'research_summary.json'
     assert paths.etoro_payload_schema.name == 'etoro_payload_schema.json'
     for path in paths.__dict__.values():
         assert path == logs_root or logs_root in path.parents

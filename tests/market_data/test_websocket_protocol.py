@@ -16,6 +16,11 @@ def test_parse_json_frame_accepts_control_framing():
 
 def test_partial_messages_reconstruct_quote_and_do_not_use_rate_id_as_identity():
     state = {}
+    observed_payloads = []
+
+    def observe_payload(symbol, patch, merged, observed_at):
+        observed_payloads.append((symbol, patch, merged, observed_at))
+
     first = {
         'messages': [
             {
@@ -56,6 +61,7 @@ def test_partial_messages_reconstruct_quote_and_do_not_use_rate_id_as_identity()
         received_at=NOW,
         connection_id='connection',
         rate_state_by_instrument_id=state,
+        payload_observer=observe_payload,
     )
     second_events = parse_websocket_events(
         json.dumps(second),
@@ -63,6 +69,7 @@ def test_partial_messages_reconstruct_quote_and_do_not_use_rate_id_as_identity()
         received_at=NOW,
         connection_id='connection',
         rate_state_by_instrument_id=state,
+        payload_observer=observe_payload,
     )
 
     assert first_events[0].snapshot.last == 100.0
@@ -71,11 +78,85 @@ def test_partial_messages_reconstruct_quote_and_do_not_use_rate_id_as_identity()
     assert second_events[0].snapshot.last == 100.5
     assert first_events[0].price_rate_id == second_events[0].price_rate_id
     assert first_events[0].message_id != second_events[0].message_id
-    assert {
-        field.field_name
-        for field in second_events[0].payload_schema.patch_fields
-    } == {'LastExecution', 'Date', 'PriceRateID'}
-    assert {
-        field.field_name
-        for field in second_events[0].payload_schema.merged_fields
-    } == {'Bid', 'Ask', 'LastExecution', 'Date', 'PriceRateID'}
+    assert set(observed_payloads[1][1]) == {
+        'LastExecution',
+        'Date',
+        'PriceRateID',
+    }
+    assert set(observed_payloads[1][2]) == {
+        'Bid',
+        'Ask',
+        'LastExecution',
+        'Date',
+        'PriceRateID',
+    }
+    assert not hasattr(second_events[0], 'payload_schema')
+
+
+def test_optional_payload_observer_failure_does_not_change_economic_parsing():
+    payload = {
+        'messages': [
+            {
+                'topic': 'instrument:100',
+                'type': 'Snapshot',
+                'content': json.dumps(
+                    {'Bid': 99.0, 'Ask': 101.0, 'LastExecution': 100.0}
+                ),
+            }
+        ]
+    }
+
+    def fail_observation(*_args):
+        raise RuntimeError('research sidecar unavailable')
+
+    events = parse_websocket_events(
+        json.dumps(payload),
+        symbol_by_instrument_id={100: 'AAPL'},
+        received_at=NOW,
+        connection_id='connection',
+        rate_state_by_instrument_id={},
+        payload_observer=fail_observation,
+    )
+
+    assert len(events) == 1
+    assert events[0].snapshot.bid == 99.0
+    assert events[0].snapshot.ask == 101.0
+    assert events[0].snapshot.last == 100.0
+
+
+def test_optional_payload_observer_receives_read_only_transport_views():
+    payload = {
+        'messages': [
+            {
+                'topic': 'instrument:100',
+                'type': 'Snapshot',
+                'content': json.dumps(
+                    {'Bid': 99.0, 'Ask': 101.0, 'LastExecution': 100.0}
+                ),
+            }
+        ]
+    }
+    mutation_blocked = []
+
+    def try_to_mutate(_symbol, patch, merged, _observed_at):
+        for view in (patch, merged):
+            try:
+                view['Bid'] = 0.0
+            except TypeError:
+                mutation_blocked.append(True)
+
+    state = {}
+    events = parse_websocket_events(
+        json.dumps(payload),
+        symbol_by_instrument_id={100: 'AAPL'},
+        received_at=NOW,
+        connection_id='connection',
+        rate_state_by_instrument_id=state,
+        payload_observer=try_to_mutate,
+    )
+
+    assert mutation_blocked == [True, True]
+    assert events[0].snapshot.bid == 99.0
+    assert events[0].snapshot.ask == 101.0
+    assert events[0].snapshot.last == 100.0
+    assert state[100]['Bid'] == 99.0

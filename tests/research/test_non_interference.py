@@ -1,3 +1,4 @@
+import ast
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -121,19 +122,22 @@ class DownstreamTrace:
 
 class RecordingResearchSidecar:
     def __init__(self) -> None:
-        self.payload_events = []
         self.accepted_snapshots = []
         self.states = []
-
-    def observe_payload_schema(self, event):
-        self.payload_events.append(event)
+        self.sampling_cadence_minutes = 5
 
     def observe_accepted_snapshot(self, snapshot, *, source):
         self.accepted_snapshots.append((snapshot, source))
 
-    def maybe_emit(self, **kwargs):
-        self.states.append(kwargs)
-        return True
+    def emit_boundary(self, *, symbols, state_at, session_decisions):
+        self.states.extend(
+            {
+                'symbol': symbol,
+                'state_at': state_at,
+                'session_decision': session_decisions.get(symbol),
+            }
+            for symbol in symbols
+        )
 
 
 class TraceRuntime(MarketDataEventFlow, ClockedCandleFlow):
@@ -294,9 +298,11 @@ def test_same_market_data_sequence_has_identical_trading_trace(
     assert len(enabled.research_pipeline.states) == 1
 
 
-def test_trading_decision_packages_do_not_import_research_runtime():
+def test_core_market_and_trading_packages_do_not_import_research_runtime():
     repository = Path(__file__).resolve().parents[2]
     forbidden_roots = (
+        repository / 'app' / 'market_data',
+        repository / 'app' / 'brokers',
         repository / 'app' / 'strategies',
         repository / 'app' / 'execution',
         repository / 'app' / 'risk',
@@ -304,7 +310,22 @@ def test_trading_decision_packages_do_not_import_research_runtime():
     offenders = []
     for root in forbidden_roots:
         for source in root.rglob('*.py'):
-            if 'app.research' in source.read_text(encoding='utf-8'):
+            tree = ast.parse(source.read_text(encoding='utf-8'))
+            imports_research = any(
+                (
+                    isinstance(node, ast.ImportFrom)
+                    and (node.module or '').startswith('app.research')
+                )
+                or (
+                    isinstance(node, ast.Import)
+                    and any(
+                        alias.name.startswith('app.research')
+                        for alias in node.names
+                    )
+                )
+                for node in ast.walk(tree)
+            )
+            if imports_research:
                 offenders.append(source.relative_to(repository).as_posix())
 
     assert offenders == []
@@ -312,6 +333,7 @@ def test_trading_decision_packages_do_not_import_research_runtime():
 
 def test_fixed_cadence_scheduler_does_not_require_a_quote_or_candle():
     runtime = TraceRuntime(research_enabled=True)
+    runtime.active_symbols = []
     due_at = START + timedelta(minutes=5, seconds=1.1)
 
     runtime._finalize_clocked_candles(due_at)

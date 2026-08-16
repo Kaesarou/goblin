@@ -63,11 +63,7 @@ class RecordingMarketContext:
 
 class RecordingResearchPipeline:
     def __init__(self) -> None:
-        self.payload_events = []
         self.accepted_snapshots: list[MarketSnapshot] = []
-
-    def observe_payload_schema(self, event) -> None:
-        self.payload_events.append(event)
 
     def observe_accepted_snapshot(self, snapshot, *, source) -> None:
         self.accepted_snapshots.append(snapshot)
@@ -284,7 +280,6 @@ def test_quarantined_quote_never_reaches_position_or_strategy_flow():
     assert len(runtime.broker_operations.snapshots) == accepted_count + 1
     assert len(research.accepted_snapshots) == research_accepted_count + 1
     assert research.accepted_snapshots[-1].last == 100.105
-    assert len(research.payload_events) == 23
     assert any(
         event_type == 'market_data_quality_resolved'
         for event_type, _ in runtime.trade_journal.events

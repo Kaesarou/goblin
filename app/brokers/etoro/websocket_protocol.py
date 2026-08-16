@@ -1,10 +1,18 @@
 import json
+import logging
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
+from types import MappingProxyType
 from uuid import uuid4
 
 from app.market.models import MarketSnapshot, PriceSource, TimestampSource
 from app.market_data.models import MarketDataEvent, MarketDataSource
-from app.research.payload_schema_observer import build_payload_schema_sample
+
+logger = logging.getLogger(__name__)
+WebSocketPayloadObserver = Callable[
+    [str, Mapping[str, object], Mapping[str, object], datetime],
+    None,
+]
 
 
 def build_authentication_request(
@@ -61,6 +69,7 @@ def parse_websocket_events(
     received_at: datetime,
     connection_id: str,
     rate_state_by_instrument_id: dict[int, dict],
+    payload_observer: WebSocketPayloadObserver | None = None,
 ) -> list[MarketDataEvent]:
     payload = parse_json_frame(raw_message)
     if not isinstance(payload, dict):
@@ -88,6 +97,19 @@ def parse_websocket_events(
         )
         merged = {**previous, **patch}
         rate_state_by_instrument_id[instrument_id] = merged
+        if payload_observer is not None:
+            try:
+                payload_observer(
+                    symbol,
+                    MappingProxyType(dict(patch)),
+                    MappingProxyType(dict(merged)),
+                    received_at,
+                )
+            except Exception:
+                logger.exception(
+                    'Optional WebSocket payload observer failed | symbol=%s',
+                    symbol,
+                )
 
         previous_prices = _prices(previous)
         current_prices = _prices(merged)
@@ -125,11 +147,6 @@ def parse_websocket_events(
                     or current_prices != previous_prices
                 ),
                 state_reconstructed=bool(previous),
-                payload_schema=build_payload_schema_sample(
-                    patch=patch,
-                    merged=merged,
-                    observed_at=received_at,
-                ),
             )
         )
     return result

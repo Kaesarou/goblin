@@ -101,7 +101,7 @@ def test_interpretable_feature_formulas_are_frozen():
     assert features[prefix + 'bid_vs_ask_update_imbalance'] == 0.0
     assert features[prefix + 'last_tick_imbalance'] == pytest.approx(1 / 3)
     assert features[prefix + 'last_change_count'] == 3
-    assert features[prefix + 'last_update_activity_ratio'] == 1.0
+    assert features[prefix + 'last_value_change_ratio'] == 1.0
     assert features[prefix + 'interarrival_median_ms'] == 3000.0
     assert features[prefix + 'interarrival_burstiness'] == pytest.approx(
         (3000 - 2200) / (3000 + 2200)
@@ -148,6 +148,29 @@ def test_bid_vs_ask_update_imbalance_uses_change_counts():
     assert features['micro_10s_ask_change_count'] == 1
     assert features['micro_10s_bid_vs_ask_update_imbalance'] == pytest.approx(
         1 / 3
+    )
+
+
+def test_carried_broker_last_is_a_value_path_not_a_retransmission_signal():
+    accumulator = EtoroMicrostructureAccumulator()
+    for seconds_before, last in ((9, 100.0), (5, 100.0), (1, 101.0)):
+        accumulator.observe(
+            _snapshot(
+                seconds_before=seconds_before,
+                bid=99.0,
+                ask=102.0,
+                last=last,
+            )
+        )
+
+    features = accumulator.features(symbol='AAPL', state_at=STATE_AT)
+    metadata = microstructure_contract_metadata()
+
+    assert features['micro_10s_last_tick_imbalance'] == 1.0
+    assert features['micro_10s_last_change_count'] == 1
+    assert features['micro_10s_last_value_change_ratio'] == 0.5
+    assert metadata['last_execution_presence_source_of_truth'] == (
+        'etoro_payload_schema patch_presence_count'
     )
 
 

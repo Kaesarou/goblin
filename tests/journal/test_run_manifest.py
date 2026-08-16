@@ -23,7 +23,11 @@ from app.research.microstructure import MICROSTRUCTURE_CONTRACT_VERSION
 from app.research.payload_schema_observer import (
     ETORO_PAYLOAD_SCHEMA_OBSERVER_VERSION,
 )
+from app.research.reconstructibility import (
+    RESEARCH_RECONSTRUCTIBILITY_CONTRACT_VERSION,
+)
 from app.research.research_state import RESEARCH_STATE_CONTRACT_VERSION
+from app.research.summary import RESEARCH_SUMMARY_SCHEMA_VERSION
 from app.strategies.balanced_strategy_config import BalancedStrategyConfig
 
 
@@ -115,6 +119,8 @@ def test_run_manifest_captures_segmented_probability_contract():
         'daily_summary': 10,
         'analysis_ready_summary': 13,
         'research_state': 1,
+        'research_summary': 'research_summary_v1',
+        'research_reconstructibility': 'research_reconstructibility_v1',
     }
     assert manifest['strategy']['breakeven_profile'] == (
         BreakevenProfileName.CORRECTED_BASELINE_V1
@@ -165,15 +171,31 @@ def test_run_manifest_captures_segmented_probability_contract():
         ETORO_PAYLOAD_SCHEMA_OBSERVER_VERSION
     )
     assert research['payload_schema_observer']['raw_payload_retained'] is False
+    assert research['payload_schema_observer']['maximum_depth'] == 2
+    assert research['payload_schema_observer']['array_elements_inspected'] is False
+    assert research['health_summary']['schema_version'] == (
+        RESEARCH_SUMMARY_SCHEMA_VERSION
+    )
+    assert research['reconstructibility']['version'] == (
+        RESEARCH_RECONSTRUCTIBILITY_CONTRACT_VERSION
+    )
     contracts = manifest['runtime']['contracts']
     assert contracts['research_state'] == RESEARCH_STATE_CONTRACT_VERSION
     assert contracts['microstructure'] == MICROSTRUCTURE_CONTRACT_VERSION
+    assert contracts['research_summary'] == RESEARCH_SUMMARY_SCHEMA_VERSION
+    assert contracts['research_reconstructibility'] == (
+        RESEARCH_RECONSTRUCTIBILITY_CONTRACT_VERSION
+    )
     assert contracts['etoro_payload_schema_observer'] == (
         ETORO_PAYLOAD_SCHEMA_OBSERVER_VERSION
     )
     assert manifest['analysis_sources']['research_stream'].startswith(
         'data/logs/'
     )
+    assert manifest['analysis_sources']['research_summary'].startswith(
+        'data/logs/'
+    )
+    assert manifest['files']['research_summary'].startswith('data/logs/')
     assert manifest['analysis_sources']['etoro_payload_schema'].startswith(
         'data/logs/'
     )

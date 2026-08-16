@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -8,6 +9,7 @@ from app.market.multi_timeframe import TimeframeBar
 from app.market.timeframes import BarCompleteness, Timeframe
 from app.market_data.models import MarketDataSource
 from app.research.pipeline import SideNeutralResearchPipeline
+from app.research.summary import empty_research_summary, write_research_summary
 
 STATE_AT = datetime(2026, 8, 17, 14, 30, tzinfo=UTC)
 
@@ -17,6 +19,7 @@ class RecordingJournal:
         self.events = []
         self.result = result
         self.raises = raises
+        self.open_count = 0
 
     def write(self, event_type, payload):
         if self.raises:
@@ -24,11 +27,22 @@ class RecordingJournal:
         self.events.append((event_type, payload))
         return self.result
 
+    def write_many(self, events):
+        batch = list(events)
+        self.open_count += 1
+        if self.raises:
+            raise OSError('research disk unavailable')
+        if not self.result:
+            return 0
+        self.events.extend(batch)
+        return len(batch)
+
 
 class StubPayloadObserver:
     def __init__(self) -> None:
         self.samples = []
         self.flush_count = 0
+        self.failure_count = 0
 
     def observe(self, sample, *, asset_class):
         self.samples.append((sample, asset_class))
@@ -36,6 +50,9 @@ class StubPayloadObserver:
     def flush(self, *, force):
         self.flush_count += 1
         return True
+
+    def observe_payload(self, **kwargs):
+        self.samples.append(kwargs)
 
 
 class StubMultiTimeframeService:
@@ -138,7 +155,7 @@ def _decision(
     )
 
 
-def _pipeline(*, journal=None):
+def _pipeline(*, journal=None, summary_path=None):
     decisions = {
         'AIR.PA': _decision(AssetClass.EQUITY_EU),
         'AAPL': _decision(AssetClass.EQUITY_US),
@@ -163,6 +180,10 @@ def _pipeline(*, journal=None):
             payload_schema_observer=StubPayloadObserver(),
             market_context_service=StubMarketContextService(),
             multi_timeframe_service=StubMultiTimeframeService(bars),
+            run_id='run-test',
+            summary_path=(
+                None if summary_path is None else str(summary_path)
+            ),
         ),
         decisions,
     )
@@ -399,3 +420,138 @@ def test_research_journal_failure_is_contained_and_observable():
 
     assert emitted is False
     assert pipeline.failure_count == 1
+
+
+def test_boundary_batches_states_and_isolates_symbol_calculation_failure():
+    pipeline, decisions = _pipeline()
+    _observe_quote(pipeline, 'AIR.PA')
+    _observe_quote(pipeline, 'AAPL')
+    del pipeline.multi_timeframe_service.bars_by_symbol['AAPL']
+
+    result = pipeline.emit_boundary(
+        symbols=['AIR.PA', 'AAPL'],
+        state_at=STATE_AT,
+        session_decisions=decisions,
+    )
+
+    assert result.expected_state_count == 2
+    assert result.emitted_state_count == 1
+    assert result.state_calculation_failure_count == 1
+    assert result.journal_write_failure_count == 0
+    assert pipeline.journal.open_count == 1
+    assert [payload['symbol'] for _, payload in pipeline.journal.events] == [
+        'AIR.PA'
+    ]
+    assert pipeline.expected_state_count == 2
+    assert pipeline.emitted_state_count == 1
+    assert pipeline.state_calculation_failure_count == 1
+
+
+def test_boundary_batch_write_failure_is_isolated_and_health_visible():
+    pipeline, decisions = _pipeline(journal=RecordingJournal(raises=True))
+    _observe_quote(pipeline, 'AIR.PA')
+    _observe_quote(pipeline, 'AAPL')
+
+    result = pipeline.emit_boundary(
+        symbols=['AIR.PA', 'AAPL'],
+        state_at=STATE_AT,
+        session_decisions=decisions,
+    )
+
+    assert result.expected_state_count == 2
+    assert result.emitted_state_count == 0
+    assert result.journal_write_failure_count == 2
+    assert pipeline.expected_state_count == 2
+    assert pipeline.emitted_state_count == 0
+    assert pipeline.journal_failure_count == 2
+
+
+def test_duplicate_boundary_does_not_inflate_expected_state_count():
+    pipeline, decisions = _pipeline()
+
+    first = pipeline.emit_boundary(
+        symbols=['AIR.PA', 'AAPL'],
+        state_at=STATE_AT,
+        session_decisions=decisions,
+    )
+    duplicate = pipeline.emit_boundary(
+        symbols=['AIR.PA', 'AAPL'],
+        state_at=STATE_AT,
+        session_decisions=decisions,
+    )
+
+    assert first.expected_state_count == 2
+    assert duplicate.expected_state_count == 0
+    assert pipeline.expected_state_count == 2
+    assert pipeline.emitted_state_count == 2
+    assert pipeline.duplicate_prevented_count == 1
+
+
+def test_run_scoped_health_summary_is_atomic_and_counts_missing_inputs(tmp_path):
+    summary_path = tmp_path / 'data' / 'logs' / 'runs' / 'run-test' / (
+        'research_summary.json'
+    )
+    pipeline, decisions = _pipeline(summary_path=summary_path)
+    pipeline.multi_timeframe_service.bars_by_symbol['AAPL'] = []
+
+    result = pipeline.emit_boundary(
+        symbols=['AAPL'],
+        state_at=STATE_AT,
+        session_decisions=decisions,
+    )
+    pipeline.flush()
+    summary = json.loads(summary_path.read_text(encoding='utf-8'))
+
+    assert result.expected_state_count == 1
+    assert result.emitted_state_count == 1
+    assert summary['schema_version'] == 'research_summary_v1'
+    assert summary['research_enabled'] is True
+    assert summary['expected_state_count'] == 1
+    assert summary['emitted_state_count'] == 1
+    assert summary['states_missing_quote_count'] == 1
+    assert summary['states_missing_candle_count'] == 1
+    assert summary['boundary_count'] == 1
+    assert summary['research_journal_open_count'] == 1
+    assert summary['last_boundary_duration_ms'] >= 0
+    assert not summary_path.with_suffix('.json.tmp').exists()
+
+
+def test_run_start_does_not_create_expected_states_for_earlier_boundary(tmp_path):
+    summary_path = tmp_path / 'research_summary.json'
+    pipeline, decisions = _pipeline(summary_path=summary_path)
+    pipeline.collection_started_at = STATE_AT
+
+    result = pipeline.emit_boundary(
+        symbols=['AAPL'],
+        state_at=STATE_AT,
+        session_decisions=decisions,
+    )
+    pipeline.flush()
+    summary = json.loads(summary_path.read_text(encoding='utf-8'))
+
+    assert result.expected_state_count == 0
+    assert summary['expected_state_count'] == 0
+    assert summary['emitted_state_count'] == 0
+    assert summary['boundary_count'] == 0
+
+
+def test_disabled_run_has_bounded_research_summary_without_journal(tmp_path):
+    summary_path = tmp_path / 'data' / 'logs' / 'runs' / 'run-test' / (
+        'research_summary.json'
+    )
+    research_journal_path = summary_path.with_name('research.jsonl.gz')
+
+    write_research_summary(
+        summary_path,
+        empty_research_summary(
+            run_id='run-test',
+            enabled=False,
+            updated_at=STATE_AT,
+        ),
+    )
+    summary = json.loads(summary_path.read_text(encoding='utf-8'))
+
+    assert summary['research_enabled'] is False
+    assert summary['expected_state_count'] == 0
+    assert summary['emitted_state_count'] == 0
+    assert not research_journal_path.exists()

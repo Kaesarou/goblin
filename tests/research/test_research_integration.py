@@ -14,13 +14,22 @@ from app.strategies.balanced_strategy_config import BalancedStrategyConfig
 class RecordingJournal:
     def __init__(self) -> None:
         self.events = []
+        self.open_count = 0
 
     def write(self, event_type, payload):
         self.events.append((event_type, payload))
         return True
 
+    def write_many(self, events):
+        batch = list(events)
+        self.open_count += 1
+        self.events.extend(batch)
+        return len(batch)
+
 
 class NoOpPayloadObserver:
+    failure_count = 0
+
     def flush(self, *, force):
         return True
 

@@ -235,8 +235,9 @@ Run-manifest schema V14 records:
 - the broker-fill-priority and explicit-cost-only convention;
 - the packaged artifact SHA-256;
 - code fingerprint, watchlist, profiles and runtime settings.
-- the side-neutral research, microstructure and payload-schema contracts,
-  causal cutoff, cadence, feature hashes and paths.
+- the side-neutral research, microstructure, payload-schema,
+  reconstructibility and run-health contracts, causal cutoff, cadence, feature
+  hashes and paths.
 
 Standalone `entry_decision` records include the complete nested outcome estimate, so raw/final direction probabilities and segment metadata remain auditable without duplicate shadow decisions.
 

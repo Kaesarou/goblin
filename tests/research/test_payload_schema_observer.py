@@ -256,3 +256,143 @@ def test_schema_write_failure_is_rate_limited_instead_of_retrying_each_quote(
     assert observer.snapshot(updated_at=OBSERVED_AT)[
         'write_failure_count'
     ] == 2
+
+
+def test_nested_paths_are_deterministic_and_patch_presence_stays_distinct(
+    tmp_path,
+):
+    path = tmp_path / 'schema.json'
+    observer = EtoroPayloadSchemaObserver(run_id='run-test', paths=(path,))
+    observer.observe(
+        _sample(
+            patch={'OrderBook': {'BidSize': 123}},
+            merged={'OrderBook': {'BidSize': 123, 'AskSize': 456}},
+        ),
+        asset_class=AssetClass.EQUITY_US,
+    )
+    observer.observe(
+        _sample(
+            patch={'OrderBook': {'BidSize': 124}},
+            merged={'OrderBook': {'BidSize': 124, 'AskSize': 456}},
+            seconds=1,
+        ),
+        asset_class=AssetClass.EQUITY_US,
+    )
+    observer.flush(force=True, observed_at=OBSERVED_AT + timedelta(seconds=2))
+    _, fields = _fields(path)
+
+    assert list(fields) == [
+        'OrderBook',
+        'OrderBook.AskSize',
+        'OrderBook.BidSize',
+    ]
+    assert fields['OrderBook.BidSize']['patch_presence_count'] == 2
+    assert fields['OrderBook.BidSize']['merged_presence_count'] == 2
+    assert fields['OrderBook.AskSize']['patch_presence_count'] == 0
+    assert fields['OrderBook.AskSize']['merged_presence_count'] == 2
+
+
+def test_nested_depth_is_capped_at_two(tmp_path):
+    path = tmp_path / 'schema.json'
+    observer = EtoroPayloadSchemaObserver(run_id='run-test', paths=(path,))
+
+    observer.observe(
+        _sample(
+            patch={'LevelOne': {'LevelTwo': {'LevelThree': 3}}},
+            merged={'LevelOne': {'LevelTwo': {'LevelThree': 3}}},
+        ),
+        asset_class=AssetClass.EQUITY_US,
+    )
+    _, fields = _fields(path)
+
+    assert set(fields) == {'LevelOne', 'LevelOne.LevelTwo'}
+    assert 'LevelOne.LevelTwo.LevelThree' not in fields
+
+
+def test_arrays_record_type_and_size_without_inspecting_elements(tmp_path):
+    path = tmp_path / 'schema.json'
+    observer = EtoroPayloadSchemaObserver(run_id='run-test', paths=(path,))
+
+    observer.observe(
+        _sample(
+            patch={'Levels': [{'BidSize': 1}, {'BidSize': 2}]},
+            merged={'Levels': [{'BidSize': 1}, {'BidSize': 2}]},
+        ),
+        asset_class=AssetClass.EQUITY_US,
+    )
+    raw = path.read_text(encoding='utf-8')
+    _, fields = _fields(path)
+
+    assert set(fields) == {'Levels'}
+    assert fields['Levels']['observed_types'] == ['array']
+    assert fields['Levels']['container_size_min'] == 2
+    assert fields['Levels']['container_size_max'] == 2
+    assert 'Levels.BidSize' not in raw
+
+
+def test_nested_sensitive_value_is_redacted(tmp_path):
+    path = tmp_path / 'schema.json'
+    observer = EtoroPayloadSchemaObserver(run_id='run-test', paths=(path,))
+
+    observer.observe(
+        _sample(
+            patch={'Authentication': {'Token': 'nested-secret'}},
+            merged={'Authentication': {'Token': 'nested-secret'}},
+        ),
+        asset_class=AssetClass.EQUITY_US,
+    )
+    raw = path.read_text(encoding='utf-8')
+    _, fields = _fields(path)
+
+    assert fields['Authentication.Token']['examples'] == []
+    assert 'nested-secret' not in raw
+
+
+def test_global_field_cap_applies_to_nested_paths(tmp_path):
+    path = tmp_path / 'schema.json'
+    observer = EtoroPayloadSchemaObserver(
+        run_id='run-test',
+        paths=(path,),
+        maximum_fields=3,
+    )
+
+    observer.observe(
+        _sample(
+            patch={'Book': {'A': 1, 'B': 2, 'C': 3}},
+            merged={'Book': {'A': 1, 'B': 2, 'C': 3}},
+        ),
+        asset_class=AssetClass.EQUITY_US,
+    )
+    payload, fields = _fields(path)
+
+    assert set(fields) == {'Book', 'Book.A', 'Book.B'}
+    assert payload['field_count'] == 3
+    assert payload['dropped_field_observations'] >= 1
+
+
+def test_new_nested_field_is_flushed_immediately(tmp_path):
+    path = tmp_path / 'schema.json'
+    observer = EtoroPayloadSchemaObserver(
+        run_id='run-test',
+        paths=(path,),
+        flush_interval_seconds=3600,
+    )
+    observer.observe(
+        _sample(
+            patch={'OrderBook': {'BidSize': 1}},
+            merged={'OrderBook': {'BidSize': 1}},
+        ),
+        asset_class=AssetClass.EQUITY_US,
+    )
+    observer.observe(
+        _sample(
+            patch={'OrderBook': {'AskSize': 2}},
+            merged={'OrderBook': {'BidSize': 1, 'AskSize': 2}},
+            seconds=1,
+        ),
+        asset_class=AssetClass.EQUITY_US,
+    )
+    _, fields = _fields(path)
+
+    assert 'OrderBook.AskSize' in fields
+    assert fields['OrderBook.AskSize']['patch_presence_count'] == 1

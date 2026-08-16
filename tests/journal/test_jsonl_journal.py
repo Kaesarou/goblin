@@ -1,3 +1,4 @@
+import gzip
 import json
 from datetime import datetime, timezone
 from typing import NamedTuple
@@ -57,3 +58,64 @@ def test_trading_session_decision_with_asset_class_enum_is_json_serializable():
     assert serialized['session_decision']['asset_class'] == 'EQUITY_EU'
     assert serialized['session_decision']['session_start_time'] == '2026-07-10T09:00:00+00:00'
     assert serialized['session_decision']['session_end_time'] == '2026-07-10T15:30:00+00:00'
+
+
+def test_write_many_preserves_order_sequence_and_uses_one_gzip_open(tmp_path):
+    journal_path = tmp_path / 'research.jsonl.gz'
+    journal = JsonlJournal(
+        str(journal_path),
+        run_id='run-test',
+        stream_name='research',
+        compact=True,
+    )
+
+    written = journal.write_many(
+        [
+            ('research_state', {'symbol': 'AIR.PA'}),
+            ('research_state', {'symbol': 'AAPL'}),
+            ('research_state', {'symbol': 'MSFT'}),
+        ]
+    )
+
+    with gzip.open(journal_path, 'rt', encoding='utf-8') as handle:
+        records = [json.loads(line) for line in handle]
+    assert written == 3
+    assert [record['sequence'] for record in records] == [1, 2, 3]
+    assert [record['payload']['symbol'] for record in records] == [
+        'AIR.PA',
+        'AAPL',
+        'MSFT',
+    ]
+    assert journal.sequence == 3
+    assert journal.written_count == 3
+    assert journal.failed_count == 0
+    assert journal.open_count == 1
+
+
+def test_write_many_failure_is_all_or_nothing_and_counted(tmp_path, monkeypatch):
+    journal = JsonlJournal(str(tmp_path / 'research.jsonl.gz'))
+
+    def fail_open():
+        raise OSError('disk unavailable')
+
+    monkeypatch.setattr(journal, '_open_append', fail_open)
+
+    assert journal.write_many([('one', {}), ('two', {})]) == 0
+    assert journal.sequence == 0
+    assert journal.written_count == 0
+    assert journal.failed_count == 2
+
+
+def test_legacy_write_behavior_remains_single_record(tmp_path):
+    journal_path = tmp_path / 'legacy.jsonl'
+    journal = JsonlJournal(str(journal_path), run_id='run-test')
+
+    assert journal.write('legacy', {'value': 1}) is True
+
+    record = json.loads(journal_path.read_text(encoding='utf-8'))
+    assert record['sequence'] == 1
+    assert record['event_type'] == 'legacy'
+    assert record['payload'] == {'value': 1}
+    assert journal.written_count == 1
+    assert journal.failed_count == 0
+    assert journal.open_count == 1

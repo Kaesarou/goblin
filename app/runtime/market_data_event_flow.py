@@ -27,8 +27,6 @@ class MarketDataEventFlow:
             },
         )
         research_pipeline = getattr(self, 'research_pipeline', None)
-        if research_pipeline is not None:
-            research_pipeline.observe_payload_schema(event)
         if not precheck.accepted:
             self._record_precheck_rejection(symbol, event, precheck.reason)
             return

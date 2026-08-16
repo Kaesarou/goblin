@@ -2,15 +2,21 @@ import gzip
 import json
 from datetime import UTC, datetime, timedelta
 
+from app.instruments.models import AssetClass
 from app.journal.jsonl_journal import JsonlJournal
 from app.journal.run_paths import build_run_journal_paths
 from app.market.models import MarketSnapshot
 from app.research.microstructure import MICROSTRUCTURE_CONTRACT_VERSION
+from app.research.payload_schema_observer import (
+    EtoroPayloadSchemaObserver,
+    build_payload_schema_sample,
+)
 from app.research.pipeline import (
     RESEARCH_FEATURE_NAMES,
     RESEARCH_FEATURE_SET_SHA256,
 )
 from app.research.research_state import RESEARCH_CAUSAL_CUTOFF_CONVENTION
+from app.research.summary import empty_research_summary, write_research_summary
 
 
 def _read_gzip_jsonl(path):
@@ -205,14 +211,74 @@ def test_reproducible_compressed_log_budget_is_below_ten_percent(tmp_path):
                 },
             )
 
+    research_summary = empty_research_summary(
+        run_id='run-budget',
+        enabled=True,
+        updated_at=started_at + timedelta(hours=1),
+    )
+    research_summary.update(
+        {
+            'expected_state_count': 11,
+            'emitted_state_count': 11,
+            'boundary_count': 11,
+            'first_state_at': started_at + timedelta(minutes=5),
+            'last_state_at': started_at + timedelta(minutes=55),
+        }
+    )
+    write_research_summary(paths.research_summary, research_summary)
+    latest_payload_schema_path = (
+        paths.root.parent.parent / 'etoro_payload_schema.json'
+    )
+    payload_observer = EtoroPayloadSchemaObserver(
+        run_id='run-budget',
+        paths=(paths.etoro_payload_schema, latest_payload_schema_path),
+    )
+    payload_observer.observe(
+        build_payload_schema_sample(
+            patch={'Bid': 100.0, 'OrderBook': {'BidSize': 123}},
+            merged={
+                'Bid': 100.0,
+                'Ask': 100.2,
+                'OrderBook': {'BidSize': 123, 'AskSize': 456},
+            },
+            observed_at=started_at,
+        ),
+        asset_class=AssetClass.EQUITY_US,
+    )
+
     market_size = paths.market.stat().st_size
     research_size = paths.research.stat().st_size
-    ratio = research_size / market_size
+    summary_size = paths.research_summary.stat().st_size
+    run_schema_size = paths.etoro_payload_schema.stat().st_size
+    latest_schema_size = latest_payload_schema_path.stat().st_size
+    schema_size = run_schema_size + latest_schema_size
+    new_artifacts_size = research_size + summary_size + schema_size
+    ratio = new_artifacts_size / market_size
+    print(
+        'RESEARCH_LOG_BUDGET='
+        + json.dumps(
+            {
+                'market_bytes': market_size,
+                'research_bytes': research_size,
+                'research_summary_bytes': summary_size,
+                'run_payload_schema_bytes': run_schema_size,
+                'latest_payload_schema_bytes': latest_schema_size,
+                'payload_schema_bytes': schema_size,
+                'new_artifacts_bytes': new_artifacts_size,
+                'new_artifacts_ratio_percent': round(ratio * 100, 6),
+            },
+            sort_keys=True,
+        )
+    )
 
     assert len(_read_gzip_jsonl(paths.research)) == 11
     assert market_size > 0
     assert research_size > 0
+    assert summary_size > 0
+    assert run_schema_size > 0
+    assert latest_schema_size > 0
     assert ratio < 0.10, (
-        f'research={research_size} bytes, market={market_size} bytes, '
+        f'new_artifacts={new_artifacts_size} bytes, '
+        f'market={market_size} bytes, '
         f'ratio={ratio:.4%}'
     )

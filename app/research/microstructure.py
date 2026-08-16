@@ -11,7 +11,7 @@ from statistics import median
 
 from app.market.models import MarketSnapshot, PriceSource
 
-MICROSTRUCTURE_CONTRACT_VERSION = 'etoro_microstructure_v1'
+MICROSTRUCTURE_CONTRACT_VERSION = 'etoro_microstructure_v2'
 MICROSTRUCTURE_WINDOWS_SECONDS = (10, 30, 60)
 MICROSTRUCTURE_RETENTION_SECONDS = 120
 MICROSTRUCTURE_MAX_OBSERVATIONS_PER_SYMBOL = 4096
@@ -34,7 +34,7 @@ _COMMON_FEATURE_SUFFIXES = (
     'bid_vs_ask_update_imbalance',
     'last_tick_imbalance',
     'last_change_count',
-    'last_update_activity_ratio',
+    'last_value_change_ratio',
     'spread_mean_bps',
     'spread_change_bps',
     'interarrival_median_ms',
@@ -76,8 +76,10 @@ MICROSTRUCTURE_FORMULA_DEFINITIONS = {
     ),
     'last_tick_imbalance': '(up_last-down_last)/(up_last+down_last)',
     'last_change_count': 'up_last+down_last',
-    'last_update_activity_ratio': (
-        'last_change_count/(canonical_broker_last_count-1)'
+    'last_value_change_ratio': (
+        'canonical broker-last value changes divided by canonical broker-last '
+        'transitions; carried merged values remain observations and this is '
+        'not a LastExecution retransmission rate'
     ),
     'spread_mean_bps': 'mean((ask-bid)/mid*10000)',
     'spread_change_bps': 'spread_bps_last-spread_bps_first',
@@ -228,6 +230,9 @@ def microstructure_contract_metadata() -> dict[str, object]:
         'maximum_observations_per_symbol': (
             MICROSTRUCTURE_MAX_OBSERVATIONS_PER_SYMBOL
         ),
+        'last_execution_presence_source_of_truth': (
+            'etoro_payload_schema patch_presence_count'
+        ),
     }
 
 
@@ -297,7 +302,7 @@ def _window_features(
     result[prefix + 'last_tick_imbalance'] = _tick_imbalance(actual_lasts)
     last_changes = _change_count(actual_lasts)
     result[prefix + 'last_change_count'] = last_changes
-    result[prefix + 'last_update_activity_ratio'] = (
+    result[prefix + 'last_value_change_ratio'] = (
         None
         if len(actual_lasts) < 2
         else _round(last_changes / (len(actual_lasts) - 1))
