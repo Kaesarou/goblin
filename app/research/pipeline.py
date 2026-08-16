@@ -126,6 +126,7 @@ class SideNeutralResearchPipeline:
         self.state_calculation_failure_count = 0
         self.states_missing_quote_count = 0
         self.states_missing_candle_count = 0
+        self.states_missing_boundary_candle_count = 0
         self.states_with_micro_10s_count = 0
         self.states_with_micro_30s_count = 0
         self.states_with_micro_60s_count = 0
@@ -179,46 +180,6 @@ class SideNeutralResearchPipeline:
                 self.microstructure.observe(snapshot)
         except Exception as exc:  # noqa: BLE001 - isolation boundary
             self._record_failure('microstructure_observe', exc)
-
-    def maybe_emit(
-        self,
-        *,
-        symbol: str,
-        state_at: datetime,
-        session_decision,
-    ) -> bool:
-        cutoff = _as_utc(state_at)
-        normalized_symbol = symbol.strip().upper()
-        asset_class = self.research_symbols.get(normalized_symbol)
-        if not self._state_is_expected(
-            asset_class=asset_class,
-            state_at=cutoff,
-            session_decision=session_decision,
-        ):
-            return False
-        self.expected_state_count += 1
-        try:
-            built = self._build_state(
-                symbol=normalized_symbol,
-                asset_class=asset_class,
-                state_at=cutoff,
-                session_decision=session_decision,
-            )
-        except Exception as exc:  # noqa: BLE001 - isolation boundary
-            self.state_calculation_failure_count += 1
-            self._record_failure('research_state_calculation', exc)
-            self._persist_summary(updated_at=cutoff)
-            return False
-        if built is None:
-            self.duplicate_prevented_count += 1
-            self._persist_summary(updated_at=cutoff)
-            return False
-        if self._write_built_states([built]) != 1:
-            self._persist_summary(updated_at=cutoff)
-            return False
-        self._record_emitted_state(built)
-        self._persist_summary(updated_at=cutoff)
-        return True
 
     def emit_boundary(
         self,
@@ -401,6 +362,7 @@ class SideNeutralResearchPipeline:
             if latest_candle is None
             else _as_utc(latest_candle.closed_at)
         )
+        boundary_candle_available = latest_closed == cutoff
         mid = (
             None
             if latest_snapshot is None
@@ -414,21 +376,13 @@ class SideNeutralResearchPipeline:
         last = None if latest_snapshot is None else latest_snapshot.last
         record: dict[str, Any] = {
             'schema_version': RESEARCH_STATE_SCHEMA_VERSION,
-            'research_contract_version': (
-                RESEARCH_STATE_CONTRACT_VERSION
-            ),
-            'microstructure_contract_version': (
-                MICROSTRUCTURE_CONTRACT_VERSION
-            ),
-            'research_feature_set_sha256': (
-                RESEARCH_FEATURE_SET_SHA256
-            ),
+            'research_contract_version': RESEARCH_STATE_CONTRACT_VERSION,
+            'microstructure_contract_version': MICROSTRUCTURE_CONTRACT_VERSION,
+            'research_feature_set_sha256': RESEARCH_FEATURE_SET_SHA256,
             'research_state_id': state_id,
             'state_at': cutoff,
             'feature_cutoff_at': cutoff,
-            'causal_cutoff_convention': (
-                RESEARCH_CAUSAL_CUTOFF_CONVENTION
-            ),
+            'causal_cutoff_convention': RESEARCH_CAUSAL_CUTOFF_CONVENTION,
             'latest_market_timestamp': (
                 None if latest_snapshot is None else latest_snapshot.timestamp
             ),
@@ -448,11 +402,9 @@ class SideNeutralResearchPipeline:
                 cutoff,
                 session_decision.session_start_time,
             ),
-            'time_until_session_end_minutes': (
-                _time_until_session_end_minutes(
-                    cutoff,
-                    session_decision.session_end_time,
-                )
+            'time_until_session_end_minutes': _time_until_session_end_minutes(
+                cutoff,
+                session_decision.session_end_time,
             ),
             'session_progress_ratio': _session_progress(
                 cutoff,
@@ -461,17 +413,11 @@ class SideNeutralResearchPipeline:
             ),
             'weekday_utc': cutoff.weekday(),
             'minute_of_day_utc': cutoff.hour * 60 + cutoff.minute,
-            'bid': (
-                None if latest_snapshot is None else _round(latest_snapshot.bid)
-            ),
-            'ask': (
-                None if latest_snapshot is None else _round(latest_snapshot.ask)
-            ),
+            'bid': None if latest_snapshot is None else _round(latest_snapshot.bid),
+            'ask': None if latest_snapshot is None else _round(latest_snapshot.ask),
             'last': None if last is None else _round(last),
             'mid': None if mid is None else _round(mid),
-            'observed_spread': (
-                None if spread is None else _round(spread)
-            ),
+            'observed_spread': None if spread is None else _round(spread),
             'observed_spread_percent': (
                 None
                 if mid is None or mid <= 0 or spread is None
@@ -486,9 +432,7 @@ class SideNeutralResearchPipeline:
                 None
                 if latest_snapshot is None
                 else _round(
-                    (
-                        cutoff - _as_utc(latest_snapshot.timestamp)
-                    ).total_seconds()
+                    (cutoff - _as_utc(latest_snapshot.timestamp)).total_seconds()
                 )
             ),
             'quote_receive_freshness_seconds': (
@@ -505,18 +449,15 @@ class SideNeutralResearchPipeline:
                 )
             ),
             'latest_candle_available': latest_candle is not None,
+            'boundary_candle_available': boundary_candle_available,
             'latest_candle_sample_count': (
                 None if latest_candle is None else latest_candle.sample_count
             ),
             'latest_candle_carried_forward': (
-                None
-                if latest_candle is None
-                else latest_candle.carried_forward
+                None if latest_candle is None else latest_candle.carried_forward
             ),
             'latest_candle_quality_degraded': (
-                None
-                if latest_candle is None
-                else latest_candle.quality_degraded
+                None if latest_candle is None else latest_candle.quality_degraded
             ),
             'latest_candle_source_price_age_seconds': (
                 None
@@ -601,6 +542,8 @@ class SideNeutralResearchPipeline:
             self.states_missing_quote_count += 1
         if not record['latest_candle_available']:
             self.states_missing_candle_count += 1
+        if not record['boundary_candle_available']:
+            self.states_missing_boundary_candle_count += 1
         if record['micro_10s_available']:
             self.states_with_micro_10s_count += 1
         if record['micro_30s_available']:
@@ -648,9 +591,7 @@ class SideNeutralResearchPipeline:
             {
                 'expected_state_count': self.expected_state_count,
                 'emitted_state_count': self.emitted_state_count,
-                'skipped_not_tradable_count': (
-                    self.skipped_not_tradable_count
-                ),
+                'skipped_not_tradable_count': self.skipped_not_tradable_count,
                 'duplicate_prevented_count': self.duplicate_prevented_count,
                 'state_calculation_failure_count': (
                     self.state_calculation_failure_count
@@ -662,51 +603,34 @@ class SideNeutralResearchPipeline:
                     0,
                 ),
                 'states_missing_quote_count': self.states_missing_quote_count,
-                'states_missing_candle_count': (
-                    self.states_missing_candle_count
+                'states_missing_candle_count': self.states_missing_candle_count,
+                'states_missing_boundary_candle_count': (
+                    self.states_missing_boundary_candle_count
                 ),
-                'states_with_micro_10s_count': (
-                    self.states_with_micro_10s_count
-                ),
-                'states_with_micro_30s_count': (
-                    self.states_with_micro_30s_count
-                ),
-                'states_with_micro_60s_count': (
-                    self.states_with_micro_60s_count
-                ),
+                'states_with_micro_10s_count': self.states_with_micro_10s_count,
+                'states_with_micro_30s_count': self.states_with_micro_30s_count,
+                'states_with_micro_60s_count': self.states_with_micro_60s_count,
                 'first_state_at': self.first_state_at,
                 'last_state_at': self.last_state_at,
                 'boundary_count': self.boundary_count,
                 'last_boundary_at': self.last_boundary_at,
-                'last_boundary_duration_ms': (
-                    self.last_boundary_duration_ms
-                ),
-                'last_boundary_calculation_ms': (
-                    self.last_boundary_calculation_ms
-                ),
-                'last_boundary_persistence_ms': (
-                    self.last_boundary_persistence_ms
-                ),
-                'maximum_boundary_duration_ms': (
-                    self.maximum_boundary_duration_ms
-                ),
+                'last_boundary_duration_ms': self.last_boundary_duration_ms,
+                'last_boundary_calculation_ms': self.last_boundary_calculation_ms,
+                'last_boundary_persistence_ms': self.last_boundary_persistence_ms,
+                'maximum_boundary_duration_ms': self.maximum_boundary_duration_ms,
                 'maximum_boundary_calculation_ms': (
                     self.maximum_boundary_calculation_ms
                 ),
                 'maximum_boundary_persistence_ms': (
                     self.maximum_boundary_persistence_ms
                 ),
-                'total_research_processing_ms': (
-                    self.total_research_processing_ms
-                ),
+                'total_research_processing_ms': self.total_research_processing_ms,
                 'research_journal_open_count': getattr(
                     self.journal,
                     'open_count',
                     0,
                 ),
-                'summary_write_failure_count': (
-                    self.summary_write_failure_count
-                ),
+                'summary_write_failure_count': self.summary_write_failure_count,
             }
         )
         return result
@@ -794,25 +718,15 @@ def _flatten_market_context(
     spread = context.spread
     return {
         'market_regime': context.regime.value,
-        'context_latest_symbol_timestamp': (
-            context.latest_symbol_timestamp
-        ),
-        'symbol_session_return_percent': (
-            context.symbol_session_return_percent
-        ),
-        'symbol_relative_strength_percent': (
-            context.symbol_relative_strength_percent
-        ),
+        'context_latest_symbol_timestamp': context.latest_symbol_timestamp,
+        'symbol_session_return_percent': context.symbol_session_return_percent,
+        'symbol_relative_strength_percent': context.symbol_relative_strength_percent,
         'benchmark_symbol': benchmark.symbol,
         'benchmark_available': benchmark.available,
-        'benchmark_session_return_percent': (
-            benchmark.session_return_percent
-        ),
+        'benchmark_session_return_percent': benchmark.session_return_percent,
         'benchmark_momentum_percent': benchmark.momentum_percent,
         'benchmark_spread_percent': benchmark.spread_percent,
-        'benchmark_snapshot_age_seconds': (
-            benchmark.snapshot_age_seconds
-        ),
+        'benchmark_snapshot_age_seconds': benchmark.snapshot_age_seconds,
         'breadth_available': breadth.available,
         'breadth_valid_symbols': breadth.valid_symbols,
         'breadth_coverage_ratio': breadth.coverage_ratio,
@@ -824,9 +738,7 @@ def _flatten_market_context(
         'sector_available': sector.available,
         'sector_valid_member_count': sector.valid_member_count,
         'sector_advancing_ratio': sector.advancing_ratio,
-        'sector_median_session_return_percent': (
-            sector.median_session_return_percent
-        ),
+        'sector_median_session_return_percent': sector.median_session_return_percent,
         'relative_spread_available': spread.available,
         'relative_spread_ratio': spread.relative_to_median,
         'relative_spread_percentile': spread.reference_percentile,
@@ -872,10 +784,7 @@ def _time_until_session_end_minutes(
     return _round(
         max(
             0.0,
-            (
-                _as_utc(session_end_time) - _as_utc(state_at)
-            ).total_seconds()
-            / 60,
+            (_as_utc(session_end_time) - _as_utc(state_at)).total_seconds() / 60,
         ),
         digits=4,
     )
@@ -889,12 +798,7 @@ def _session_minute(
         return None
     return max(
         0,
-        int(
-            (
-                state_at - _as_utc(session_start_time)
-            ).total_seconds()
-            // 60
-        ),
+        int((state_at - _as_utc(session_start_time)).total_seconds() // 60),
     )
 
 

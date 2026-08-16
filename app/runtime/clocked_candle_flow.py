@@ -1,5 +1,4 @@
-from __future__ import annotations
-
+import logging
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
@@ -10,6 +9,8 @@ from app.runtime.runtime_policy import (
     CANDLE_MAX_CARRY_FORWARD_AGE_SECONDS,
 )
 from app.runtime.symbol_flow import process_closed_candle
+
+logger = logging.getLogger(__name__)
 
 
 class ClockedCandleFlow:
@@ -138,11 +139,17 @@ class ClockedCandleFlow:
             return
         self._last_research_boundary = state_at
         session_decisions = getattr(self, 'session_decisions', {})
-        research_pipeline.emit_boundary(
-            symbols=list(getattr(self, 'symbols', ())),
-            state_at=state_at,
-            session_decisions=session_decisions,
-        )
+        try:
+            research_pipeline.emit_boundary(
+                symbols=list(getattr(self, 'symbols', ())),
+                state_at=state_at,
+                session_decisions=session_decisions,
+            )
+        except Exception:  # noqa: BLE001 - final research isolation boundary
+            logger.exception(
+                'Research boundary failed without affecting trading | state_at=%s',
+                state_at,
+            )
 
 
 def _latest_due_research_boundary(
@@ -153,10 +160,7 @@ def _latest_due_research_boundary(
     eligible = _as_utc(value) - timedelta(
         seconds=CANDLE_CLOCK_GRACE_SECONDS
     )
-    minute = (
-        eligible.minute
-        - eligible.minute % cadence_minutes
-    )
+    minute = eligible.minute - eligible.minute % cadence_minutes
     return eligible.replace(minute=minute, second=0, microsecond=0)
 
 

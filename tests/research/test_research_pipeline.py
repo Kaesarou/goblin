@@ -216,16 +216,26 @@ def _observe_quote(
     )
 
 
+def _emit_one(pipeline, *, symbol, state_at, session_decision) -> bool:
+    result = pipeline.emit_boundary(
+        symbols=[symbol],
+        state_at=state_at,
+        session_decisions={symbol: session_decision},
+    )
+    return result.emitted_state_count == 1
+
+
 def test_eu_and_us_emit_without_candidate_or_portfolio_capacity():
     pipeline, decisions = _pipeline()
     for symbol in ('AIR.PA', 'AAPL'):
         _observe_quote(pipeline, symbol)
-        assert pipeline.maybe_emit(
-            symbol=symbol,
-            state_at=STATE_AT,
-            session_decision=decisions[symbol],
-        )
+    result = pipeline.emit_boundary(
+        symbols=['AIR.PA', 'AAPL'],
+        state_at=STATE_AT,
+        session_decisions=decisions,
+    )
 
+    assert result.emitted_state_count == 2
     records = [payload for _, payload in pipeline.journal.events]
     assert {record['symbol'] for record in records} == {'AIR.PA', 'AAPL'}
     assert {record['asset_class'] for record in records} == {
@@ -237,6 +247,7 @@ def test_eu_and_us_emit_without_candidate_or_portfolio_capacity():
     assert all(record['state_at'] == STATE_AT for record in records)
     assert all(len(record['research_feature_set_sha256']) == 64 for record in records)
     assert all(record['micro_60s_quote_count'] == 1 for record in records)
+    assert all(record['boundary_candle_available'] for record in records)
 
 
 def test_cadence_and_last_hour_boundaries_are_exact():
@@ -244,8 +255,6 @@ def test_cadence_and_last_hour_boundaries_are_exact():
         (31, 120.0, True, False),
         (30, 60.0, False, False),
         (30, 60.0001, True, True),
-        # The decision can have been evaluated just after state_at. Finite
-        # session eligibility is therefore recomputed at state_at.
         (30, 120.0, False, True),
     ):
         pipeline, _ = _pipeline()
@@ -271,27 +280,21 @@ def test_cadence_and_last_hour_boundaries_are_exact():
                 received_at=observed_at,
             )
         )
-
-        emitted = pipeline.maybe_emit(
+        assert _emit_one(
+            pipeline,
             symbol='AAPL',
             state_at=state_at,
             session_decision=decision,
-        )
-
-        assert emitted is expected
+        ) is expected
 
 
 def test_cutoff_recomputes_remaining_time_instead_of_using_stale_decision():
     pipeline, _ = _pipeline()
-    decision = _decision(
-        AssetClass.EQUITY_US,
-        remaining=120.0,
-        new_entries_allowed=True,
-    )
+    decision = _decision(AssetClass.EQUITY_US, remaining=120.0)
     decision.session_end_time = STATE_AT + timedelta(minutes=60)
     _observe_quote(pipeline, 'AAPL')
-
-    assert pipeline.maybe_emit(
+    assert _emit_one(
+        pipeline,
         symbol='AAPL',
         state_at=STATE_AT,
         session_decision=decision,
@@ -302,8 +305,8 @@ def test_state_at_or_before_collection_start_is_not_backfilled():
     pipeline, decisions = _pipeline()
     pipeline.collection_started_at = STATE_AT
     _observe_quote(pipeline, 'AAPL')
-
-    assert pipeline.maybe_emit(
+    assert _emit_one(
+        pipeline,
         symbol='AAPL',
         state_at=STATE_AT,
         session_decision=decisions['AAPL'],
@@ -313,12 +316,7 @@ def test_state_at_or_before_collection_start_is_not_backfilled():
 def test_quote_cutoff_rejects_future_market_or_receive_timestamp():
     pipeline, decisions = _pipeline()
     _observe_quote(pipeline, 'AAPL', seconds_before=3)
-    _observe_quote(
-        pipeline,
-        'AAPL',
-        seconds_before=2,
-        market_seconds_before=0,
-    )
+    _observe_quote(pipeline, 'AAPL', seconds_before=2, market_seconds_before=0)
     pipeline.observe_accepted_snapshot(
         MarketSnapshot(
             symbol='AAPL',
@@ -329,14 +327,13 @@ def test_quote_cutoff_rejects_future_market_or_receive_timestamp():
             received_at=STATE_AT,
         )
     )
-
-    assert pipeline.maybe_emit(
+    assert _emit_one(
+        pipeline,
         symbol='AAPL',
         state_at=STATE_AT,
         session_decision=decisions['AAPL'],
     )
     record = pipeline.journal.events[0][1]
-
     assert record['latest_market_timestamp'] == STATE_AT - timedelta(seconds=3)
     assert record['latest_market_received_at'] == STATE_AT - timedelta(seconds=3)
     assert record['micro_10s_quote_count'] == 1
@@ -344,14 +341,13 @@ def test_quote_cutoff_rejects_future_market_or_receive_timestamp():
 
 def test_missing_causal_quote_still_records_state_and_availability():
     pipeline, decisions = _pipeline()
-
-    assert pipeline.maybe_emit(
+    assert _emit_one(
+        pipeline,
         symbol='AAPL',
         state_at=STATE_AT,
         session_decision=decisions['AAPL'],
     )
     record = pipeline.journal.events[0][1]
-
     assert record['quote_available'] is False
     assert record['bid'] is None
     assert record['ask'] is None
@@ -365,18 +361,37 @@ def test_state_is_emitted_when_the_boundary_candle_is_missing():
     pipeline, decisions = _pipeline()
     pipeline.multi_timeframe_service.bars_by_symbol['AAPL'] = []
     _observe_quote(pipeline, 'AAPL')
-
-    assert pipeline.maybe_emit(
+    assert _emit_one(
+        pipeline,
         symbol='AAPL',
         state_at=STATE_AT,
         session_decision=decisions['AAPL'],
     )
     record = pipeline.journal.events[0][1]
-
     assert record['latest_candle_available'] is False
+    assert record['boundary_candle_available'] is False
     assert record['latest_closed_candle_timestamp'] is None
     assert record['latest_candle_sample_count'] is None
     assert record['candle_coverage_60m_ratio'] == 0.0
+
+
+def test_stale_latest_candle_is_distinct_from_boundary_candle_availability():
+    pipeline, decisions = _pipeline()
+    session_key = decisions['AAPL'].session_key
+    pipeline.multi_timeframe_service.bars_by_symbol['AAPL'] = [
+        _bar('AAPL', session_key, STATE_AT - timedelta(minutes=1))
+    ]
+    _observe_quote(pipeline, 'AAPL')
+    assert _emit_one(
+        pipeline,
+        symbol='AAPL',
+        state_at=STATE_AT,
+        session_decision=decisions['AAPL'],
+    )
+    record = pipeline.journal.events[0][1]
+    assert record['latest_candle_available'] is True
+    assert record['boundary_candle_available'] is False
+    assert record['latest_closed_candle_timestamp'] == STATE_AT - timedelta(minutes=1)
 
 
 def test_rest_fallback_quote_is_provenanced_but_excluded_from_ws_microstructure():
@@ -394,31 +409,27 @@ def test_rest_fallback_quote_is_provenanced_but_excluded_from_ws_microstructure(
         ),
         source=MarketDataSource.REST_FALLBACK,
     )
-
-    assert pipeline.maybe_emit(
+    assert _emit_one(
+        pipeline,
         symbol='AAPL',
         state_at=STATE_AT,
         session_decision=decisions['AAPL'],
     )
     record = pipeline.journal.events[0][1]
-
     assert record['latest_market_source'] == 'rest_fallback'
     assert record['last'] == 101.0
     assert record['micro_10s_quote_count'] == 1
 
 
 def test_research_journal_failure_is_contained_and_observable():
-    journal = RecordingJournal(raises=True)
-    pipeline, decisions = _pipeline(journal=journal)
+    pipeline, decisions = _pipeline(journal=RecordingJournal(raises=True))
     _observe_quote(pipeline, 'AAPL')
-
-    emitted = pipeline.maybe_emit(
+    assert _emit_one(
+        pipeline,
         symbol='AAPL',
         state_at=STATE_AT,
         session_decision=decisions['AAPL'],
-    )
-
-    assert emitted is False
+    ) is False
     assert pipeline.failure_count == 1
 
 
@@ -427,21 +438,17 @@ def test_boundary_batches_states_and_isolates_symbol_calculation_failure():
     _observe_quote(pipeline, 'AIR.PA')
     _observe_quote(pipeline, 'AAPL')
     del pipeline.multi_timeframe_service.bars_by_symbol['AAPL']
-
     result = pipeline.emit_boundary(
         symbols=['AIR.PA', 'AAPL'],
         state_at=STATE_AT,
         session_decisions=decisions,
     )
-
     assert result.expected_state_count == 2
     assert result.emitted_state_count == 1
     assert result.state_calculation_failure_count == 1
     assert result.journal_write_failure_count == 0
     assert pipeline.journal.open_count == 1
-    assert [payload['symbol'] for _, payload in pipeline.journal.events] == [
-        'AIR.PA'
-    ]
+    assert [payload['symbol'] for _, payload in pipeline.journal.events] == ['AIR.PA']
     assert pipeline.expected_state_count == 2
     assert pipeline.emitted_state_count == 1
     assert pipeline.state_calculation_failure_count == 1
@@ -451,13 +458,11 @@ def test_boundary_batch_write_failure_is_isolated_and_health_visible():
     pipeline, decisions = _pipeline(journal=RecordingJournal(raises=True))
     _observe_quote(pipeline, 'AIR.PA')
     _observe_quote(pipeline, 'AAPL')
-
     result = pipeline.emit_boundary(
         symbols=['AIR.PA', 'AAPL'],
         state_at=STATE_AT,
         session_decisions=decisions,
     )
-
     assert result.expected_state_count == 2
     assert result.emitted_state_count == 0
     assert result.journal_write_failure_count == 2
@@ -468,7 +473,6 @@ def test_boundary_batch_write_failure_is_isolated_and_health_visible():
 
 def test_duplicate_boundary_does_not_inflate_expected_state_count():
     pipeline, decisions = _pipeline()
-
     first = pipeline.emit_boundary(
         symbols=['AIR.PA', 'AAPL'],
         state_at=STATE_AT,
@@ -479,7 +483,6 @@ def test_duplicate_boundary_does_not_inflate_expected_state_count():
         state_at=STATE_AT,
         session_decisions=decisions,
     )
-
     assert first.expected_state_count == 2
     assert duplicate.expected_state_count == 0
     assert pipeline.expected_state_count == 2
@@ -488,12 +491,9 @@ def test_duplicate_boundary_does_not_inflate_expected_state_count():
 
 
 def test_run_scoped_health_summary_is_atomic_and_counts_missing_inputs(tmp_path):
-    summary_path = tmp_path / 'data' / 'logs' / 'runs' / 'run-test' / (
-        'research_summary.json'
-    )
+    summary_path = tmp_path / 'data' / 'logs' / 'runs' / 'run-test' / 'research_summary.json'
     pipeline, decisions = _pipeline(summary_path=summary_path)
     pipeline.multi_timeframe_service.bars_by_symbol['AAPL'] = []
-
     result = pipeline.emit_boundary(
         symbols=['AAPL'],
         state_at=STATE_AT,
@@ -501,7 +501,6 @@ def test_run_scoped_health_summary_is_atomic_and_counts_missing_inputs(tmp_path)
     )
     pipeline.flush()
     summary = json.loads(summary_path.read_text(encoding='utf-8'))
-
     assert result.expected_state_count == 1
     assert result.emitted_state_count == 1
     assert summary['schema_version'] == 'research_summary_v1'
@@ -510,17 +509,35 @@ def test_run_scoped_health_summary_is_atomic_and_counts_missing_inputs(tmp_path)
     assert summary['emitted_state_count'] == 1
     assert summary['states_missing_quote_count'] == 1
     assert summary['states_missing_candle_count'] == 1
+    assert summary['states_missing_boundary_candle_count'] == 1
     assert summary['boundary_count'] == 1
     assert summary['research_journal_open_count'] == 1
     assert summary['last_boundary_duration_ms'] >= 0
     assert not summary_path.with_suffix('.json.tmp').exists()
 
 
+def test_run_scoped_health_counts_stale_latest_candle_as_missing_boundary(tmp_path):
+    summary_path = tmp_path / 'research_summary.json'
+    pipeline, decisions = _pipeline(summary_path=summary_path)
+    session_key = decisions['AAPL'].session_key
+    pipeline.multi_timeframe_service.bars_by_symbol['AAPL'] = [
+        _bar('AAPL', session_key, STATE_AT - timedelta(minutes=1))
+    ]
+    result = pipeline.emit_boundary(
+        symbols=['AAPL'],
+        state_at=STATE_AT,
+        session_decisions=decisions,
+    )
+    summary = json.loads(summary_path.read_text(encoding='utf-8'))
+    assert result.emitted_state_count == 1
+    assert summary['states_missing_candle_count'] == 0
+    assert summary['states_missing_boundary_candle_count'] == 1
+
+
 def test_run_start_does_not_create_expected_states_for_earlier_boundary(tmp_path):
     summary_path = tmp_path / 'research_summary.json'
     pipeline, decisions = _pipeline(summary_path=summary_path)
     pipeline.collection_started_at = STATE_AT
-
     result = pipeline.emit_boundary(
         symbols=['AAPL'],
         state_at=STATE_AT,
@@ -528,7 +545,6 @@ def test_run_start_does_not_create_expected_states_for_earlier_boundary(tmp_path
     )
     pipeline.flush()
     summary = json.loads(summary_path.read_text(encoding='utf-8'))
-
     assert result.expected_state_count == 0
     assert summary['expected_state_count'] == 0
     assert summary['emitted_state_count'] == 0
@@ -536,11 +552,8 @@ def test_run_start_does_not_create_expected_states_for_earlier_boundary(tmp_path
 
 
 def test_disabled_run_has_bounded_research_summary_without_journal(tmp_path):
-    summary_path = tmp_path / 'data' / 'logs' / 'runs' / 'run-test' / (
-        'research_summary.json'
-    )
+    summary_path = tmp_path / 'data' / 'logs' / 'runs' / 'run-test' / 'research_summary.json'
     research_journal_path = summary_path.with_name('research.jsonl.gz')
-
     write_research_summary(
         summary_path,
         empty_research_summary(
@@ -550,8 +563,8 @@ def test_disabled_run_has_bounded_research_summary_without_journal(tmp_path):
         ),
     )
     summary = json.loads(summary_path.read_text(encoding='utf-8'))
-
     assert summary['research_enabled'] is False
     assert summary['expected_state_count'] == 0
     assert summary['emitted_state_count'] == 0
+    assert summary['states_missing_boundary_candle_count'] == 0
     assert not research_journal_path.exists()

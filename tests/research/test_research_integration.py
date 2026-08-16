@@ -113,11 +113,12 @@ def test_production_context_and_mtf_services_build_a_causal_flat_state():
         )
 
     state_at = session_start + timedelta(minutes=65)
-    assert pipeline.maybe_emit(
-        symbol='AAPL',
+    result = pipeline.emit_boundary(
+        symbols=['AAPL'],
         state_at=state_at,
-        session_decision=decision,
+        session_decisions={'AAPL': decision},
     )
+    assert result.emitted_state_count == 1
     record = journal.events[0][1]
 
     assert record['state_at'] == state_at
@@ -127,6 +128,7 @@ def test_production_context_and_mtf_services_build_a_causal_flat_state():
         milliseconds=500
     )
     assert record['latest_closed_candle_timestamp'] == state_at
+    assert record['boundary_candle_available'] is True
     assert record['context_latest_symbol_timestamp'] < state_at
     assert record['candle_coverage_60m_ratio'] == 1.0
     assert record['return_60m_percent'] is not None

@@ -42,6 +42,7 @@ def empty_research_summary(
         'payload_schema_failure_count': 0,
         'states_missing_quote_count': 0,
         'states_missing_candle_count': 0,
+        'states_missing_boundary_candle_count': 0,
         'states_with_micro_10s_count': 0,
         'states_with_micro_30s_count': 0,
         'states_with_micro_60s_count': 0,
@@ -67,6 +68,14 @@ def research_summary_contract_metadata() -> dict[str, object]:
         'role': 'run_scoped_research_completeness_and_health',
         'expected_state_definition': RESEARCH_EXPECTED_STATE_DEFINITION,
         'emitted_state_definition': RESEARCH_EMITTED_STATE_DEFINITION,
+        'missing_candle_definitions': {
+            'states_missing_candle_count': (
+                'No causal closed M1 candle exists at or before state_at.'
+            ),
+            'states_missing_boundary_candle_count': (
+                'No causal closed M1 candle exists with closed_at == state_at.'
+            ),
+        },
         'atomic_write': True,
         'update_cadence': 'startup_each_observed_boundary_and_clean_shutdown',
         'bounded': True,
