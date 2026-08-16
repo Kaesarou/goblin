@@ -120,7 +120,9 @@ def test_run_manifest_captures_segmented_probability_contract():
         'analysis_ready_summary': 13,
         'research_state': 1,
         'research_summary': 'research_summary_v1',
-        'research_reconstructibility': 'research_reconstructibility_v1',
+        'research_reconstructibility': (
+            RESEARCH_RECONSTRUCTIBILITY_CONTRACT_VERSION
+        ),
     }
     assert manifest['strategy']['breakeven_profile'] == (
         BreakevenProfileName.CORRECTED_BASELINE_V1
