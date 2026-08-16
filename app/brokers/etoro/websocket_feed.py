@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from app.brokers.etoro.websocket_protocol import (
+    WebSocketPayloadObserver,
     build_authentication_request,
     build_subscription_request,
     parse_json_frame,
@@ -34,12 +35,14 @@ class EtoroWebSocketMarketDataFeed(LiveMarketDataFeed):
         queue_capacity: int,
         global_silence_seconds: float,
         connector: Callable | None = None,
+        payload_observer: WebSocketPayloadObserver | None = None,
     ) -> None:
         self.api_key = api_key
         self.user_key = user_key
         self.rest_client = rest_client
         self.global_silence_seconds = global_silence_seconds
         self.connector = connector or _default_connector
+        self.payload_observer = payload_observer
         self._queue: queue.Queue[MarketDataEvent] = queue.Queue(
             maxsize=queue_capacity
         )
@@ -290,6 +293,7 @@ class EtoroWebSocketMarketDataFeed(LiveMarketDataFeed):
                     received_at=received_at,
                     connection_id=connection_id,
                     rate_state_by_instrument_id=state,
+                    payload_observer=self.payload_observer,
                 ):
                     self._publish(event)
 

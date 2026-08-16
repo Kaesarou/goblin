@@ -24,6 +24,22 @@ def test_paper_uses_etoro_websocket_with_execution_only_paper_broker(tmp_path):
     assert isinstance(clients.execution_broker, CachedBrokerClient)
     assert isinstance(clients.execution_broker.delegate, PaperBrokerClient)
     assert clients.live_market_data.rest_client is clients.rest_market_data
+    assert clients.live_market_data.payload_observer is None
+
+
+def test_optional_payload_observer_is_only_installed_when_injected(tmp_path):
+    observed = []
+
+    def observer(*args):
+        observed.append(args)
+
+    clients = build_runtime_clients(
+        _settings(tmp_path, 'paper'),
+        websocket_payload_observer=observer,
+    )
+
+    assert clients.live_market_data.payload_observer is observer
+    assert observed == []
 
 
 def test_demo_shares_resolved_instrument_mapping_with_execution(tmp_path):

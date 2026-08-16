@@ -1,7 +1,6 @@
-from __future__ import annotations
-
+import logging
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timedelta
 
 from app.market.models import MarketSnapshot
 from app.market_data.models import CandleBuildResult
@@ -10,6 +9,8 @@ from app.runtime.runtime_policy import (
     CANDLE_MAX_CARRY_FORWARD_AGE_SECONDS,
 )
 from app.runtime.symbol_flow import process_closed_candle
+
+logger = logging.getLogger(__name__)
 
 
 class ClockedCandleFlow:
@@ -38,6 +39,7 @@ class ClockedCandleFlow:
                     now=now,
                     source='clock',
                 )
+        self._emit_due_research_states(now)
 
     def _process_candle_result(
         self,
@@ -125,8 +127,44 @@ class ClockedCandleFlow:
             )
         self._last_bucket_by_symbol[symbol] = enriched_candle.opened_at
 
+    def _emit_due_research_states(self, now: datetime) -> None:
+        research_pipeline = getattr(self, 'research_pipeline', None)
+        if research_pipeline is None:
+            return
+        state_at = _latest_due_research_boundary(
+            now,
+            cadence_minutes=research_pipeline.sampling_cadence_minutes,
+        )
+        if state_at == getattr(self, '_last_research_boundary', None):
+            return
+        self._last_research_boundary = state_at
+        session_decisions = getattr(self, 'session_decisions', {})
+        try:
+            research_pipeline.emit_boundary(
+                symbols=list(getattr(self, 'symbols', ())),
+                state_at=state_at,
+                session_decisions=session_decisions,
+            )
+        except Exception:  # noqa: BLE001 - final research isolation boundary
+            logger.exception(
+                'Research boundary failed without affecting trading | state_at=%s',
+                state_at,
+            )
+
+
+def _latest_due_research_boundary(
+    value: datetime,
+    *,
+    cadence_minutes: int,
+) -> datetime:
+    eligible = _as_utc(value) - timedelta(
+        seconds=CANDLE_CLOCK_GRACE_SECONDS
+    )
+    minute = eligible.minute - eligible.minute % cadence_minutes
+    return eligible.replace(minute=minute, second=0, microsecond=0)
+
 
 def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)

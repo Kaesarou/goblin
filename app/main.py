@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 
 from app.brokers.etoro.order_payload_builder import (
     SELLSHORT_SAFETY_SL_BUFFER_PERCENT,
@@ -9,6 +10,7 @@ from app.execution.candidate_economics import CandidateEconomicsEstimator
 from app.execution.position_tracker import PositionTracker
 from app.execution.trade_executor import TradeExecutor
 from app.instruments.instrument_registry import InstrumentRegistry
+from app.instruments.models import AssetClass
 from app.journal.analysis_journal import AnalysisJournal
 from app.journal.jsonl_journal import JsonlJournal
 from app.journal.raw_data_journal import RawDataJournal
@@ -27,6 +29,14 @@ from app.market_data.models import MARKET_DATA_MODEL_VERSION
 from app.persistence.pending_close_store import PendingCloseStore
 from app.persistence.position_store import PositionStore
 from app.persistence.trade_cooldown_store import TradeCooldownStore
+from app.research.payload_schema_observer import (
+    EtoroPayloadSchemaObserver,
+)
+from app.research.pipeline import SideNeutralResearchPipeline
+from app.research.summary import (
+    empty_research_summary,
+    write_research_summary,
+)
 from app.risk.position_sizing import FixedPercentPositionSizing
 from app.risk.risk_manager import RiskManager
 from app.risk.trade_cooldown_guard import TradeCooldownGuard
@@ -193,6 +203,28 @@ def _build_analysis_journal(
     )
 
 
+def _write_disabled_research_summary(
+    *,
+    path: Path,
+    run_id: str,
+    updated_at: datetime,
+) -> None:
+    try:
+        write_research_summary(
+            path,
+            empty_research_summary(
+                run_id=run_id,
+                enabled=False,
+                updated_at=updated_at,
+            ),
+        )
+    except Exception:
+        logger.exception(
+            'Disabled research summary write failed | path=%s',
+            path,
+        )
+
+
 def main() -> None:
     started_at = datetime.now(timezone.utc)
     run_id = build_run_id(started_at)
@@ -235,6 +267,41 @@ def main() -> None:
     )
     manifest['models']['market_data'] = MARKET_DATA_MODEL_VERSION
     manifest['runtime']['market_data'] = build_market_data_manifest()
+    latest_payload_schema_path = (
+        Path(settings.journal_path).parent
+        / 'etoro_payload_schema.json'
+    )
+    manifest['runtime']['research'].update(
+        {
+            'research_journal_path': str(run_paths.research),
+            'research_summary_path': str(run_paths.research_summary),
+            'payload_schema_observer_path': str(
+                run_paths.etoro_payload_schema
+            ),
+            'latest_payload_schema_observer_path': str(
+                latest_payload_schema_path
+            ),
+        }
+    )
+    manifest['analysis_sources']['research_stream'] = str(
+        run_paths.research
+    )
+    manifest['analysis_sources']['research_summary'] = str(
+        run_paths.research_summary
+    )
+    manifest['analysis_sources']['etoro_payload_schema'] = str(
+        run_paths.etoro_payload_schema
+    )
+    manifest['files']['research'] = str(run_paths.research)
+    manifest['files']['research_summary'] = str(
+        run_paths.research_summary
+    )
+    manifest['files']['etoro_payload_schema'] = str(
+        run_paths.etoro_payload_schema
+    )
+    manifest['files']['latest_etoro_payload_schema'] = str(
+        latest_payload_schema_path
+    )
     manifest['runtime']['journals'] = {
         'run_root': str(run_paths.root),
         'compressed': True,
@@ -249,7 +316,6 @@ def main() -> None:
     write_run_manifest(archived_manifest_path, manifest)
     write_run_manifest(settings.run_manifest_path, manifest)
 
-    clients = build_runtime_clients(settings)
     strategies = build_strategies(symbols, instrument_registry)
     candle_builders = build_candle_builders(symbols)
     trading_session_service = trading_session_service_from_settings(settings)
@@ -258,7 +324,6 @@ def main() -> None:
     candidate_economics_estimator = build_candidate_economics_estimator(
         instrument_registry
     )
-    executor = TradeExecutor(clients.execution_broker)
     position_tracker = PositionTracker()
     position_store = PositionStore(settings.position_store_path)
     pending_close_store = PendingCloseStore(settings.position_store_path)
@@ -298,6 +363,61 @@ def main() -> None:
         ),
         trade_journal.record_raw_event,
     )
+    research_pipeline = None
+    if settings.research_enabled:
+        research_symbols = {}
+        asset_class_by_symbol = {}
+        for symbol in symbols:
+            asset_class = instrument_registry.resolve(symbol).asset_class
+            asset_class_by_symbol[symbol] = asset_class
+            if asset_class in {AssetClass.EQUITY_EU, AssetClass.EQUITY_US}:
+                research_symbols[symbol] = asset_class
+        for asset_class, benchmark_symbols in (
+            settings.benchmark_symbols_by_asset_class().items()
+        ):
+            for benchmark_symbol in benchmark_symbols:
+                asset_class_by_symbol.setdefault(
+                    benchmark_symbol,
+                    asset_class,
+                )
+        research_pipeline = SideNeutralResearchPipeline(
+            research_symbols=research_symbols,
+            asset_class_by_symbol=asset_class_by_symbol,
+            journal=JsonlJournal(
+                str(run_paths.research),
+                run_id=run_id,
+                stream_name='research',
+                compact=True,
+            ),
+            payload_schema_observer=EtoroPayloadSchemaObserver(
+                run_id=run_id,
+                paths=(
+                    run_paths.etoro_payload_schema,
+                    latest_payload_schema_path,
+                ),
+            ),
+            market_context_service=market_context_service,
+            multi_timeframe_service=multi_timeframe_service,
+            collection_started_at=started_at,
+            run_id=run_id,
+            summary_path=str(run_paths.research_summary),
+        )
+        research_pipeline.flush()
+    else:
+        _write_disabled_research_summary(
+            path=run_paths.research_summary,
+            run_id=run_id,
+            updated_at=started_at,
+        )
+    clients = build_runtime_clients(
+        settings,
+        websocket_payload_observer=(
+            None
+            if research_pipeline is None
+            else research_pipeline.observe_websocket_payload
+        ),
+    )
+    executor = TradeExecutor(clients.execution_broker)
     heartbeat = RuntimeHeartbeat(settings.runtime_heartbeat_minutes)
     runtime = EventDrivenMarketRuntime(
         settings=settings,
@@ -329,6 +449,7 @@ def main() -> None:
         candle_journal=candle_journal,
         heartbeat=heartbeat,
         is_broker_authorization_error=is_broker_authorization_error,
+        research_pipeline=research_pipeline,
     )
     trade_journal.write(
         'runtime_started',
@@ -387,6 +508,14 @@ def main() -> None:
     finally:
         if run_status == 'running':
             run_status = 'completed'
+        if research_pipeline is not None:
+            research_pipeline.flush()
+        else:
+            _write_disabled_research_summary(
+                path=run_paths.research_summary,
+                run_id=run_id,
+                updated_at=datetime.now(timezone.utc),
+            )
         for symbol in symbols:
             runtime._write_partial_timeframe_bars(
                 symbol,

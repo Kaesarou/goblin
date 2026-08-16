@@ -71,6 +71,9 @@ class MarketDataSessionFlow:
             self.strategies[symbol] = TrendStrategy(
                 self.instrument_registry.config_for(symbol).trend
             )
+            research_pipeline = getattr(self, 'research_pipeline', None)
+            if research_pipeline is not None:
+                research_pipeline.reset_symbol(symbol)
             self._last_bucket_by_symbol.pop(symbol, None)
             self._degraded_buckets = {
                 item for item in self._degraded_buckets if item[0] != symbol

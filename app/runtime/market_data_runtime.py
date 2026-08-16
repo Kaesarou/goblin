@@ -93,6 +93,7 @@ class EventDrivenMarketRuntime(
         candle_journal: JsonlJournal,
         heartbeat: RuntimeHeartbeat,
         is_broker_authorization_error: BrokerAuthorizationErrorChecker,
+        research_pipeline=None,
     ) -> None:
         self.settings = settings
         self.symbols = symbols
@@ -123,6 +124,7 @@ class EventDrivenMarketRuntime(
         self.candle_journal = candle_journal
         self.heartbeat = heartbeat
         self.is_broker_authorization_error = is_broker_authorization_error
+        self.research_pipeline = research_pipeline
         self.coordinator = MarketDataCoordinator(
             websocket_required=True,
             symbol_silence_seconds=WS_POSITION_SILENCE_SECONDS,

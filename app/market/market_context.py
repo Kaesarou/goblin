@@ -16,6 +16,9 @@ from app.market.relative_spread import (
 from app.market.session_rules import TradingSessionDecision
 
 MARKET_CONTEXT_VERSION = 'market_context_v3'
+SIDE_NEUTRAL_RESEARCH_MARKET_CONTEXT_VERSION = (
+    'side_neutral_research_market_context_v1'
+)
 MARKET_CONTEXT_HISTORY_RETENTION_SECONDS = 24 * 60 * 60
 
 
@@ -92,6 +95,21 @@ class CandidateMarketContext:
     symbol_relative_strength_percent: float | None
     reasons: tuple[str, ...]
     spread: SpreadContext | None = None
+
+
+@dataclass(frozen=True)
+class SideNeutralResearchMarketContext:
+    version: str
+    as_of: datetime
+    asset_class: AssetClass
+    regime: MarketRegime
+    benchmark: BenchmarkContext
+    breadth: BreadthContext
+    sector: SectorContext
+    symbol_session_return_percent: float | None
+    symbol_relative_strength_percent: float | None
+    spread: SpreadContext
+    latest_symbol_timestamp: datetime | None
 
 
 @dataclass(frozen=True)
@@ -260,6 +278,410 @@ class MarketContextService:
             symbol_relative_strength_percent=_round_optional(relative_strength),
             reasons=reasons,
             spread=spread,
+        )
+
+    def build_side_neutral_research_context(
+        self,
+        *,
+        symbol: str,
+        as_of: datetime,
+    ) -> SideNeutralResearchMarketContext:
+        """Build strict-cutoff context without using a BUY/SELL side.
+
+        This method is research-only and does not mutate any live context state.
+        Both broker and receive timestamps must be strictly earlier than the
+        requested cutoff.
+        """
+
+        normalized_symbol = symbol.strip().upper()
+        asset_class = self.instrument_registry.resolve(
+            normalized_symbol
+        ).asset_class
+        config = self.instrument_registry.config_for(
+            normalized_symbol
+        ).market_context
+        actual_as_of = _as_utc(as_of)
+        session_key = self._session_key_by_symbol.get(normalized_symbol)
+        symbol_snapshot = self._snapshot_before(
+            normalized_symbol,
+            actual_as_of,
+        )
+        symbol_return = self._session_return_before(
+            normalized_symbol,
+            session_key,
+            actual_as_of,
+        )
+        benchmark = self._research_benchmark_context(
+            asset_class=asset_class,
+            session_key=session_key,
+            config=config,
+            as_of=actual_as_of,
+        )
+        breadth = self._research_breadth_context(
+            asset_class=asset_class,
+            session_key=session_key,
+            config=config,
+            as_of=actual_as_of,
+        )
+        sector = self._research_sector_context(
+            symbol=normalized_symbol,
+            asset_class=asset_class,
+            session_key=session_key,
+            config=config,
+            as_of=actual_as_of,
+        )
+        benchmark_return = benchmark.session_return_percent
+        relative_strength = (
+            symbol_return - benchmark_return
+            if symbol_return is not None and benchmark_return is not None
+            else None
+        )
+        return SideNeutralResearchMarketContext(
+            version=SIDE_NEUTRAL_RESEARCH_MARKET_CONTEXT_VERSION,
+            as_of=actual_as_of,
+            asset_class=asset_class,
+            regime=_market_regime(
+                benchmark.direction,
+                breadth.direction,
+            ),
+            benchmark=benchmark,
+            breadth=breadth,
+            sector=sector,
+            symbol_session_return_percent=_round_optional(symbol_return),
+            symbol_relative_strength_percent=_round_optional(
+                relative_strength
+            ),
+            spread=self._spread_context_before(
+                normalized_symbol,
+                actual_as_of,
+            ),
+            latest_symbol_timestamp=(
+                None
+                if symbol_snapshot is None
+                else _as_utc(symbol_snapshot.timestamp)
+            ),
+        )
+
+    def _snapshot_before(
+        self,
+        symbol: str,
+        as_of: datetime,
+    ) -> MarketSnapshot | None:
+        for item in reversed(self._history.get(symbol, ())):
+            snapshot = item.snapshot
+            if _snapshot_is_strictly_before(snapshot, as_of):
+                return snapshot
+        return None
+
+    def _session_return_before(
+        self,
+        symbol: str,
+        session_key: str | None,
+        as_of: datetime,
+    ) -> float | None:
+        if session_key is None:
+            return None
+        history = self._history.get(symbol, ())
+        opening_snapshot = next(
+            (
+                item.snapshot
+                for item in history
+                if item.session_key == session_key
+                and _snapshot_is_strictly_before(item.snapshot, as_of)
+            ),
+            None,
+        )
+        current_snapshot = next(
+            (
+                item.snapshot
+                for item in reversed(history)
+                if item.session_key == session_key
+                and _snapshot_is_strictly_before(item.snapshot, as_of)
+            ),
+            None,
+        )
+        if opening_snapshot is None or current_snapshot is None:
+            return None
+        opening = opening_snapshot.last
+        current = current_snapshot.last
+        if opening <= 0:
+            return None
+        return ((current - opening) / opening) * 100
+
+    def _research_benchmark_context(
+        self,
+        *,
+        asset_class: AssetClass,
+        session_key: str | None,
+        config: MarketContextConfig,
+        as_of: datetime,
+    ) -> BenchmarkContext:
+        configured_symbols = self.benchmark_symbols.get(asset_class, ())
+        for symbol in configured_symbols:
+            snapshot = self._snapshot_before(symbol, as_of)
+            if snapshot is None or not self._research_snapshot_is_fresh(
+                snapshot,
+                as_of,
+                config,
+            ):
+                continue
+            session_return = self._session_return_before(
+                symbol,
+                session_key,
+                as_of,
+            )
+            momentum = self._momentum_percent_before(
+                symbol=symbol,
+                session_key=session_key,
+                as_of=as_of,
+                window_seconds=config.momentum_window_seconds,
+                maximum_reference_lag_seconds=(
+                    config.maximum_context_age_seconds
+                ),
+            )
+            return BenchmarkContext(
+                symbol=symbol,
+                available=True,
+                direction=_direction_from_return(
+                    session_return,
+                    config.minimum_benchmark_move_percent,
+                ),
+                session_return_percent=_round_optional(session_return),
+                momentum_percent=_round_optional(momentum),
+                spread_percent=_round_optional(_spread_percent(snapshot)),
+                snapshot_age_seconds=round(
+                    max(
+                        0.0,
+                        (
+                            as_of - _as_utc(snapshot.timestamp)
+                        ).total_seconds(),
+                    ),
+                    3,
+                ),
+            )
+        return BenchmarkContext(
+            symbol=configured_symbols[0] if configured_symbols else None,
+            available=False,
+            direction=MarketDirection.UNKNOWN,
+            session_return_percent=None,
+            momentum_percent=None,
+            spread_percent=None,
+            snapshot_age_seconds=None,
+        )
+
+    def _research_breadth_context(
+        self,
+        *,
+        asset_class: AssetClass,
+        session_key: str | None,
+        config: MarketContextConfig,
+        as_of: datetime,
+    ) -> BreadthContext:
+        eligible = sorted(
+            self._active_trading_symbols.get(asset_class, set())
+        )
+        returns = [
+            value
+            for symbol in eligible
+            if self._research_symbol_is_fresh(
+                symbol,
+                as_of,
+                config,
+            )
+            for value in [
+                self._session_return_before(symbol, session_key, as_of)
+            ]
+            if value is not None
+        ]
+        valid = len(returns)
+        coverage = valid / len(eligible) if eligible else 0.0
+        advancing = sum(
+            value > config.unchanged_band_percent for value in returns
+        )
+        declining = sum(
+            value < -config.unchanged_band_percent for value in returns
+        )
+        unchanged = valid - advancing - declining
+        advancing_ratio = advancing / valid if valid else 0.0
+        available = (
+            valid >= config.minimum_breadth_sample_size
+            and coverage >= config.minimum_breadth_coverage_ratio
+        )
+        return BreadthContext(
+            available=available,
+            direction=(
+                _breadth_direction(advancing_ratio, config)
+                if available
+                else MarketDirection.UNKNOWN
+            ),
+            eligible_symbols=len(eligible),
+            valid_symbols=valid,
+            coverage_ratio=round(coverage, 4),
+            advancing_count=advancing,
+            declining_count=declining,
+            unchanged_count=unchanged,
+            advancing_ratio=round(advancing_ratio, 4),
+            median_session_return_percent=_round_optional(
+                _median(returns)
+            ),
+        )
+
+    def _research_sector_context(
+        self,
+        *,
+        symbol: str,
+        asset_class: AssetClass,
+        session_key: str | None,
+        config: MarketContextConfig,
+        as_of: datetime,
+    ) -> SectorContext:
+        sector = self.sector_by_symbol.get(symbol)
+        if sector is None:
+            return SectorContext(
+                None,
+                False,
+                MarketDirection.UNKNOWN,
+                0,
+                0,
+                None,
+                None,
+            )
+        members = sorted(
+            candidate
+            for candidate in self._active_trading_symbols.get(
+                asset_class,
+                set(),
+            )
+            if self.sector_by_symbol.get(candidate) == sector
+        )
+        returns = [
+            value
+            for member in members
+            if self._research_symbol_is_fresh(
+                member,
+                as_of,
+                config,
+            )
+            for value in [
+                self._session_return_before(member, session_key, as_of)
+            ]
+            if value is not None
+        ]
+        valid = len(returns)
+        advancing_ratio = (
+            sum(
+                value > config.unchanged_band_percent
+                for value in returns
+            )
+            / valid
+            if valid
+            else None
+        )
+        available = valid >= config.minimum_sector_sample_size
+        return SectorContext(
+            sector=sector,
+            available=available,
+            direction=(
+                _breadth_direction(advancing_ratio or 0.0, config)
+                if available
+                else MarketDirection.UNKNOWN
+            ),
+            member_count=len(members),
+            valid_member_count=valid,
+            advancing_ratio=_round_optional(advancing_ratio),
+            median_session_return_percent=_round_optional(
+                _median(returns)
+            ),
+        )
+
+    def _momentum_percent_before(
+        self,
+        *,
+        symbol: str,
+        session_key: str | None,
+        as_of: datetime,
+        window_seconds: int,
+        maximum_reference_lag_seconds: int,
+    ) -> float | None:
+        current = self._snapshot_before(symbol, as_of)
+        if current is None or session_key is None or window_seconds <= 0:
+            return None
+        target_time = _as_utc(current.timestamp) - timedelta(
+            seconds=window_seconds
+        )
+        reference: MarketSnapshot | None = None
+        for item in reversed(self._history.get(symbol, ())):
+            if item.session_key != session_key:
+                continue
+            snapshot = item.snapshot
+            if not _snapshot_is_strictly_before(snapshot, as_of):
+                continue
+            if _as_utc(snapshot.timestamp) <= target_time:
+                reference = snapshot
+                break
+        if reference is None or reference.last <= 0:
+            return None
+        reference_lag = (
+            target_time - _as_utc(reference.timestamp)
+        ).total_seconds()
+        if reference_lag > maximum_reference_lag_seconds:
+            return None
+        return ((current.last - reference.last) / reference.last) * 100
+
+    def _research_symbol_is_fresh(
+        self,
+        symbol: str,
+        as_of: datetime,
+        config: MarketContextConfig,
+    ) -> bool:
+        snapshot = self._snapshot_before(symbol, as_of)
+        return (
+            snapshot is not None
+            and self._research_snapshot_is_fresh(
+                snapshot,
+                as_of,
+                config,
+            )
+        )
+
+    @staticmethod
+    def _research_snapshot_is_fresh(
+        snapshot: MarketSnapshot,
+        as_of: datetime,
+        config: MarketContextConfig,
+    ) -> bool:
+        age = (as_of - _as_utc(snapshot.timestamp)).total_seconds()
+        receive_age = (
+            as_of - _as_utc(snapshot.received_at or snapshot.timestamp)
+        ).total_seconds()
+        return (
+            0 < age <= config.maximum_context_age_seconds
+            and 0 < receive_age <= config.maximum_context_age_seconds
+        )
+
+    def _spread_context_before(
+        self,
+        symbol: str,
+        as_of: datetime,
+    ) -> SpreadContext:
+        eligible = [
+            snapshot
+            for snapshot in self._spread_history.get(symbol, ())
+            if _snapshot_is_strictly_before(snapshot, as_of)
+        ]
+        current = eligible[-1] if eligible else None
+        current_timestamp = (
+            None if current is None else _as_utc(current.timestamp)
+        )
+        prior = [
+            snapshot
+            for snapshot in eligible
+            if current_timestamp is not None
+            and _as_utc(snapshot.timestamp) < current_timestamp
+        ]
+        return build_relative_spread_context(
+            current=current,
+            prior_snapshots=prior,
         )
 
     def _spread_context(self, symbol: str) -> SpreadContext:
@@ -612,6 +1034,17 @@ def _spread_percent(snapshot: MarketSnapshot) -> float | None:
     if midpoint <= 0:
         return None
     return ((snapshot.ask - snapshot.bid) / midpoint) * 100
+
+
+def _snapshot_is_strictly_before(
+    snapshot: MarketSnapshot,
+    as_of: datetime,
+) -> bool:
+    cutoff = _as_utc(as_of)
+    return (
+        _as_utc(snapshot.timestamp) < cutoff
+        and _as_utc(snapshot.received_at or snapshot.timestamp) < cutoff
+    )
 
 
 def _median(values: list[float]) -> float | None:
