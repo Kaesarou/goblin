@@ -40,3 +40,25 @@ def test_accepted_close_is_restart_safe_because_confirmation_is_restorable():
     )
     assert result.safe
     assert result.unresolved_action_ids == ()
+
+
+def test_directly_confirmed_close_fill_resolves_restart_safety():
+    result = evaluate_restart_safety(
+        [
+            _event("CLOSE_SUBMISSION_STARTED", "c1"),
+            _event("EXIT_FILLED", "c1"),
+        ]
+    )
+    assert result.safe
+    assert result.unresolved_action_ids == ()
+
+
+def test_unknown_close_always_fails_closed_even_if_started():
+    result = evaluate_restart_safety(
+        [
+            _event("CLOSE_SUBMISSION_STARTED", "c1"),
+            _event("CLOSE_SUBMISSION_UNKNOWN", "c1"),
+        ]
+    )
+    assert not result.safe
+    assert result.reason == "broker_submission_outcome_unknown"

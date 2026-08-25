@@ -19,7 +19,8 @@ def evaluate_restart_safety(events: Iterable[InventoryEvent]) -> RestartSafety:
     Open submissions are resolved only by a confirmed fill or explicit failure.
     A close submission is safe to resume once the broker returned an accepted
     close-order id because V3 can restore that pending confirmation and continue
-    polling. An explicit UNKNOWN outcome always fails closed.
+    polling. A directly confirmed EXIT_FILLED also resolves the close-start path
+    (notably paper execution). An explicit UNKNOWN outcome always fails closed.
     """
 
     open_started: set[str] = set()
@@ -40,7 +41,11 @@ def evaluate_restart_safety(events: Iterable[InventoryEvent]) -> RestartSafety:
             explicit_unknown.add(action_id)
         elif event.event_type == "CLOSE_SUBMISSION_STARTED":
             close_started.add(action_id)
-        elif event.event_type in {"CLOSE_SUBMISSION_ACCEPTED", "CLOSE_SUBMISSION_FAILED"}:
+        elif event.event_type in {
+            "CLOSE_SUBMISSION_ACCEPTED",
+            "CLOSE_SUBMISSION_FAILED",
+            "EXIT_FILLED",
+        }:
             close_submission_resolved.add(action_id)
         elif event.event_type == "CLOSE_SUBMISSION_UNKNOWN":
             explicit_unknown.add(action_id)
