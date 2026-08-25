@@ -9,6 +9,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from app.journal.raw_data_journal import (
+    MARKET_RAW_MAX_BYTES,
+    MARKET_RAW_MIN_FREE_BYTES,
+    MARKET_RAW_SAMPLE_INTERVAL_SECONDS,
+)
 from app.journal.serialization import serialize_value
 from app.market.data_quality import (
     QUOTE_QUALITY_CONTRACT_VERSION,
@@ -31,7 +36,7 @@ from app.research.summary import (
 from app.v3.runtime import V3_RUNTIME_CONTRACT_VERSION
 from app.v3.state_store import V3_RUNTIME_STATE_VERSION
 
-V3_RUN_MANIFEST_SCHEMA_VERSION = 16
+V3_RUN_MANIFEST_SCHEMA_VERSION = 17
 _SENSITIVE_SETTINGS = {"ETORO_API_KEY", "ETORO_USER_KEY"}
 
 
@@ -121,9 +126,12 @@ def build_v3_run_manifest(
         "economics": {
             "policy": config.economics.policy.value,
             "expected_holding_days": config.economics.expected_holding_days,
+            "fixed_fee_assumption_per_broker_request_usd": 1.0,
+            "fixed_fee_assumption_authority": "research_estimate_not_broker_actual",
             "note": (
-                "RR5 research geometry is preserved; live capital authority is "
-                "disabled until prospective economic validation."
+                "The eToro5 profile remains a gross-edge prospective experiment. "
+                "The fixed fee is logged/estimated but does not become a naive "
+                "per-leg net-positive gate because inventory economics are path dependent."
             ),
         },
         "runtime": {
@@ -132,12 +140,27 @@ def build_v3_run_manifest(
                 "v3_runtime_state": V3_RUNTIME_STATE_VERSION,
                 "executable_prices": EXECUTABLE_PRICE_CONTRACT_VERSION,
                 "quote_quality": QUOTE_QUALITY_CONTRACT_VERSION,
+                "broker_exit_translation": "pro_rata_partial_close_v1",
             },
             "market_data": {
                 "mode": "websocket",
                 "position_fallback": "reduce_only",
-                "raw_market_policy": "price_changes_only",
-                "raw_candle_policy": "one_event_per_finalized_m1_candle",
+                "raw_market_policy": "sampled_per_symbol",
+                "raw_market_sample_interval_seconds": (
+                    MARKET_RAW_SAMPLE_INTERVAL_SECONDS
+                ),
+                "raw_market_max_bytes_per_run": MARKET_RAW_MAX_BYTES,
+                "raw_market_min_free_bytes": MARKET_RAW_MIN_FREE_BYTES,
+                "raw_candle_policy": (
+                    "one_event_per_finalized_m1_candle_with_decision_quote"
+                ),
+            },
+            "broker_execution": {
+                "aggregate_profit_exit_fraction": config.strategy.close_qty_pct,
+                "partial_close_supported": True,
+                "partial_close_request_field": "UnitsToDeduct",
+                "allocation": "same_fraction_of_every_active_broker_leg",
+                "confirmed_units_required_for_partial_accounting": True,
             },
             "quote_quality_policy": quote_quality_contract_metadata(),
             "watchlist": symbols,
@@ -151,8 +174,10 @@ def build_v3_run_manifest(
                 "max_runs": settings.journal_max_runs,
                 "removed_runs": list(removed_runs),
                 "v3_log_budget": {
-                    "raw_market": "price_changes_only",
-                    "raw_candles": "one_per_finalized_candle",
+                    "raw_market": "sampled_10s_per_symbol_tick_processing_in_memory",
+                    "raw_market_max_bytes_per_run": MARKET_RAW_MAX_BYTES,
+                    "raw_market_min_free_bytes": MARKET_RAW_MIN_FREE_BYTES,
+                    "raw_candles": "one_per_finalized_candle_with_decision_quote",
                     "broker_ledger": "material_events_only",
                     "silent_decisions": "heartbeat_aggregates_only",
                     "decision_details": "material_state_changes_only",
@@ -188,8 +213,9 @@ def build_v3_run_manifest(
             "research_stream": str(run_paths.research),
             "research_summary": str(run_paths.research_summary),
             "etoro_payload_schema": str(run_paths.etoro_payload_schema),
-            "raw_market_retained": True,
+            "raw_market_retained": "sampled_10s_per_symbol",
             "raw_candles_retained": True,
+            "decision_quote_retained_with_candle": True,
             "v3_inventory_events_retained": True,
             "v3_causal_state_retained_in_sqlite": True,
         },
