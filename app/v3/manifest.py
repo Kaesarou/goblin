@@ -31,7 +31,7 @@ from app.research.summary import (
 from app.v3.runtime import V3_RUNTIME_CONTRACT_VERSION
 from app.v3.state_store import V3_RUNTIME_STATE_VERSION
 
-V3_RUN_MANIFEST_SCHEMA_VERSION = 15
+V3_RUN_MANIFEST_SCHEMA_VERSION = 16
 _SENSITIVE_SETTINGS = {"ETORO_API_KEY", "ETORO_USER_KEY"}
 
 
@@ -104,9 +104,13 @@ def build_v3_run_manifest(
             "max_symbol_exposure_pct": config.risk.max_symbol_exposure_pct,
             "max_portfolio_exposure_pct": config.risk.max_portfolio_exposure_pct,
             "max_inventories": config.risk.max_inventories,
-            "catastrophic_portfolio_drawdown_pct": (
-                config.risk.catastrophic_portfolio_drawdown_pct
-            ),
+            "mark_to_market_drawdown_guard": {
+                "enabled": False,
+                "reason": (
+                    "Requires a persistent strategy-PnL/mark-to-market contract; "
+                    "paper broker account equity is intentionally static."
+                ),
+            },
             "live_authority": {
                 "etoro_live_allowed": False,
                 "paper_allowed": True,
