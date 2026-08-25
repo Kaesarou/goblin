@@ -33,7 +33,7 @@ from app.v3.state_store import V3RuntimeStateStore, legacy_v1_state_counts
 
 logger = logging.getLogger(__name__)
 
-V3_RUNTIME_CONTRACT_VERSION = "inventory_runtime_v3_2"
+V3_RUNTIME_CONTRACT_VERSION = "inventory_runtime_v3_3"
 
 _MATERIAL_DECISION_REASONS = frozenset(
     {
@@ -253,6 +253,7 @@ class GoblinV3Runtime:
             "candles_closed": 0,
             "decision_windows": 0,
             "decision_windows_incomplete": 0,
+            "decision_quotes_outside_bucket": 0,
             "intents_planned": 0,
             "orders_submitted": 0,
             "market_data_rejected": 0,
@@ -357,6 +358,7 @@ class GoblinV3Runtime:
                 "unresolved_restart_action_ids": list(
                     restart_safety.unresolved_action_ids
                 ),
+                "decision_quote_provenance": "last_complete_quote_in_closed_bucket",
                 "log_policy": {
                     "raw_market": "price_changes_only",
                     "raw_candles": "one_event_per_finalized_candle",
@@ -576,24 +578,37 @@ class GoblinV3Runtime:
             close=candle.close,
         )
 
-        latest_snapshot = self.latest_snapshots[symbol]
-        decision_snapshot = replace(
-            latest_snapshot,
-            last=candle.close,
-            timestamp=candle.closed_at,
-            received_at=_utc(now),
+        decision_snapshot, quote_in_bucket = _decision_quote_for_candle(
+            result=result,
+            latest_snapshot=self.latest_snapshots.get(symbol),
+            candle=candle,
         )
-        entry_allowed = (
-            self._operational_entry_allowed(symbol)
+        if decision_snapshot is not None and not quote_in_bucket:
+            self.metrics["decision_quotes_outside_bucket"] += 1
+
+        quality_ok = bool(
+            decision_snapshot is not None
+            and quote_in_bucket
             and not candle.quality_degraded
         )
-        expected = self._expected_symbols_at(candle.closed_at)
-        recorded = self.windows.record(
-            feature=feature,
-            snapshot=decision_snapshot,
-            quality_ok=not candle.quality_degraded,
-            expected_symbols=expected,
+        entry_allowed = bool(
+            quality_ok and self._operational_entry_allowed(symbol)
         )
+        expected = self._expected_symbols_at(candle.closed_at)
+        recorded = False
+        if decision_snapshot is not None:
+            recorded = self.windows.record(
+                feature=feature,
+                snapshot=decision_snapshot,
+                quality_ok=quality_ok,
+                expected_symbols=expected,
+            )
+        else:
+            self._decision_reason_counts[
+                DecisionReason.MARKET_DATA_INVALID.value
+            ] += 1
+            self._retain_reduce_only({symbol})
+
         self.metrics["candles_closed"] += 1
 
         self.candle_journal.write(
@@ -608,9 +623,16 @@ class GoblinV3Runtime:
                 "finalized_at": _utc(now),
                 "loop_id": self.loop_id,
                 "v3_window_recorded": recorded,
+                "decision_quote_available": decision_snapshot is not None,
+                "decision_quote_in_bucket": quote_in_bucket,
+                "decision_quote_timestamp": (
+                    None
+                    if decision_snapshot is None
+                    else decision_snapshot.timestamp
+                ),
             },
         )
-        if not recorded:
+        if decision_snapshot is not None and not recorded:
             self.trade_journal.write(
                 "v3_decision_window_late_symbol",
                 {
@@ -1161,6 +1183,35 @@ class GoblinV3Runtime:
         except Exception:
             self.metrics["errors"] += 1
             logger.exception("V3 research boundary failed")
+
+
+def _decision_quote_for_candle(*, result, latest_snapshot, candle):
+    """Return the newest causal quote and whether it belongs to this M1 bucket.
+
+    A rollover event may already have advanced ``latest_snapshot`` into the next
+    minute. The closed candle therefore owns its explicit ``decision_snapshot``.
+    Older quotes are allowed only as non-authoritative provenance for carried
+    candles; future quotes are never relabelled onto the closed state.
+    """
+    explicit = getattr(result, "decision_snapshot", None)
+    if explicit is not None:
+        timestamp = _utc(explicit.timestamp)
+        opened_at = _utc(candle.opened_at)
+        closed_at = _utc(candle.closed_at)
+        if opened_at <= timestamp < closed_at:
+            return explicit, True
+        if timestamp < closed_at:
+            return explicit, False
+        return None, False
+
+    if latest_snapshot is None:
+        return None, False
+    timestamp = _utc(latest_snapshot.timestamp)
+    closed_at = _utc(candle.closed_at)
+    if timestamp >= closed_at:
+        return None, False
+    opened_at = _utc(candle.opened_at)
+    return latest_snapshot, opened_at <= timestamp < closed_at
 
 
 def _utc(value: datetime) -> datetime:
