@@ -76,7 +76,6 @@ def main() -> None:
             max_symbol_exposure_pct=(1.5 / 7) * 1.37,
             max_portfolio_exposure_pct=1.5,
             max_inventories=7,
-            catastrophic_portfolio_drawdown_pct=0.10,
         ),
     )
 
