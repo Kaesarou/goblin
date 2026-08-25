@@ -49,11 +49,6 @@ class InventoryStrategyConfig:
     close_retracement_base_pct:float=.0005
     close_retracement_volatility_1m_weight:float=52.34
     close_retracement_volatility_1h_weight:float=22.95
-    unstuck_enabled:bool=True
-    unstuck_threshold_ratio:float=.466
-    unstuck_close_pct:float=.041
-    unstuck_ema_dist_pct:float=-.0269
-    unstuck_loss_allowance_pct:float=.0052
     entry_cooldown_minutes:float=24.1
 
 @dataclass(frozen=True)
