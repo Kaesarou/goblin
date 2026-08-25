@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from collections import Counter
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Mapping
@@ -25,14 +26,27 @@ from app.v3.features import OnlineFeatureEngine, OnlineFeatureSnapshot
 from app.v3.forager import ForagerCandidate, NoVolumeForager
 from app.v3.intents import RestingIntentBook
 from app.v3.live_execution import V3BrokerExecutor
-from app.v3.models import DecisionBatch, InventoryStatus, MarketState, OrderIntent
+from app.v3.models import DecisionBatch, DecisionReason, MarketState, OrderIntent
 from app.v3.persistence import InventoryEventStore
 from app.v3.recovery import evaluate_restart_safety
 from app.v3.state_store import V3RuntimeStateStore, legacy_v1_state_counts
 
 logger = logging.getLogger(__name__)
 
-V3_RUNTIME_CONTRACT_VERSION = "inventory_runtime_v3_1"
+V3_RUNTIME_CONTRACT_VERSION = "inventory_runtime_v3_2"
+
+_MATERIAL_DECISION_REASONS = frozenset(
+    {
+        DecisionReason.RECOVERABILITY_ACCEPTED,
+        DecisionReason.RECOVERABILITY_REJECTED,
+        DecisionReason.MAX_ENTRY_FILLS,
+        DecisionReason.SYMBOL_EXPOSURE_CAP,
+        DecisionReason.PORTFOLIO_EXPOSURE_CAP,
+        DecisionReason.ECONOMICS_REJECTED,
+        DecisionReason.TRAILING_EXIT,
+        DecisionReason.UNSTUCK,
+    }
+)
 
 
 @dataclass
@@ -40,6 +54,7 @@ class _DecisionWindow:
     closed_at: datetime
     expected_symbols: set[str]
     feature_by_symbol: dict[str, OnlineFeatureSnapshot]
+    snapshot_by_symbol: dict[str, MarketSnapshot]
     quality_by_symbol: dict[str, bool]
 
 
@@ -51,6 +66,7 @@ class V3DecisionWindowBatch:
     missing_symbols: tuple[str, ...]
     finalization_reason: str
     features: Mapping[str, OnlineFeatureSnapshot]
+    snapshots: Mapping[str, MarketSnapshot]
     quality: Mapping[str, bool]
 
 
@@ -66,6 +82,7 @@ class V3DecisionWindowCoordinator:
         self,
         *,
         feature: OnlineFeatureSnapshot,
+        snapshot: MarketSnapshot,
         quality_ok: bool,
         expected_symbols: set[str],
     ) -> bool:
@@ -74,10 +91,11 @@ class V3DecisionWindowCoordinator:
             return False
         window = self._windows.setdefault(
             key,
-            _DecisionWindow(key, set(expected_symbols), {}, {}),
+            _DecisionWindow(key, set(expected_symbols), {}, {}, {}),
         )
         window.expected_symbols.update(expected_symbols)
         window.feature_by_symbol[feature.symbol] = feature
+        window.snapshot_by_symbol[feature.symbol] = snapshot
         window.quality_by_symbol[feature.symbol] = bool(quality_ok)
         return True
 
@@ -91,6 +109,7 @@ class V3DecisionWindowCoordinator:
                 ready.append((key, "all_symbols_completed"))
             elif expired:
                 ready.append((key, "grace_expired"))
+
         result: list[V3DecisionWindowBatch] = []
         for key, reason in sorted(ready):
             window = self._windows.pop(key)
@@ -104,20 +123,23 @@ class V3DecisionWindowCoordinator:
                     missing_symbols=tuple(sorted(window.expected_symbols - completed)),
                     finalization_reason=reason,
                     features=dict(window.feature_by_symbol),
+                    snapshots=dict(window.snapshot_by_symbol),
                     quality=dict(window.quality_by_symbol),
                 )
             )
-        # Bounded memory: finalized timestamps older than 24h can no longer reappear.
+
         cutoff = actual_now - timedelta(days=1)
         self._finalized = {value for value in self._finalized if value >= cutoff}
         return tuple(result)
 
 
 class GoblinV3Runtime:
-    """Event-driven V3 demo/live runtime around the same pure InventoryPlanner as replay.
+    """Event-driven V3 runtime around the same pure planner used by replay.
 
-    V1 candidate/WAIT/managed-edge code is not invoked. Existing market-data,
-    candle, research and broker primitives are reused as infrastructure only.
+    Raw market/candle streams stay reconstructible and comparable with V1.
+    High-volume V3 diagnostics are aggregated into heartbeats; detailed trade
+    journal events are emitted only on material state changes, intents and
+    anomalies.
     """
 
     def __init__(
@@ -171,7 +193,8 @@ class GoblinV3Runtime:
         self.research_pipeline = research_pipeline
 
         self.asset_class_by_symbol = {
-            symbol: instrument_registry.resolve(symbol).asset_class for symbol in self.symbols
+            symbol: instrument_registry.resolve(symbol).asset_class
+            for symbol in self.symbols
         }
         self.context_asset_classes: dict[str, object] = {}
         active_asset_classes = set(self.asset_class_by_symbol.values())
@@ -201,15 +224,17 @@ class GoblinV3Runtime:
             book=self.book,
             strategy_version=config.strategy.name,
             model_version=(
-                planner.recoverability_scorer.model_version
+                planner.recoverability_scorer.artifact.model_version
                 if getattr(planner, "recoverability_scorer", None) is not None
                 else None
             ),
         )
+
         self.latest_snapshots: dict[str, MarketSnapshot] = {}
         self.latest_features: dict[str, OnlineFeatureSnapshot] = {}
         self.session_decisions: dict[str, object] = {}
 
+        self.loop_id = 0
         self._equity: float | None = None
         self._started = False
         self._stop_requested = False
@@ -217,82 +242,128 @@ class GoblinV3Runtime:
         self._last_close_confirmation_monotonic = 0.0
         self._last_equity_monotonic = 0.0
         self._last_research_boundary: datetime | None = None
+
+        self._market_quality_signature: dict[str, tuple[str, str, tuple[str, ...]]] = {}
+        self._maintenance_errors: set[str] = set()
+        self._last_logged_decision_signature: dict[str, tuple[object, ...]] = {}
+        self._decision_reason_counts: Counter[str] = Counter()
+
         self.metrics = {
             "market_snapshots": 0,
             "candles_closed": 0,
             "decision_windows": 0,
+            "decision_windows_incomplete": 0,
             "intents_planned": 0,
             "orders_submitted": 0,
+            "market_data_rejected": 0,
             "errors": 0,
         }
 
     def startup(self, *, now: datetime | None = None) -> None:
         if self._started:
             return
+
         actual_now = _utc(now or datetime.now(UTC))
         legacy_counts = legacy_v1_state_counts(self.settings.position_store_path)
         if any(legacy_counts.values()):
             self.trade_journal.write(
                 "v3_startup_rejected",
-               {
+                {
                     "reason": "legacy_v1_position_state_present",
                     "legacy_row_counts": legacy_counts,
                 },
             )
             raise RuntimeError(
                 "V3 refuses to start while V1 open/pending position state exists. "
-                "Flatten or explicitly resolve it before starting V3; no automatic migration is performed."
+                "Flatten or explicitly resolve it before starting V3; no automatic "
+                "migration is performed."
             )
+
         events = self.event_store.events()
         self.book = InventoryBook.from_events(events)
         restored_inventories = self.runtime_state_store.restore_inventory_book(self.book)
-        restored_features = self.runtime_state_store.restore_feature_engine(self.feature_engine)
+        restored_features = self.runtime_state_store.restore_feature_engine(
+            self.feature_engine
+        )
         self.executor.book = self.book
-        self.executor.restore_pending_closes_from_events(events)
-        restart_safety = evaluate_restart_safety(events)
-        reason = restart_safety.reason
-        if not restart_safety.safe:
-            self.executor.halt_new_risk(reason or "unresolved_broker_mutation_at_restart")
+        self.executor.restore_pending_close_confirmations(events)
 
-        if self.book.active_inventories:
+        restart_safety = evaluate_restart_safety(events)
+        if not restart_safety.safe:
+            self.executor.halted_reason = (
+                restart_safety.reason or "unresolved_broker_mutation_at_restart"
+            )
+
+        active_inventories = self._active_inventories()
+        if active_inventories:
+            restored_feature_set = set(restored_features)
             missing_feature_symbols = {
                 inventory.symbol
-                for inventory in self.book.active_inventories
-                if inventory.symbol not in restored_features
+                for inventory in active_inventories
+                if inventory.symbol not in restored_feature_set
             }
             if missing_feature_symbols:
-                self.executor.halt_new_risk(
+                self.executor.halted_reason = (
                     "missing_causal_feature_state_for_open_inventory:"
                     + ",".join(sorted(missing_feature_symbols))
                 )
 
-        for inventory in self.book.active_inventories:
-            for leg in inventory.broker_legs:
-                self.execution_broker.remember_position_instrument(leg.position_id, inventory.symbol)
-                try:
-                    if not self.execution_broker.is_position_open(leg.position_id):
-                        self.executor.halt_new_risk(
-                            f"persisted_broker_leg_missing_at_startup:{leg.position_id}"
-                        )
-                except Exception as exc:
-                    self.executor.halt_new_risk(fžcsilaus_uege.except is view and not necessary")
+        try:
+            missing_broker_legs = self.executor.verify_known_broker_legs()
+        except Exception as exc:
+            self.trade_journal.write(
+                "v3_startup_rejected",
+                {
+                    "reason": "broker_leg_verification_failed",
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            )
+            raise RuntimeError("V3 broker-leg verification failed at startup") from exc
+        if missing_broker_legs:
+            self.trade_journal.write(
+                "v3_startup_rejected",
+                {
+                    "reason": "persisted_broker_leg_missing",
+                    "position_ids": list(missing_broker_legs),
+                },
+            )
+            raise RuntimeError(
+                "V3 persisted inventory does not match the broker portfolio; "
+                "manual reconciliation is required."
+            )
+
         self.coordinator.initialize_symbols(self.monitored_symbols, now=actual_now)
         self._refresh_sessions(actual_now)
         self._maybe_schedule_equity_refresh(0.0, force=True)
         self.live_market_data.start(self.monitored_symbols)
         self._started = True
+
         self.trade_journal.write(
             "v3_runtime_started",
-             {
+            {
                 "runtime_contract_version": V3_RUNTIME_CONTRACT_VERSION,
                 "strategy": self.config.strategy.name,
-                "recoverability_authority_enabled": bool(self.config.recoverability.enabled),
+                "recoverability_authority_enabled": bool(
+                    self.config.recoverability.enabled
+                ),
                 "hedge_execution_enabled": False,
-                "restored_inventory_states": list(restored_inventories),
-                "restored_feature_states": list(restored_features),
+                "restored_inventory_state_count": len(restored_inventories),
+                "restored_feature_state_count": len(restored_features),
+                "active_inventory_count": len(active_inventories),
                 "new_risk_allowed": self.executor.new_risk_allowed,
                 "restart_safety": restart_safety.safe,
-                "unresolved_restart_action_ids": list(restart_safety.unresolved_action_ids),
+                "restart_reason": restart_safety.reason,
+                "unresolved_restart_action_ids": list(
+                    restart_safety.unresolved_action_ids
+                ),
+                "log_policy": {
+                    "raw_market": "price_changes_only",
+                    "raw_candles": "one_event_per_finalized_candle",
+                    "silent_decisions": "heartbeat_aggregates_only",
+                    "decision_details": "material_state_changes_only",
+                    "market_quality": "transition_only",
+                },
             },
         )
 
@@ -301,24 +372,28 @@ class GoblinV3Runtime:
             self.startup()
         try:
             while not self._stop_requested:
+                self.loop_id += 1
                 now = datetime.now(UTC)
                 monotonic_now = time.monotonic()
+
                 self._refresh_sessions(now)
                 self._drain_broker_tasks()
                 self._maybe_schedule_equity_refresh(monotonic_now)
                 self._run_position_fallback_if_due(now, monotonic_now)
                 self._schedule_close_confirmation_checks(monotonic_now)
+
                 event = self.live_market_data.next_event(timeout_seconds)
                 if event is not None:
                     self._handle_event(event, now)
+
                 self._finalize_clocked_candles(now)
                 self._flush_decision_windows(now)
                 self._emit_due_research_state(now)
                 self.heartbeat.maybe_emit(
                     journal=self.trade_journal,
                     logger=logger,
-                    metrics=self.metrics,
-                    open_positions=len(self.book.active_inventories),
+                    metrics=self._heartbeat_metrics(),
+                    open_positions=len(self._active_inventories()),
                     active_symbols=len(self._expected_symbols_at(now)),
                     now=now,
                 )
@@ -328,62 +403,102 @@ class GoblinV3Runtime:
             self.stop()
 
     def stop(self) -> None:
+        if self._stop_requested and not self._started:
+            return
         self._stop_requested = True
         try:
             self.live_market_data.stop()
         finally:
             self.mutation_runner.close(wait=False)
             self.maintenance_runner.close(wait=False)
+
         self.runtime_state_store.save_feature_engine(self.feature_engine)
-        self.runtime_state_store.save_inventory_book(self.book, asof=datetime.now(UTC))
+        self.runtime_state_store.save_inventory_book(
+            self.book, asof=datetime.now(UTC)
+        )
         if self.research_pipeline is not None:
             try:
                 self.research_pipeline.flush()
             except Exception:
+                self.metrics["errors"] += 1
                 logger.exception("V3 research flush failed")
-        self.trade_journal.write("v3_runtime_stopped", self.metrics)
+
+        self.trade_journal.write(
+            "v3_runtime_stopped",
+            self._heartbeat_metrics(),
+        )
+        self._started = False
 
     def _handle_event(self, event: MarketDataEvent, now: datetime) -> None:
         symbol = event.symbol.strip().upper()
         precheck = self.coordinator.precheck(event)
         if not precheck.accepted:
             return
+
         snapshot = event.snapshot
         if snapshot is None:
             return
+
         validation = self.market_data_validator.validate(
-            snapshot, self._market_data_quality_config(symbol), now=now
+            snapshot,
+            self._market_data_quality_config(symbol),
+            now=now,
         )
         if validation.status != MarketDataStatus.ACCEPTED:
-            self.trade_journal.write(
-                "v3_market_data_rejected",
-                {"symbol": symbol, "reasons": list(validation.reasons), "source": event.source.value},
+            self.metrics["market_data_rejected"] += 1
+            self._record_market_quality_transition(
+                symbol=symbol,
+                source=event.source,
+                status=validation.status,
+                reasons=tuple(validation.reasons),
             )
             return
+
+        self._record_market_quality_recovery(symbol=symbol, source=event.source)
         self.coordinator.mark_accepted(event)
         self.latest_snapshots[symbol] = snapshot
         self.market_context_service.observe_accepted_snapshot(snapshot)
-        if self.research_pipeline is not None:
-            self.research_pipeline.observe_accepted_snapshot(snapshot, source=event.source)
-        self.market_journal.write(
-            "v3_market_quote_accepted",
-            {
-                "symbol": symbol,
-                "source": event.source.value,
-                "snapshot": snapshot,
-                "entry_allowed": self._operational_entry_allowed(symbol) if symbol in self.asset_class_by_symbol else False,
-            },
-        )
-        # Warm the separate REST fallback validator without forwarding it.
         self.fallback_validator.observe_accepted(snapshot)
+
+        if event.price_changed:
+            self.metrics["market_snapshots"] += 1
+            self.market_journal.write(
+                "market_price_changed",
+                {
+                    "symbol": symbol,
+                    "snapshot": snapshot,
+                    "source": event.source.value,
+                    "message_id": event.message_id,
+                    "connection_id": event.connection_id,
+                    "loop_id": self.loop_id,
+                },
+            )
+
+        if self.research_pipeline is not None:
+            self.research_pipeline.observe_accepted_snapshot(
+                snapshot,
+                source=event.source,
+            )
 
         if symbol not in self.asset_class_by_symbol:
             return
+
         session = self.session_decisions.get(symbol)
-        if session is None or session_timestamp_rejection_reason(decision=session, timestamp=snapshot.timestamp) is not None:
-            return
+        session_allows_new_risk = (
+            session is not None
+            and session_timestamp_rejection_reason(
+                decision=session,
+                timestamp=snapshot.timestamp,
+            )
+            is None
+        )
 
         for intent in self.intent_book.triggered(snapshot):
+            if not intent.reduce_only and not (
+                session_allows_new_risk
+                and self._operational_entry_allowed(symbol)
+            ):
+                continue
             if self.executor.schedule(intent, snapshot=snapshot):
                 self.intent_book.mark_dispatched(intent.intent_id)
                 self.metrics["orders_submitted"] += 1
@@ -394,16 +509,25 @@ class GoblinV3Runtime:
                         "purpose": intent.purpose.value,
                         "symbol": intent.symbol,
                         "side": intent.side,
+                        "reduce_only": intent.reduce_only,
                         "source": "fresh_quote",
                     },
                 )
+
+        if not session_allows_new_risk:
+            return
 
         builder = self.candle_builders[symbol]
         builder.prepare_event(event)
         builder.on_snapshot(snapshot)
         result = builder.take_last_closed_result()
         if result is not None:
-            self._process_closed_candle(symbol, result, now)
+            self._process_closed_candle(
+                symbol,
+                result,
+                now,
+                source="event",
+            )
 
     def _finalize_clocked_candles(self, now: datetime) -> None:
         for symbol, builder in self.candle_builders.items():
@@ -412,11 +536,25 @@ class GoblinV3Runtime:
             if session is None or snapshot is None:
                 continue
             for result in builder.finalize_until(
-                now, grace_seconds=CANDLE_CLOCK_GRACE_SECONDS, max_carry_forward_age_seconds=CANDLE_MAX_CARRY_FORWARD_AGE_SECONDS
+                now,
+                grace_seconds=CANDLE_CLOCK_GRACE_SECONDS,
+                max_carry_forward_age_seconds=CANDLE_MAX_CARRY_FORWARD_AGE_SECONDS,
             ):
-                self._process_closed_candle(symbol, result, now)
+                self._process_closed_candle(
+                    symbol,
+                    result,
+                    now,
+                    source="clock",
+                )
 
-    def _process_closed_candle(self, symbol, result, now: datetime) -> None:
+    def _process_closed_candle(
+        self,
+        symbol,
+        result,
+        now: datetime,
+        *,
+        source: str,
+    ) -> None:
         candle = replace(
             result.candle,
             carried_forward=result.quality.carried_forward,
@@ -424,62 +562,146 @@ class GoblinV3Runtime:
             quality_degraded=result.quality.degraded,
         )
         session = self.session_decisions[symbol]
-        self.multi_timeframe_service.on_base_candle(symbol=symbol, candle=candle, session_decision=session)
+        self.multi_timeframe_service.on_base_candle(
+            symbol=symbol,
+            candle=candle,
+            session_decision=session,
+        )
         feature = self.feature_engine.update(candle)
         self.latest_features[symbol] = feature
-        self.book.observe_candle(symbol=symbol, high=candle.high, low=candle.low, close=candle.close)
-        # Persist the trailing/feature state BEFORE any new broker mutation can be planned.
-        self.runtime_state_store.save_feature_engine(self.feature_engine)
-        self.runtime_state_store.save_inventory_book(self.book, asof=candle.closed_at)
+        self.book.observe_candle(
+            symbol=symbol,
+            high=candle.high,
+            low=candle.low,
+            close=candle.close,
+        )
+
+        latest_snapshot = self.latest_snapshots[symbol]
+        decision_snapshot = replace(
+            latest_snapshot,
+            last=candle.close,
+            timestamp=candle.closed_at,
+            received_at=_utc(now),
+        )
+        entry_allowed = (
+            self._operational_entry_allowed(symbol)
+            and not candle.quality_degraded
+        )
         expected = self._expected_symbols_at(candle.closed_at)
-        recorded = self.windows.record(feature=feature, quality_ok=not candle.quality_degraded, expected_symbols=expected)
-        if recorded:
-            self.metrics["candles_closed"] += 1
+        recorded = self.windows.record(
+            feature=feature,
+            snapshot=decision_snapshot,
+            quality_ok=not candle.quality_degraded,
+            expected_symbols=expected,
+        )
+        self.metrics["candles_closed"] += 1
+
         self.candle_journal.write(
-            "v3_candle_finalized",
-          {"symbol": symbol, "candle": candle, "quality": result.quality, "recorded_in_window": recorded},
-         )
+            "candle_finalized",
+            {
+                "symbol": symbol,
+                "candle": candle,
+                "quality": result.quality,
+                "entry_allowed": entry_allowed,
+                "feed_state": self.coordinator.state_for(symbol).value,
+                "finalization_source": source,
+                "finalized_at": _utc(now),
+                "loop_id": self.loop_id,
+                "v3_window_recorded": recorded,
+            },
+        )
+        if not recorded:
+            self.trade_journal.write(
+                "v3_decision_window_late_symbol",
+                {
+                    "symbol": symbol,
+                    "closed_at": candle.closed_at,
+                    "finalization_source": source,
+                },
+            )
 
     def _flush_decision_windows(self, now: datetime) -> None:
         for batch in self.windows.pop_ready(now=now):
             self._process_decision_window(batch)
 
     def _process_decision_window(self, batch: V3DecisionWindowBatch) -> None:
+        self.runtime_state_store.save_feature_engine(
+            self.feature_engine,
+            symbols=batch.completed_symbols,
+        )
+        self.runtime_state_store.save_inventory_book(
+            self.book,
+            asof=batch.closed_at,
+        )
+
         if self._equity is None:
-            self.trade_journal.write(
+            self._retain_reduce_only(self.symbols)
+            self._record_maintenance_error(
+                "equity_unavailable",
                 "v3_decision_window_blocked",
-                {"reason": "account_equity_unavailable", "closed_at": batch.closed_at},
+                {
+                    "reason": "account_equity_unavailable",
+                    "closed_at": batch.closed_at,
+                },
             )
             return
+        self._clear_maintenance_error(
+            "equity_unavailable",
+            "v3_account_equity_recovered",
+            {},
+        )
+
         self.metrics["decision_windows"] += 1
         portfolio = self.book.portfolio(equity=self._equity)
-        symbol_count = len(portfolio.inventories)
-        free_slots = max(0, self.config.risk.max_inventories - symbol_count)
+        free_slots = max(
+            0,
+            self.config.risk.max_inventories - portfolio.active_inventory_count,
+        )
 
         market_states: dict[str, MarketState] = {}
         for symbol, feature in batch.features.items():
-            snapshot = self.latest_snapshots.get(symbol)
+            snapshot = batch.snapshots.get(symbol)
             if snapshot is None:
-                self._retain_reduce_only_for_missing({symbol})
+                self._retain_reduce_only({symbol})
                 continue
-            entry_allowed = self._operational_entry_allowed(symbol) and batch.quality.get(symbol, False)
-            market = feature.market_state(snapshot=snapshot, entry_allowed=entry_allowed, quality_ok=batch.quality.get(symbol, False))
-            market_states[symbol] = market
+            quality_ok = bool(batch.quality.get(symbol, False))
+            market_states[symbol] = feature.market_state(
+                snapshot=snapshot,
+                entry_allowed=(
+                    quality_ok and self._operational_entry_allowed(symbol)
+                ),
+                quality_ok=quality_ok,
+            )
 
-        # First re-evaluate every existing inventory. It reserves portfolio authority and must
-        # NEVER be suppressed by the Forager/capacity choice.
         for inventory in portfolio.inventories:
             market = market_states.get(inventory.symbol)
-            if market is None:
-                self._retain_reduce_only_for_missing({inventory.symbol})
+            if market is None or not market.quality_ok:
+                self._retain_reduce_only({inventory.symbol})
+                self._decision_reason_counts[
+                    DecisionReason.MARKET_DATA_INVALID.value
+                ] += 1
                 continue
-            decision = self.planner.plan_symbol(market=market, portfolio-portfolio)
-            self.intent_book.replace_symbol(inventory.symbol, decision.intents)
-            self.metrics["intents_planned"] += len(decision.intents)
-            self._journal_decision(inventory.symbol, decision, decision.intents, extra={"role": "active_inventory"})
 
+            decision = self.planner.plan_symbol(
+                market=market,
+                portfolio=portfolio,
+            )
+            intents = tuple(
+                intent
+                for intent in decision.intents
+                if intent.reduce_only or market.entry_allowed
+            )
+            self.intent_book.replace_symbol(inventory.symbol, intents)
+            self.metrics["intents_planned"] += len(intents)
+            self._journal_decision(
+                inventory.symbol,
+                decision,
+                intents,
+                extra={"role": "active_inventory"},
+            )
+
+        candidates: list[ForagerCandidate] = []
         if free_slots > 0:
-            candidates = []
             for symbol, market in market_states.items():
                 if self.book.active_for_symbol(symbol) is not None:
                     continue
@@ -489,40 +711,60 @@ class GoblinV3Runtime:
                         market=market,
                         forager_volatility=feature.forager_volatility,
                         ema_readiness=feature.ema_readiness,
-                        activity=feature.activity,
                     )
                 )
-            for ranked in self.forager.rank(candidates, limit=free_slots):
-                decision = self.planner.plan_symbol(market=ranked.market, portfolio=portfolio)
-                self.intent_book.replace_symbol(ranked.market.symbol, decision.intents)
-                self.metrics["intents_planned"] += len(decision.intents)
-                self._journal_decision(
-                    ranked.market.symbol,
-                    decision,
-                    decision.intents,
-                    extra={"role": "flat_forager", "forager_score": ranked.score},
-                )
 
-        # Flat symbols not selected in this window must not keep stale entry authority.
-        selected_flat = {item.symbol for item in self.forager.rank([], limit=0)}
+        ranked_candidates = self.forager.rank(candidates, limit=free_slots)
+        selected_flat = {item.market.symbol for item in ranked_candidates}
+        for ranked in ranked_candidates:
+            decision = self.planner.plan_symbol(
+                market=ranked.market,
+                portfolio=portfolio,
+            )
+            intents = tuple(
+                intent
+                for intent in decision.intents
+                if intent.reduce_only or ranked.market.entry_allowed
+            )
+            self.intent_book.replace_symbol(ranked.market.symbol, intents)
+            self.metrics["intents_planned"] += len(intents)
+            self._journal_decision(
+                ranked.market.symbol,
+                decision,
+                intents,
+                extra={
+                    "role": "flat_forager",
+                    "forager_score": ranked.score,
+                },
+            )
+
         for symbol in market_states:
-            if self.book.active_for_symbol(symbol) is None and symbol not in selected_flat:
-                # replace_symbol is intentionally called for all flat non-selected symbols.
-                if not any(intent.symbol == symbol for intent in self.intent_book.snapshot()):
-                    self.intent_book.replace_symbol(symbol, ())
+            if (
+                self.book.active_for_symbol(symbol) is None
+                and symbol not in selected_flat
+            ):
+                self.intent_book.replace_symbol(symbol, ())
+                self._clear_logged_decision(symbol)
 
-        self.trade_journal.write(
-            "v3_decision_window_finalized",
-            {
-                "closed_at": batch.closed_at,
-                "expected_symbols": list(batch.expected_symbols),
-                "completed_symbols": list(batch.completed_symbols),
-                "missing_symbols": list(batch.missing_symbols),
-                "finalization_reason": batch.finalization_reason,
-            },
-        )
+        if batch.missing_symbols or batch.finalization_reason != "all_symbols_completed":
+            self.metrics["decision_windows_incomplete"] += 1
+            self.trade_journal.write(
+                "v3_decision_window_incomplete",
+                {
+                    "closed_at": batch.closed_at,
+                    "expected_count": len(batch.expected_symbols),
+                    "completed_count": len(batch.completed_symbols),
+                    "missing_symbols": list(batch.missing_symbols),
+                    "finalization_reason": batch.finalization_reason,
+                },
+            )
 
-    def _maybe_schedule_equity_refresh(self, monotonic_now: float, *, force: bool = False) -> None:
+    def _maybe_schedule_equity_refresh(
+        self,
+        monotonic_now: float,
+        *,
+        force: bool = False,
+    ) -> None:
         if not force and monotonic_now - self._last_equity_monotonic < 30.0:
             return
         if self.maintenance_runner.has_pending_kind("v3_account_equity"):
@@ -533,18 +775,33 @@ class GoblinV3Runtime:
         )
         self._last_equity_monotonic = monotonic_now
 
-    def _run_position_fallback_if_due(self, now: datetime, monotonic_now: float) -> None:
-        if monotonic_now - self._last_fallback_monotonic < POSITION_FALLBACK_INTERVAL_SECONDS:
+    def _run_position_fallback_if_due(
+        self,
+        now: datetime,
+        monotonic_now: float,
+    ) -> None:
+        if (
+            monotonic_now - self._last_fallback_monotonic
+            < POSITION_FALLBACK_INTERVAL_SECONDS
+        ):
             return
-        symbols = [inventory.symbol for inventory in self.book.active_inventories]
+        symbols = [inventory.symbol for inventory in self._active_inventories()]
         if not symbols:
             return
-        fallback = self.coordinator.position_fallback_symbols(symbols=symbols, now=now)
-        if not fallback or self.maintenance_runner.has_pending_kind("v3_position_fallback"):
+        fallback = self.coordinator.position_fallback_symbols(
+            symbols=symbols,
+            now=now,
+        )
+        if (
+            not fallback
+            or self.maintenance_runner.has_pending_kind("v3_position_fallback")
+        ):
             return
         self.maintenance_runner.submit(
             kind="v3_position_fallback",
-            operation=lambda symbols=tuple(fallback): self.rest_market_data.get_market_snapshots(list(symbols)),
+            operation=lambda symbols=tuple(fallback): (
+                self.rest_market_data.get_market_snapshots(list(symbols))
+            ),
             context={"symbols": list(fallback)},
             lane=BrokerTaskLane.STANDARD,
         )
@@ -554,24 +811,45 @@ class GoblinV3Runtime:
         if monotonic_now - self._last_close_confirmation_monotonic < 10.0:
             return
         self._last_close_confirmation_monotonic = monotonic_now
-        self.executor.schedule_close_confirmations()
+        self.executor.schedule_close_confirmation_checks()
 
     def _drain_broker_tasks(self) -> None:
         resolved = self.executor.drain()
         if resolved:
-            # Fills reset trailing inside InventoryBook. Persist that reset
-            # immediately so a crash cannot restore old extrema.
-            self.runtime_state_store.save_inventory_book(self.book, asof=datetime.now(UTC))
+            for intent_id in resolved:
+                self.intent_book.resolve(intent_id)
+            self.runtime_state_store.save_inventory_book(
+                self.book,
+                asof=datetime.now(UTC),
+            )
+
         for completion in self.maintenance_runner.drain():
             if completion.kind == "v3_account_equity":
                 if completion.error is None:
                     equity = float(completion.value)
                     if math.isfinite(equity) and equity > 0:
                         self._equity = equity
+                        self._clear_maintenance_error(
+                            "equity_refresh",
+                            "v3_account_equity_recovered",
+                            {"equity": equity},
+                        )
+                    else:
+                        self.metrics["errors"] += 1
+                        self._record_maintenance_error(
+                            "equity_refresh",
+                            "v3_account_equity_error",
+                            {"reason": "invalid_equity_value"},
+                        )
                 else:
                     self.metrics["errors"] += 1
-                    self.trade_journal.write(
-                        "v3_account_equity_error", {"error": str(completion.error)}
+                    self._record_maintenance_error(
+                        "equity_refresh",
+                        "v3_account_equity_error",
+                        {
+                            "error_type": type(completion.error).__name__,
+                            "message": str(completion.error),
+                        },
                     )
             elif completion.kind == "v3_position_fallback":
                 self._handle_position_fallback_completion(completion)
@@ -579,12 +857,19 @@ class GoblinV3Runtime:
     def _handle_position_fallback_completion(self, completion) -> None:
         symbols = list((completion.context or {}).get("symbols", []))
         if completion.error is not None:
+            self.metrics["errors"] += 1
             self.coordinator.mark_fallback_failed(symbols)
-            self.trade_journal.write(
+            self._record_maintenance_error(
+                "position_fallback",
                 "v3_position_fallback_error",
-                {"symbols": symbols, "error": str(completion.error)},
+                {
+                    "symbols": symbols,
+                    "error_type": type(completion.error).__name__,
+                    "message": str(completion.error),
+                },
             )
             return
+
         snapshots = completion.value or {}
         recovered: list[str] = []
         for symbol in symbols:
@@ -599,7 +884,6 @@ class GoblinV3Runtime:
             if validation.status != MarketDataStatus.ACCEPTED:
                 continue
             recovered.append(symbol)
-            # REST fallback is position-management only: never open/reenter risk.
             for intent in self.intent_book.triggered(snapshot):
                 if not intent.reduce_only:
                     continue
@@ -613,21 +897,29 @@ class GoblinV3Runtime:
                             "purpose": intent.purpose.value,
                             "symbol": intent.symbol,
                             "side": intent.side,
+                            "reduce_only": True,
                             "source": "rest_fallback",
                         },
                     )
+
         if recovered:
             self.coordinator.mark_fallback_succeeded(recovered)
+            self._clear_maintenance_error(
+                "position_fallback",
+                "v3_position_fallback_recovered",
+                {"symbols": recovered},
+            )
 
     def _refresh_sessions(self, now: datetime) -> None:
         for symbol in self.symbols:
             asset_class = self.asset_class_by_symbol[symbol]
-            decision = self.trading_session_service.evaluate(asset_class=asset_class, now=now)
+            decision = self.trading_session_service.evaluate(
+                asset_class=asset_class,
+                now=now,
+            )
             previous = self.session_decisions.get(symbol)
             self.session_decisions[symbol] = decision
             if previous != decision:
-                # V3 uses session_active only for risk authority. It deliberately
-                # ignores V1's last-hour force-close/new-entry cutoff.
                 self.trade_journal.write(
                     "v3_session_state",
                     {
@@ -644,7 +936,10 @@ class GoblinV3Runtime:
         result: set[str] = set()
         for symbol in self.symbols:
             asset_class = self.asset_class_by_symbol[symbol]
-            decision = self.trading_session_service.evaluate(asset_class=asset_class, now=asof)
+            decision = self.trading_session_service.evaluate(
+                asset_class=asset_class,
+                now=asof,
+            )
             if decision.session_active:
                 result.add(symbol)
         return result
@@ -655,15 +950,27 @@ class GoblinV3Runtime:
             session is not None
             and getattr(session, "session_active", False)
             and self.coordinator.entry_allowed(symbol)
+            and self.executor.new_risk_allowed
         )
 
-    def _retain_reduce_only_for_missing(self, symbols) -> None:
+    def _active_inventories(self):
+        return tuple(
+            inventory
+            for inventory in self.book.inventories
+            if inventory.total_units > 0
+        )
+
+    def _retain_reduce_only(self, symbols) -> None:
+        symbol_set = {str(symbol).strip().upper() for symbol in symbols}
         by_symbol: dict[str, list[OrderIntent]] = {}
         for intent in self.intent_book.snapshot():
-            if intent.symbol in symbols and intent.reduce_only:
+            if intent.symbol in symbol_set and intent.reduce_only:
                 by_symbol.setdefault(intent.symbol, []).append(intent)
-        for symbol in symbols:
-            self.intent_book.replace_symbol(symbol, tuple(by_symbol.get(symbol, ())))
+        for symbol in symbol_set:
+            self.intent_book.replace_symbol(
+                symbol,
+                tuple(by_symbol.get(symbol, ())),
+            )
 
     def _journal_decision(
         self,
@@ -673,12 +980,49 @@ class GoblinV3Runtime:
         *,
         extra: dict | None = None,
     ) -> None:
+        reasons = tuple(item.reason for item in decision.decisions)
+        for reason in reasons:
+            self._decision_reason_counts[reason.value] += 1
+
+        material = bool(intents) or any(
+            reason in _MATERIAL_DECISION_REASONS for reason in reasons
+        )
+        if not material:
+            self._clear_logged_decision(symbol)
+            return
+
+        signature = (
+            tuple(reason.value for reason in reasons),
+            tuple(
+                (
+                    intent.purpose.value,
+                    intent.side,
+                    round(intent.notional, 4),
+                    (
+                        None
+                        if intent.limit_price is None
+                        else round(intent.limit_price, 8)
+                    ),
+                    intent.reduce_only,
+                )
+                for intent in intents
+            ),
+            tuple(sorted((extra or {}).items())),
+        )
+        if self._last_logged_decision_signature.get(symbol) == signature:
+            return
+        self._last_logged_decision_signature[symbol] = signature
+
         self.trade_journal.write(
             "v3_inventory_decision",
             {
                 "symbol": symbol,
                 "decisions": [
-                    {"reason": item.reason.value, "detail": dict(item.detail), "asof": item.asof}
+                    {
+                        "reason": item.reason.value,
+                        "detail": dict(item.detail),
+                        "asof": item.asof,
+                    }
                     for item in decision.decisions
                 ],
                 "intents": [
@@ -691,9 +1035,10 @@ class GoblinV3Runtime:
                         "reduce_only": intent.reduce_only,
                         "expected_gross_capture": intent.expected_gross_capture,
                         "estimated_cost": (
-                            intent.cost_estimate.total if intent.cost_estimate is not None else None
+                            intent.cost_estimate.total
+                            if intent.cost_estimate is not None
+                            else None
                         ),
-                        "metadata": dict(intent.metadata),
                     }
                     for intent in intents
                 ],
@@ -701,19 +1046,109 @@ class GoblinV3Runtime:
             },
         )
 
+    def _clear_logged_decision(self, symbol: str) -> None:
+        if self._last_logged_decision_signature.pop(symbol, None) is None:
+            return
+        self.trade_journal.write(
+            "v3_inventory_decision_cleared",
+            {"symbol": symbol},
+        )
+
+    def _record_market_quality_transition(
+        self,
+        *,
+        symbol: str,
+        source: MarketDataSource,
+        status: MarketDataStatus,
+        reasons: tuple[str, ...],
+    ) -> None:
+        signature = (source.value, status.value, reasons)
+        if self._market_quality_signature.get(symbol) == signature:
+            return
+        self._market_quality_signature[symbol] = signature
+        self.trade_journal.write(
+            "v3_market_data_quality_changed",
+            {
+                "symbol": symbol,
+                "source": source.value,
+                "status": status.value,
+                "reasons": list(reasons),
+            },
+        )
+
+    def _record_market_quality_recovery(
+        self,
+        *,
+        symbol: str,
+        source: MarketDataSource,
+    ) -> None:
+        previous = self._market_quality_signature.pop(symbol, None)
+        if previous is None:
+            return
+        self.trade_journal.write(
+            "v3_market_data_quality_recovered",
+            {
+                "symbol": symbol,
+                "source": source.value,
+                "previous_status": previous[1],
+                "previous_reasons": list(previous[2]),
+            },
+        )
+
+    def _record_maintenance_error(
+        self,
+        key: str,
+        event_type: str,
+        payload: dict,
+    ) -> None:
+        if key in self._maintenance_errors:
+            return
+        self._maintenance_errors.add(key)
+        self.trade_journal.write(event_type, payload)
+
+    def _clear_maintenance_error(
+        self,
+        key: str,
+        event_type: str,
+        payload: dict,
+    ) -> None:
+        if key not in self._maintenance_errors:
+            return
+        self._maintenance_errors.discard(key)
+        self.trade_journal.write(event_type, payload)
+
+    def _heartbeat_metrics(self) -> dict[str, object]:
+        return {
+            **self.metrics,
+            "decision_reason_counts": dict(
+                sorted(self._decision_reason_counts.items())
+            ),
+            "market_data_coordinator": dict(self.coordinator.metrics),
+            "new_risk_allowed": self.executor.new_risk_allowed,
+            "risk_halt_reason": self.executor.halted_reason,
+        }
+
     def _market_data_quality_config(self, symbol: str):
         if symbol in self.asset_class_by_symbol:
             return self.instrument_registry.config_for(symbol).market_data_quality
         asset_class = self.context_asset_classes[symbol]
-        return self.instrument_registry.instrument_configs[asset_class].market_data_quality
+        return self.instrument_registry.instrument_configs[
+            asset_class
+        ].market_data_quality
 
     def _emit_due_research_state(self, now: datetime) -> None:
         if self.research_pipeline is None:
             return
         cadence = self.research_pipeline.sampling_cadence_minutes
-        eligible = _utc(now) - timedelta(seconds=CANDLE_CLOCK_GRACE_SECONDS)
+        eligible = _utc(now) - timedelta(
+            seconds=CANDLE_CLOCK_GRACE_SECONDS
+        )
         minute = eligible.minute - eligible.minute % cadence
-        boundary = eligible.replace(minute=minute, second=0, microsecond=0)
+        boundary = eligible.replace(
+            minute=minute,
+            second=0,
+            microsecond=0,
+        )
         if boundary == self._last_research_boundary:
             return
         self._last_research_boundary = boundary
@@ -724,7 +1159,6 @@ class GoblinV3Runtime:
                 session_decisions=self.session_decisions,
             )
         except Exception:
-            # Research remains isolated from trading authority.
             self.metrics["errors"] += 1
             logger.exception("V3 research boundary failed")
 
