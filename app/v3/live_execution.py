@@ -4,7 +4,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable
 
-from app.brokers.base import BrokerCloseExecution, OpenPositionResult
+from app.brokers.base import (
+    BrokerCloseExecution,
+    ClosePositionSubmissionUnknownError,
+    OpenPositionResult,
+)
 from app.brokers.etoro.order_confirmation_error import EtoroOrderConfirmationUnknownError
 from app.market.models import MarketSnapshot
 from app.runtime.broker_task_runner import BrokerTaskCompletion, BrokerTaskLane
@@ -42,7 +46,7 @@ class V3BrokerExecutor:
 
     Strategy planning never calls the broker. This coordinator writes a durable
     submission-start event before scheduling each mutation, applies accounting only
-    after confirmed fills, and halts new risk when an open-order result is unknown.
+    after confirmed fills, and halts new risk when an order result is unknown.
     """
 
     def __init__(
@@ -74,7 +78,11 @@ class V3BrokerExecutor:
     def schedule(self, intent: OrderIntent, *, snapshot: MarketSnapshot) -> bool:
         if intent.intent_id in self._pending_actions:
             return False
-        if intent.purpose in {IntentPurpose.HEDGE_OPEN, IntentPurpose.HEDGE_ADJUST, IntentPurpose.HEDGE_CLOSE}:
+        if intent.purpose in {
+            IntentPurpose.HEDGE_OPEN,
+            IntentPurpose.HEDGE_ADJUST,
+            IntentPurpose.HEDGE_CLOSE,
+        }:
             raise RuntimeError(
                 "Portfolio hedge execution is not enabled until hedge beta/cost validation is wired"
             )
@@ -84,9 +92,16 @@ class V3BrokerExecutor:
             return self._schedule_open(intent, snapshot=snapshot)
         if intent.side.upper() == "SELL" and intent.reduce_only:
             return self._schedule_inventory_close(intent, snapshot=snapshot)
-        raise RuntimeError(f"Unsupported V3 broker intent: {intent.purpose}/{intent.side}")
+        raise RuntimeError(
+            f"Unsupported V3 broker intent: {intent.purpose}/{intent.side}"
+        )
 
-    def _schedule_open(self, intent: OrderIntent, *, snapshot: MarketSnapshot) -> bool:
+    def _schedule_open(
+        self,
+        intent: OrderIntent,
+        *,
+        snapshot: MarketSnapshot,
+    ) -> bool:
         inventory = self.book.active_for_symbol(intent.symbol)
         inventory_id = (
             inventory.inventory_id
@@ -109,7 +124,6 @@ class V3BrokerExecutor:
             },
         )
         context = _OpenContext(action_id, intent, inventory_id, trigger_price)
-        # BUY X1 currently ignores these bot-side placeholders in eToro's payload.
         stop_loss = max(1e-8, trigger_price * 0.5)
         take_profit = trigger_price * 10.0
         self.task_runner.submit(
@@ -128,7 +142,12 @@ class V3BrokerExecutor:
         self._pending_actions.add(action_id)
         return True
 
-    def _schedule_inventory_close(self, intent: OrderIntent, *, snapshot: MarketSnapshot) -> bool:
+    def _schedule_inventory_close(
+        self,
+        intent: OrderIntent,
+        *,
+        snapshot: MarketSnapshot,
+    ) -> bool:
         inventory = self.book.active_for_symbol(intent.symbol)
         if inventory is None:
             return False
@@ -172,7 +191,9 @@ class V3BrokerExecutor:
                 kind="close_position",
                 task_id=f"v3-close:{action_id}",
                 context=context,
-                operation=lambda current_id=position_id: self.broker.close_position(current_id),
+                operation=lambda current_id=position_id: self.broker.close_position(
+                    current_id
+                ),
                 lane=BrokerTaskLane.CLOSE,
             )
             self._pending_actions.add(action_id)
@@ -184,7 +205,10 @@ class V3BrokerExecutor:
         for completion in self.task_runner.drain():
             if completion.kind == "v3_open_position":
                 applied.extend(self._handle_open_completion(completion))
-            elif completion.kind == "close_position" and isinstance(completion.context, _CloseContext):
+            elif completion.kind == "close_position" and isinstance(
+                completion.context,
+                _CloseContext,
+            ):
                 applied.extend(self._handle_close_submission(completion))
             elif completion.kind == "v3_close_execution_lookup":
                 applied.extend(self._handle_close_lookup(completion))
@@ -192,7 +216,9 @@ class V3BrokerExecutor:
 
     def schedule_close_confirmation_checks(self) -> int:
         scheduled = 0
-        for action_id, pending in tuple(self._pending_close_confirmations.items()):
+        for action_id, pending in tuple(
+            self._pending_close_confirmations.items()
+        ):
             if action_id in self._confirmation_tasks:
                 continue
             self._confirmation_tasks.add(action_id)
@@ -209,7 +235,10 @@ class V3BrokerExecutor:
             scheduled += 1
         return scheduled
 
-    def restore_pending_close_confirmations(self, events: Iterable[InventoryEvent]) -> None:
+    def restore_pending_close_confirmations(
+        self,
+        events: Iterable[InventoryEvent],
+    ) -> None:
         accepted: dict[str, _PendingCloseConfirmation] = {}
         resolved: set[str] = set()
         for event in events:
@@ -219,14 +248,20 @@ class V3BrokerExecutor:
                 accepted[action_id] = _PendingCloseConfirmation(
                     context=_CloseContext(
                         action_id=action_id,
-                        intent=_restored_close_intent(payload, event.occurred_at),
+                        intent=_restored_close_intent(
+                            payload,
+                            event.occurred_at,
+                        ),
                         inventory_id=event.inventory_id,
                         position_id=str(payload["position_id"]),
                         trigger_price=float(payload["trigger_price"]),
                     ),
                     close_order_id=str(payload["close_order_id"]),
                 )
-            elif event.event_type in {"EXIT_FILLED", "CLOSE_SUBMISSION_FAILED"} and action_id:
+            elif event.event_type in {
+                "EXIT_FILLED",
+                "CLOSE_SUBMISSION_FAILED",
+            } and action_id:
                 resolved.add(action_id)
         for action_id in resolved:
             accepted.pop(action_id, None)
@@ -237,22 +272,35 @@ class V3BrokerExecutor:
         missing: list[str] = []
         for inventory in self.book.inventories:
             for leg in inventory.broker_legs:
-                self.broker.remember_position_instrument(leg.position_id, inventory.symbol)
+                self.broker.remember_position_instrument(
+                    leg.position_id,
+                    inventory.symbol,
+                )
                 if not self.broker.is_position_open(leg.position_id):
                     missing.append(leg.position_id)
         if missing:
             self.halted_reason = "known_broker_leg_missing"
         return tuple(sorted(missing))
 
-    def _handle_open_completion(self, completion: BrokerTaskCompletion) -> list[str]:
+    def _handle_open_completion(
+        self,
+        completion: BrokerTaskCompletion,
+    ) -> list[str]:
         context = completion.context
         if not isinstance(context, _OpenContext):
             return []
         self._pending_actions.discard(context.action_id)
         if completion.error is not None:
-            unknown = isinstance(completion.error, EtoroOrderConfirmationUnknownError)
+            unknown = isinstance(
+                completion.error,
+                EtoroOrderConfirmationUnknownError,
+            )
             self._append(
-                event_type=("ORDER_SUBMISSION_UNKNOWN" if unknown else "ORDER_SUBMISSION_FAILED"),
+                event_type=(
+                    "ORDER_SUBMISSION_UNKNOWN"
+                    if unknown
+                    else "ORDER_SUBMISSION_FAILED"
+                ),
                 inventory_id=context.inventory_id,
                 event_id=f"{context.action_id}:open-error",
                 payload={
@@ -299,21 +347,35 @@ class V3BrokerExecutor:
         )
         return [context.intent.intent_id]
 
-    def _handle_close_submission(self, completion: BrokerTaskCompletion) -> list[str]:
+    def _handle_close_submission(
+        self,
+        completion: BrokerTaskCompletion,
+    ) -> list[str]:
         context = completion.context
         assert isinstance(context, _CloseContext)
         if completion.error is not None:
             self._pending_actions.discard(context.action_id)
+            unknown = isinstance(
+                completion.error,
+                ClosePositionSubmissionUnknownError,
+            )
             self._append(
-                event_type="CLOSE_SUBMISSION_FAILED",
+                event_type=(
+                    "CLOSE_SUBMISSION_UNKNOWN"
+                    if unknown
+                    else "CLOSE_SUBMISSION_FAILED"
+                ),
                 inventory_id=context.inventory_id,
                 event_id=f"{context.action_id}:close-error",
                 payload={
                     "action_id": context.action_id,
                     "position_id": context.position_id,
                     "error": str(completion.error),
+                    "error_type": type(completion.error).__name__,
                 },
             )
+            if unknown:
+                self.halted_reason = "close_submission_outcome_unknown"
             return []
         submission = completion.value
         broker_payload = getattr(submission, "broker_response", {}) or {}
@@ -322,7 +384,9 @@ class V3BrokerExecutor:
                 context=context,
                 exit_price=context.trigger_price,
                 filled_at=_utc_now(),
-                close_order_id=str(getattr(submission, "close_order_id", "paper")),
+                close_order_id=str(
+                    getattr(submission, "close_order_id", "paper")
+                ),
             )
             return [context.intent.intent_id]
         close_order_id = getattr(submission, "close_order_id", None)
@@ -332,7 +396,10 @@ class V3BrokerExecutor:
                 event_type="CLOSE_SUBMISSION_UNKNOWN",
                 inventory_id=context.inventory_id,
                 event_id=f"{context.action_id}:close-unknown",
-                payload={"action_id": context.action_id, "position_id": context.position_id},
+                payload={
+                    "action_id": context.action_id,
+                    "position_id": context.position_id,
+                },
             )
             return []
         pending = _PendingCloseConfirmation(context, str(close_order_id))
@@ -352,7 +419,10 @@ class V3BrokerExecutor:
         )
         return []
 
-    def _handle_close_lookup(self, completion: BrokerTaskCompletion) -> list[str]:
+    def _handle_close_lookup(
+        self,
+        completion: BrokerTaskCompletion,
+    ) -> list[str]:
         pending = completion.context
         if not isinstance(pending, _PendingCloseConfirmation):
             return []
@@ -362,8 +432,13 @@ class V3BrokerExecutor:
             self._append(
                 event_type="CLOSE_CONFIRMATION_ERROR",
                 inventory_id=pending.context.inventory_id,
-                event_id=f"{action_id}:confirm-error:{_utc_now().isoformat()}",
-                payload={"action_id": action_id, "error": str(completion.error)},
+                event_id=(
+                    f"{action_id}:confirm-error:{_utc_now().isoformat()}"
+                ),
+                payload={
+                    "action_id": action_id,
+                    "error": str(completion.error),
+                },
             )
             return []
         execution = completion.value
@@ -393,7 +468,11 @@ class V3BrokerExecutor:
             self.halted_reason = "close_fill_without_inventory"
             return
         leg = next(
-            (item for item in inventory.broker_legs if item.position_id == context.position_id),
+            (
+                item
+                for item in inventory.broker_legs
+                if item.position_id == context.position_id
+            ),
             None,
         )
         if leg is None:
@@ -452,7 +531,10 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _restored_close_intent(payload: dict, occurred_at: datetime) -> OrderIntent:
+def _restored_close_intent(
+    payload: dict,
+    occurred_at: datetime,
+) -> OrderIntent:
     from app.v3.models import ExecutionStyle
 
     return OrderIntent(
