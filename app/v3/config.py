@@ -21,7 +21,6 @@ class InventoryRiskConfig:
     max_symbol_exposure_pct:float=.04
     max_portfolio_exposure_pct:float=.15
     max_inventories:int=7
-    catastrophic_portfolio_drawdown_pct:float=.10
 
 @dataclass(frozen=True)
 class InventoryStrategyConfig:
