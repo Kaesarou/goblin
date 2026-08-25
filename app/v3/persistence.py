@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -30,16 +33,30 @@ class InventorySnapshot:
 class InventoryEventStore:
     """Append-only inventory ledger with idempotent event application.
 
-    SQLite stays deliberately boring: an event id is the idempotency boundary,
-    while snapshots are replaceable acceleration artifacts rather than truth.
+    SQLite is the economic restart truth. An optional event sink mirrors only
+    newly inserted events into the compact run journal, so weekly log archives
+    remain auditable without serializing causal state on every loop.
     """
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        event_sink: Callable[[InventoryEvent], None] | None = None,
+    ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._event_sink = event_sink
         self._initialize()
 
+    def set_event_sink(
+        self,
+        event_sink: Callable[[InventoryEvent], None] | None,
+    ) -> None:
+        self._event_sink = event_sink
+
     def append(self, event: InventoryEvent) -> bool:
+        actual_event = _deduplicate_high_frequency_event(event)
         with self._connect() as connection:
             cursor = connection.execute(
                 """
@@ -49,16 +66,30 @@ class InventoryEventStore:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    event.event_id,
-                    event.inventory_id,
-                    event.event_type,
-                    event.occurred_at.isoformat(),
-                    json.dumps(_jsonable(event.payload), sort_keys=True, separators=(",", ":")),
-                    event.strategy_version,
-                    event.model_version,
+                    actual_event.event_id,
+                    actual_event.inventory_id,
+                    actual_event.event_type,
+                    actual_event.occurred_at.isoformat(),
+                    json.dumps(
+                        _jsonable(actual_event.payload),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    actual_event.strategy_version,
+                    actual_event.model_version,
                 ),
             )
-            return cursor.rowcount == 1
+            inserted = cursor.rowcount == 1
+        if inserted and self._event_sink is not None:
+            try:
+                self._event_sink(actual_event)
+            except Exception:
+                logger.exception(
+                    "V3 inventory event journal mirror failed | event_type=%s | event_id=%s",
+                    actual_event.event_type,
+                    actual_event.event_id,
+                )
+        return inserted
 
     def events(self, inventory_id: str | None = None) -> list[InventoryEvent]:
         query = (
@@ -98,7 +129,11 @@ class InventoryEventStore:
                 (
                     snapshot.inventory_id,
                     snapshot.asof.isoformat(),
-                    json.dumps(_jsonable(snapshot.state), sort_keys=True, separators=(",", ":")),
+                    json.dumps(
+                        _jsonable(snapshot.state),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
                 ),
             )
 
@@ -153,6 +188,18 @@ class InventoryEventStore:
         connection = sqlite3.connect(self.path)
         connection.execute("PRAGMA foreign_keys=ON")
         return connection
+
+
+def _deduplicate_high_frequency_event(event: InventoryEvent) -> InventoryEvent:
+    if event.event_type != "CLOSE_CONFIRMATION_ERROR":
+        return event
+    action_id = str(event.payload.get("action_id", "")).strip()
+    if not action_id:
+        return event
+    return replace(
+        event,
+        event_id=f"{action_id}:close-confirmation-error",
+    )
 
 
 def _jsonable(value: Any) -> Any:
