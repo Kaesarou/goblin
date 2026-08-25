@@ -24,12 +24,7 @@ class InventoryPlanner:
         # strategy. They point in opposite economic directions and are reconciled
         # independently by the execution environment.
         close=self._exit(market,portfolio,inv)
-        unstuck=self._unstuck(market,portfolio,inv)
         reentry=self._reentry(market,portfolio,inv)
-        if unstuck.intents:
-            # A risk reducer replaces an ordinary close when it is the chosen close
-            # branch. It never suppresses a separately eligible re-entry intent.
-            close=unstuck
         return close.extend(reentry)
     def _exp_ratio(self,i,p):
         # Point-M/Passivbot dynamic spacing uses its effective wallet-exposure
@@ -111,8 +106,3 @@ class InventoryPlanner:
         n=i.total_units*fraction*cp
         it=OrderIntent(_id(i.inventory_id,'close',m.asof,cp),IntentPurpose.PROFIT_EXIT,m.symbol,'SELL',n,m.asof,ExecutionStyle.LIMIT,limit_price=cp,inventory_id=i.inventory_id,reduce_only=True,metadata={'close_fraction_of_units':fraction,'close_threshold_pct':cap,'retracement_pct':rt_pct})
         return DecisionBatch((it,),(DecisionRecord(m.symbol,DecisionReason.TRAILING_EXIT,m.asof,{}),))
-    def _unstuck(self,m,p,i):
-        # Full global loss-allowance selection belongs to PortfolioPlanner. This
-        # symbol-level hook is intentionally inert for Point-M because the frozen
-        # max5/max7 reference paths contain zero unstuck fills.
-        return DecisionBatch()
