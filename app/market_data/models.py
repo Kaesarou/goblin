@@ -4,7 +4,7 @@ from enum import StrEnum
 
 from app.market.models import Candle, MarketSnapshot
 
-MARKET_DATA_MODEL_VERSION = 'market_data_v2_ws_clocked_2'
+MARKET_DATA_MODEL_VERSION = 'market_data_v2_ws_clocked_3'
 
 
 class MarketDataSource(StrEnum):
@@ -62,3 +62,6 @@ class CandleQuality:
 class CandleBuildResult:
     candle: Candle
     quality: CandleQuality
+    # Last complete executable quote observed inside the closed candle bucket.
+    # It is deliberately not synthesized from the first quote of the next bucket.
+    decision_snapshot: MarketSnapshot | None = None

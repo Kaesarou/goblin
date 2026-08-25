@@ -27,6 +27,7 @@ class QualityAwareCandleBuilder:
         self._sources: Counter[str] = Counter()
         self._pending_event: MarketDataEvent | None = None
         self._last_closed_result: CandleBuildResult | None = None
+        self._last_bucket_snapshot: MarketSnapshot | None = None
         self.ordering_drop_degrade_count = max(
             1,
             ordering_drop_degrade_count,
@@ -41,6 +42,7 @@ class QualityAwareCandleBuilder:
         self._bucket = None
         self._pending_event = None
         self._last_closed_result = None
+        self._last_bucket_snapshot = None
         self._reset_quality()
 
     def prepare_event(self, event: MarketDataEvent) -> None:
@@ -79,6 +81,7 @@ class QualityAwareCandleBuilder:
         )
         if self._bucket is None:
             self._bucket = bucket
+            self._last_bucket_snapshot = snapshot
             self._record_event(event, forwarded=True)
             self._builder.on_snapshot(snapshot)
             return None
@@ -88,11 +91,16 @@ class QualityAwareCandleBuilder:
             return None
 
         if bucket == self._bucket:
+            # A complete quote may update bid/ask even when the canonical last
+            # price is unchanged. Preserve it for causal execution economics,
+            # while OHLC still only consumes price_changed events.
+            self._last_bucket_snapshot = snapshot
             self._record_event(event, forwarded=event.price_changed)
             if event.price_changed:
                 self._builder.on_snapshot(snapshot)
             return None
 
+        closed_decision_snapshot = self._last_bucket_snapshot
         closed_quality_base = self._quality(
             carried_forward=False,
             last_price_age_seconds=None,
@@ -101,6 +109,7 @@ class QualityAwareCandleBuilder:
         closed = self._builder.on_snapshot(snapshot)
         carried, price_age = self._builder.take_last_closed_metadata()
         self._bucket = bucket
+        self._last_bucket_snapshot = snapshot
         self._reset_quality()
         self._record_event(event, forwarded=True)
         if closed is None:
@@ -113,6 +122,7 @@ class QualityAwareCandleBuilder:
                 last_price_age_seconds=price_age,
                 max_carry_forward_age_seconds=None,
             ),
+            decision_snapshot=closed_decision_snapshot,
         )
 
     def finalize_until(
@@ -122,10 +132,14 @@ class QualityAwareCandleBuilder:
         grace_seconds: float,
         max_carry_forward_age_seconds: float,
     ) -> list[CandleBuildResult]:
+        closed_bucket_snapshot = self._last_bucket_snapshot
         finalized = self._builder.finalize_until(
             now,
             grace_seconds=grace_seconds,
         )
+        if not finalized:
+            return []
+
         results: list[CandleBuildResult] = []
         for index, (candle, carried, price_age) in enumerate(finalized):
             quality = self._quality(
@@ -133,8 +147,22 @@ class QualityAwareCandleBuilder:
                 last_price_age_seconds=price_age,
                 max_carry_forward_age_seconds=max_carry_forward_age_seconds,
             )
-            results.append(CandleBuildResult(candle=candle, quality=quality))
+            decision_snapshot = (
+                closed_bucket_snapshot
+                if index == 0
+                and closed_bucket_snapshot is not None
+                and candle.opened_at <= closed_bucket_snapshot.timestamp < candle.closed_at
+                else None
+            )
+            results.append(
+                CandleBuildResult(
+                    candle=candle,
+                    quality=quality,
+                    decision_snapshot=decision_snapshot,
+                )
+            )
             self._bucket = candle.closed_at
+            self._last_bucket_snapshot = None
             self._reset_quality()
             if index + 1 < len(finalized):
                 self._bucket = candle.closed_at
