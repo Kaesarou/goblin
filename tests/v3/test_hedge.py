@@ -22,8 +22,24 @@ def inventory(notional=20_000.0):
     )
 
 
+def test_default_hedge_config_has_no_runtime_authority():
+    portfolio = PortfolioState(
+        equity=100_000,
+        inventories=(inventory(),),
+        symbol_betas={"NVDA": 1.5},
+    )
+    batch = PortfolioHedgeManager(HedgeConfig()).plan(
+        portfolio=portfolio,
+        hedge_price=600,
+        asof=NOW,
+    )
+    assert batch.intents == ()
+    assert batch.decisions == ()
+
+
 def test_sell_hedge_reduces_beta_distance_and_never_overhedges():
     cfg = HedgeConfig(
+        enabled=True,
         target_beta_exposure_pct=0.05,
         open_above_beta_exposure_pct=0.10,
         max_hedge_notional_pct=0.20,
@@ -48,6 +64,7 @@ def test_sell_hedge_reduces_beta_distance_and_never_overhedges():
 
 def test_existing_hedge_is_closed_when_beta_falls_below_close_threshold():
     cfg = HedgeConfig(
+        enabled=True,
         close_below_beta_exposure_pct=0.06,
         min_adjustment_notional_pct=0.001,
     )
