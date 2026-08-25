@@ -59,6 +59,84 @@ def test_clock_closes_quiet_m1_and_carries_price_without_fake_samples():
     assert not carried[0].quality.degraded
 
 
+def test_event_rollover_preserves_last_quote_from_closed_bucket():
+    start = datetime(2026, 7, 20, 12, 0, 10, tzinfo=timezone.utc)
+    builder = QualityAwareCandleBuilder()
+    builder.on_event(websocket_event(start, 100.0))
+    causal_at = start.replace(second=50)
+    causal = MarketSnapshot(
+        symbol='BTC',
+        bid=100.2,
+        ask=100.6,
+        last=100.4,
+        timestamp=causal_at,
+        received_at=causal_at,
+    )
+    builder.on_event(
+        MarketDataEvent(
+            symbol='BTC',
+            source=MarketDataSource.WEBSOCKET,
+            received_at=causal_at,
+            snapshot=causal,
+            message_id='m-causal',
+            connection_id='c-1',
+            price_changed=True,
+        )
+    )
+
+    next_minute = start.replace(minute=1, second=5)
+    future = MarketSnapshot(
+        symbol='BTC',
+        bid=109.0,
+        ask=111.0,
+        last=110.0,
+        timestamp=next_minute,
+        received_at=next_minute,
+    )
+    result = builder.on_event(
+        MarketDataEvent(
+            symbol='BTC',
+            source=MarketDataSource.WEBSOCKET,
+            received_at=next_minute,
+            snapshot=future,
+            message_id='m-future',
+            connection_id='c-1',
+            price_changed=True,
+        )
+    )
+
+    assert result is not None
+    assert result.candle.opened_at == start.replace(second=0)
+    assert result.candle.close == 100.4
+    assert result.decision_snapshot == causal
+    assert result.decision_snapshot.timestamp == causal_at
+    assert result.decision_snapshot.bid == 100.2
+    assert result.decision_snapshot.ask == 100.6
+    assert result.decision_snapshot != future
+
+
+def test_clocked_close_exposes_real_bucket_quote_but_not_carried_bucket_quote():
+    start = datetime(2026, 7, 20, 12, 0, 5, tzinfo=timezone.utc)
+    builder = QualityAwareCandleBuilder()
+    real = snapshot(start, 100.0)
+    builder.on_event(websocket_event(start, 100.0))
+
+    first = builder.finalize_until(
+        datetime(2026, 7, 20, 12, 1, 1, tzinfo=timezone.utc),
+        grace_seconds=1,
+        max_carry_forward_age_seconds=180,
+    )[0]
+    assert first.decision_snapshot == real
+
+    carried = builder.finalize_until(
+        datetime(2026, 7, 20, 12, 2, 1, tzinfo=timezone.utc),
+        grace_seconds=1,
+        max_carry_forward_age_seconds=180,
+    )[0]
+    assert carried.quality.carried_forward
+    assert carried.decision_snapshot is None
+
+
 def test_stale_carried_price_degrades_but_single_ordering_drop_does_not():
     start = datetime(2026, 7, 20, 12, 0, 5, tzinfo=timezone.utc)
     builder = QualityAwareCandleBuilder(
