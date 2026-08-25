@@ -58,7 +58,7 @@ class InventoryStrategyConfig:
 
 @dataclass(frozen=True)
 class HedgeConfig:
-    enabled:bool=True
+    enabled:bool=False
     hedge_symbol:str='SPY'
     target_beta_exposure_pct:float=.06
     open_above_beta_exposure_pct:float=.10
