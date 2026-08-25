@@ -14,8 +14,8 @@ CausalMarketState + PortfolioState
   -> InitialEntry
   -> InventoryState
   -> RecoverabilityAssessment
-  -> Reentry / NoReentry / ReduceRisk
-  -> TrailingExit / Unstuck
+  -> Reentry / NoReentry
+  -> TrailingExit
   -> Economics
   -> BrokerOrderPlan
 ```
@@ -138,6 +138,8 @@ The bounded max-five-entry profile also reproduces the earlier risk-reduced scre
 ### RR5 hard-risk boundary
 
 The Passivbot wallet-exposure limit used by dynamic spacing is **strategy geometry**, not a Goblin safety cap. V3 keeps `effective_wallet_exposure_limit_pct` frozen independently from hard symbol/portfolio caps. Hard caps crop order size to remaining budget; they do not silently change re-entry/close thresholds.
+
+The frozen RR5 path contains no unstuck fills and V3 declares no unstuck runtime authority. The inactive placeholder parameters were removed rather than presented as a safety mechanism.
 
 ### Recoverability caveat
 
