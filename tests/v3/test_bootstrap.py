@@ -64,6 +64,8 @@ def test_v3_manifest_declares_authority_and_compact_log_budget(tmp_path):
     assert manifest["risk"]["live_authority"]["etoro_live_allowed"] is False
     assert manifest["risk"]["hedge_execution_enabled"] is False
     budget = manifest["runtime"]["journals"]["v3_log_budget"]
-    assert budget["raw_market"] == "price_changes_only"
+    assert budget["raw_market"] == "sampled_10s_per_symbol_tick_processing_in_memory"
+    assert budget["raw_candles"] == "one_per_finalized_candle_with_decision_quote"
     assert budget["silent_decisions"] == "heartbeat_aggregates_only"
     assert budget["causal_restart_state"] == "sqlite_only"
+    assert manifest["analysis_sources"]["decision_quote_retained_with_candle"] is True
