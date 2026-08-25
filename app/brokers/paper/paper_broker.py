@@ -58,20 +58,34 @@ class PaperBrokerClient(BrokerClient):
             executed_entry_price=None,
         )
 
-    def close_position(self, position_id: str) -> ClosePositionSubmission:
+    def close_position(
+        self,
+        position_id: str,
+        units_to_deduct: float | None = None,
+    ) -> ClosePositionSubmission:
         submitted_at = datetime.now(timezone.utc)
-        position = self.positions.pop(position_id, None)
+        position = self.positions.get(position_id)
         if position is None:
             raise ClosePositionRejectedError(
                 position_id=position_id,
                 message=f'Unknown paper position: {position_id}',
             )
+        if units_to_deduct is not None and units_to_deduct <= 0:
+            raise ClosePositionRejectedError(
+                position_id=position_id,
+                message='Paper partial close requires positive units_to_deduct',
+            )
+        partial = units_to_deduct is not None
+        if not partial:
+            self.positions.pop(position_id, None)
         accepted_at = datetime.now(timezone.utc)
         close_order_id = f'paper-close-{uuid4()}'
         logger.info(
-            'Paper close recorded | position_id=%s | close_order_id=%s',
+            'Paper close recorded | position_id=%s | close_order_id=%s | '
+            'units_to_deduct=%s',
             position_id,
             close_order_id,
+            units_to_deduct,
         )
         return ClosePositionSubmission(
             position_id=position_id,
@@ -84,6 +98,8 @@ class PaperBrokerClient(BrokerClient):
                 'mode': 'paper',
                 'position_id': position_id,
                 'close_order_id': close_order_id,
+                'partial': partial,
+                'units_to_deduct': units_to_deduct,
             },
         )
 

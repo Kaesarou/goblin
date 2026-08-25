@@ -25,7 +25,7 @@ from app.runtime.runtime_policy import (
 )
 from app.runtime.trading_session_window import trading_session_service_from_settings
 from app.utils.logging import configure_logging
-from app.v3.config import RecoverabilityConfig, rr5_research_config
+from app.v3.config import RecoverabilityConfig, etoro5_research_config
 from app.v3.economics import BrokerCostSchedule, EconomicsModel
 from app.v3.features import OnlineFeatureEngine
 from app.v3.manifest import (
@@ -43,6 +43,9 @@ from app.v3.state_store import V3RuntimeStateStore
 
 logger = logging.getLogger(__name__)
 
+V3_PROFILE = "RR5_ETORO5_PROSPECTIVE_VALIDATION"
+ETORO_FIXED_FEE_ASSUMPTION_PER_REQUEST = 1.0
+
 
 def build_candle_builders(
     symbols: list[str],
@@ -55,6 +58,7 @@ def _build_analysis_journal(
     settings: Settings,
     run_paths,
     run_id: str,
+    strategy: str,
     profile: str,
 ) -> AnalysisJournal:
     debug_enabled = settings.journal_detail_level in {"debug", "full"}
@@ -86,7 +90,7 @@ def _build_analysis_journal(
             JOURNAL_PARTIAL_SUMMARY_INTERVAL_MINUTES
         ),
         run_id=run_id,
-        strategy="INVENTORY_RR5_V1",
+        strategy=strategy,
         profile=profile,
     )
 
@@ -245,7 +249,7 @@ def main() -> None:
     instrument_registry.validate_supported_symbols(symbols)
     _assert_v3_universe(symbols, instrument_registry)
 
-    config = rr5_research_config()
+    config = etoro5_research_config()
     config = type(config)(
         strategy=config.strategy,
         risk=config.risk,
@@ -260,7 +264,9 @@ def main() -> None:
         risk_policy=InventoryRiskPolicy(config.risk),
         economics_model=EconomicsModel(
             config.economics,
-            BrokerCostSchedule(),
+            BrokerCostSchedule(
+                fixed_fee_per_fill=ETORO_FIXED_FEE_ASSUMPTION_PER_REQUEST,
+            ),
         ),
     )
 
@@ -268,7 +274,8 @@ def main() -> None:
         settings=settings,
         run_paths=run_paths,
         run_id=run_id,
-        profile="RR5_PROSPECTIVE_VALIDATION",
+        strategy=config.strategy.name,
+        profile=V3_PROFILE,
     )
     market_journal = RawDataJournal(
         JsonlJournal(
@@ -277,6 +284,10 @@ def main() -> None:
             stream_name="market",
         ),
         trade_journal.record_raw_event,
+        state_observer=lambda event_type, payload: trade_journal.write(
+            event_type,
+            payload,
+        ),
     )
     candle_journal = RawDataJournal(
         JsonlJournal(
@@ -374,12 +385,18 @@ def main() -> None:
         {
             "run_id": run_id,
             "strategy": config.strategy.name,
-            "profile": "RR5_PROSPECTIVE_VALIDATION",
+            "profile": V3_PROFILE,
             "market_data_mode": "websocket",
             "execution_mode": settings.broker,
             "recoverability_enabled": False,
             "hedge_execution_enabled": False,
             "live_capital_authority": False,
+            "broker_cost_assumption": {
+                "fixed_fee_per_request_usd": (
+                    ETORO_FIXED_FEE_ASSUMPTION_PER_REQUEST
+                ),
+                "authority": "research_estimate_not_broker_actual",
+            },
             "run_journal_root": str(run_paths.root),
             "rotated_run_ids": list(removed_runs),
         },

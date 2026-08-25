@@ -63,8 +63,15 @@ class CachedBrokerClient(BrokerClient):
         self.invalidate_account_and_positions()
         return result
 
-    def close_position(self, position_id: str) -> ClosePositionSubmission:
-        submission = self.delegate.close_position(position_id)
+    def close_position(
+        self,
+        position_id: str,
+        units_to_deduct: float | None = None,
+    ) -> ClosePositionSubmission:
+        submission = self.delegate.close_position(
+            position_id,
+            units_to_deduct=units_to_deduct,
+        )
         self.invalidate_account_and_positions()
         return submission
 

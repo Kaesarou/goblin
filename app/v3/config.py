@@ -1,10 +1,12 @@
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
+
 
 class EconomicsPolicy(StrEnum):
     REQUIRE_NET_POSITIVE='require_net_positive'
     RESEARCH_GROSS_EDGE='research_gross_edge'
+
 
 @dataclass(frozen=True)
 class RecoverabilityConfig:
@@ -12,12 +14,14 @@ class RecoverabilityConfig:
     min_rank_quantile: float=.75
     gate_from_entry_fill_count: int=2
 
+
 @dataclass(frozen=True)
 class InventoryRiskConfig:
     max_entry_fills:int=5
     max_symbol_exposure_pct:float=.04
     max_portfolio_exposure_pct:float=.15
     max_inventories:int=7
+
 
 @dataclass(frozen=True)
 class InventoryStrategyConfig:
@@ -46,6 +50,7 @@ class InventoryStrategyConfig:
     close_retracement_volatility_1h_weight:float=22.95
     entry_cooldown_minutes:float=24.1
 
+
 @dataclass(frozen=True)
 class HedgeConfig:
     enabled:bool=False
@@ -57,10 +62,12 @@ class HedgeConfig:
     max_hedge_notional_pct:float=.10
     min_adjustment_notional_pct:float=.005
 
+
 @dataclass(frozen=True)
 class EconomicsConfig:
     policy:EconomicsPolicy=EconomicsPolicy.RESEARCH_GROSS_EDGE
     expected_holding_days:float=3.0
+
 
 @dataclass(frozen=True)
 class GoblinV3Config:
@@ -70,8 +77,33 @@ class GoblinV3Config:
     hedge:HedgeConfig=field(default_factory=HedgeConfig)
     economics:EconomicsConfig=field(default_factory=EconomicsConfig)
 
+
 def rr5_research_config()->GoblinV3Config:
+    """Frozen 7-slot Point-M reference configuration."""
     return GoblinV3Config()
+
+
+def etoro5_research_config()->GoblinV3Config:
+    """Broker-adapted five-slot profile without retuning strategy thresholds.
+
+    Only simultaneous inventory count and the Passivbot-derived per-slot wallet
+    geometry change. All entry/re-entry/trailing parameters remain identical to
+    the frozen RR5 reference.
+    """
+    base = rr5_research_config()
+    slots = 5
+    effective_wel = (1.5 / slots) * 1.37
+    initial_exposure = effective_wel * 0.0081
+    return replace(
+        base,
+        strategy=replace(
+            base.strategy,
+            name='INVENTORY_RR5_ETORO5_V1',
+            effective_wallet_exposure_limit_pct=effective_wel,
+            initial_exposure_pct=initial_exposure,
+        ),
+        risk=replace(base.risk, max_inventories=slots),
+    )
 
 
 def rr5_recoverability_experiment_config(

@@ -8,6 +8,9 @@ from app.v3.models import BrokerLeg, InventoryState, InventoryStatus, PortfolioS
 from app.v3.persistence import InventoryEvent
 
 
+_CLOSE_TOLERANCE = 1e-9
+
+
 class InventoryBook:
     """In-memory projection of the append-only V3 inventory ledger."""
 
@@ -35,6 +38,11 @@ class InventoryBook:
                 book.apply_exit_fill(
                     position_id=str(payload["position_id"]),
                     exit_price=float(payload["price"]),
+                    units=(
+                        None
+                        if payload.get("units") is None
+                        else float(payload["units"])
+                    ),
                     fee=float(payload.get("fee", 0.0)),
                     filled_at=event.occurred_at,
                 )
@@ -131,17 +139,38 @@ class InventoryBook:
         exit_price: float,
         fee: float,
         filled_at: datetime,
+        units: float | None = None,
     ) -> InventoryState:
         try:
-            inventory_id = self._inventory_by_position_id.pop(position_id)
+            inventory_id = self._inventory_by_position_id[position_id]
         except KeyError as exc:
             raise KeyError(f"Unknown broker position close: {position_id}") from exc
         inventory = self._inventories[inventory_id]
         leg = next(item for item in inventory.broker_legs if item.position_id == position_id)
-        realized = leg.units * (exit_price - leg.entry_price)
-        remaining_legs = tuple(
-            item for item in inventory.broker_legs if item.position_id != position_id
-        )
+        close_units = leg.units if units is None else float(units)
+        if close_units <= 0:
+            raise ValueError("Exit fill requires positive units")
+        if close_units > leg.units + _CLOSE_TOLERANCE:
+            raise ValueError(
+                f"Exit fill exceeds broker leg: position_id={position_id}, "
+                f"close_units={close_units}, leg_units={leg.units}"
+            )
+        close_units = min(close_units, leg.units)
+        remaining_units = max(0.0, leg.units - close_units)
+        realized = close_units * (exit_price - leg.entry_price)
+
+        if remaining_units <= _CLOSE_TOLERANCE:
+            self._inventory_by_position_id.pop(position_id, None)
+            remaining_legs = tuple(
+                item for item in inventory.broker_legs if item.position_id != position_id
+            )
+        else:
+            remaining_leg = replace(leg, units=remaining_units)
+            remaining_legs = tuple(
+                remaining_leg if item.position_id == position_id else item
+                for item in inventory.broker_legs
+            )
+
         if not remaining_legs:
             updated = replace(
                 inventory,
@@ -155,12 +184,12 @@ class InventoryBook:
                 status=InventoryStatus.CLOSED,
             )
         else:
-            units = sum(item.units for item in remaining_legs)
+            total_units = sum(item.units for item in remaining_legs)
             cost = sum(item.units * item.entry_price for item in remaining_legs)
             updated = replace(
                 inventory,
-                total_units=units,
-                average_entry_price=cost / units,
+                total_units=total_units,
+                average_entry_price=cost / total_units,
                 total_notional=cost,
                 realized_pnl=inventory.realized_pnl + realized,
                 fees_paid=inventory.fees_paid + fee,
