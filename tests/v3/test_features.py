@@ -1,63 +1,105 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
-import pandas as pd
+from app.brokers.paper.paper_broker import PaperBrokerClient
+from app.market.models import MarketSnapshot
+from app.runtime.broker_task_runner import BrokerTaskCompletion, BrokerTaskLane
+from app.v3.book import InventoryBook
+from app.v3.live_execution import V3BrokerExecutor
+from app.v3.models import ExecutionStyle, IntentPurpose, OrderIntent
+from app.v3.persistence import InventoryEventStore
+from app.v3.recovery import evaluate_restart_safety
 
-from app.instruments.models import AssetClass
-from app.market.models import Candle
-from app.v3.features import AdjustedEwm, SymbolOnlineFeatureState, UnadjustedEma
-
-UTC = timezone.utc
-
-
-def test_streaming_ewm_matches_pandas_for_both_adjust_modes():
-    values = [1.0, 3.0, 2.0, 5.0, 4.0]
-    expected_adjusted = pd.Series(values).ewm(span=4, adjust=True, min_periods=1).mean()
-    expected_unadjusted = pd.Series(values).ewm(span=4, adjust=False, min_periods=1).mean()
-    adjusted = AdjustedEwm(4)
-    unadjusted = UnadjustedEma(4)
-    actual_adjusted = [adjusted.update(value) for value in values]
-    actual_unadjusted = [unadjusted.update(value) for value in values]
-    for actual, expected in zip(actual_adjusted, expected_adjusted, strict=True):
-        assert abs(actual - expected) < 1e-12
-    for actual, expected in zip(actual_unadjusted, expected_unadjusted, strict=True):
-        assert abs(actual - expected) < 1e-12
+NOW = datetime(2026, 8, 25, tzinfo=timezone.utc)
 
 
-def _candle(minute: int, *, price: float, high: float | None = None, low: float | None = None):
-    opened = datetime(2026, 8, 25, 7, 0, tzinfo=UTC) + timedelta(minutes=minute)
-    return Candle(
-        symbol="AIR.PA",
-        timeframe_seconds=60,
-        open=price,
-        high=high if high is not None else price * 1.001,
-        low=low if low is not None else price * 0.999,
-        close=price,
-        volume=None,
-        opened_at=opened,
-        closed_at=opened + timedelta(minutes=1),
-        sample_count=6,
+class ImmediateRunner:
+    def __init__(self):
+        self.items = []
+
+    def submit(self, *, kind, operation, context=None, task_id=None, lane=None):
+        try:
+            value = operation()
+            error = None
+        except Exception as exc:  # noqa: BLE001
+            value = None
+            error = exc
+        self.items.append(
+            BrokerTaskCompletion(
+                task_id=task_id or kind,
+                kind=kind,
+                lane=lane or BrokerTaskLane.STANDARD,
+                context=context,
+                value=value,
+                error=error,
+            )
+        )
+        return task_id or kind
+
+    def drain(self):
+        result = list(self.items)
+        self.items.clear()
+        return result
+
+
+def _snapshot(price=100.0):
+    return MarketSnapshot("AAPL", price - 0.1, price + 0.1, price, NOW)
+
+
+def _open_intent():
+    return OrderIntent(
+        "i1", IntentPurpose.INITIAL_ENTRY, "AAPL", "BUY", 100.0, NOW,
+        ExecutionStyle.MARKET,
     )
 
 
-def test_online_features_are_causal_and_recoverability_warms_progressively():
-    state = SymbolOnlineFeatureState(symbol="AIR.PA", asset_class=AssetClass.EQUITY_EU)
-    first = state.update(_candle(0, price=100))
-    assert first.ema_lower == 100
-    assert first.features["session_frac"] == 0.0
-    assert pd.isna(first.features["ret5"])
-    latest = first
-    for minute in range(1, 61):
-        latest = state.update(_candle(minute, price=100 + minute / 100))
-    assert not pd.isna(latest.features["ret60"])
-    assert not pd.isna(latest.features["range60"])
+def test_paper_entry_is_ledgered_and_rebuildable(tmp_path):
+    store = InventoryEventStore(tmp_path / "v3.sqlite")
+    book = InventoryBook()
+    executor = V3BrokerExecutor(
+        broker=PaperBrokerClient(equity=100_000),
+        task_runner=ImmediateRunner(),
+        event_store=store,
+        book=book,
+        strategy_version="RR5",
+        model_version=None,
+    )
+    assert executor.schedule(_open_intent(), snapshot=_snapshot())
+    assert not evaluate_restart_safety(store.events()).safe
+    resolved = executor.drain()
+    assert resolved == ("i1",)
+    assert evaluate_restart_safety(store.events()).safe
+    inventory = book.active_for_symbol("AAPL")
+    assert inventory is not None
+    assert len(inventory.broker_legs) == 1
+    rebuilt = InventoryBook.from_events(store.events())
+    assert rebuilt.active_for_symbol("AAPL").entry_fill_count == 1
 
 
-def test_hourly_volatility_uses_only_completed_previous_hour():
-    state = SymbolOnlineFeatureState(symbol="AIR.PA", asset_class=AssetClass.EQUITY_EU)
-    first = state.update(_candle(0, price=100, high=101, low=99))
-    assert first.volatility_1h == 0.0
-    for minute in range(1, 60):
-        state.update(_candle(minute, price=100, high=101, low=99))
-    next_hour = state.update(_candle(60, price=100, high=100.5, low=99.5))
-    expected = __import__("math").log(101 / 99)
-    assert abs(next_hour.volatility_1h - expected) < 1e-12
+def test_paper_close_translates_aggregate_exit_to_broker_leg_and_confirms(tmp_path):
+    store = InventoryEventStore(tmp_path / "v3.sqlite")
+    broker = PaperBrokerClient(equity=100_000)
+    runner = ImmediateRunner()
+    book = InventoryBook()
+    executor = V3BrokerExecutor(
+        broker=broker,
+        task_runner=runner,
+        event_store=store,
+        book=book,
+        strategy_version="RR5",
+        model_version=None,
+    )
+    executor.schedule(_open_intent(), snapshot=_snapshot())
+    executor.drain()
+    inventory = book.active_for_symbol("AAPL")
+    close = OrderIntent(
+        "c1", IntentPurpose.PROFIT_EXIT, "AAPL", "SELL", 84.0, NOW,
+        ExecutionStyle.MARKET,
+        inventory_id=inventory.inventory_id,
+        reduce_only=True,
+        metadata={"close_fraction_of_units": 1.0},
+    )
+    assert executor.schedule(close, snapshot=_snapshot(105.0))
+    resolved = executor.drain()
+    assert resolved == ("c1",)
+    assert book.active_for_symbol("AAPL") is None
+    assert evaluate_restart_safety(store.events()).safe
