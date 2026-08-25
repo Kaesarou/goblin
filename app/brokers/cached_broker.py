@@ -137,7 +137,7 @@ class CachedBrokerClient(BrokerClient):
         ttl_seconds: float,
     ) -> None:
         if ttl_seconds > 0:
-            self.position_status_cache[key] = self._build_entry(value, ttl_seconds)
+            cache[key] = self._build_entry(value, ttl_seconds)
 
     def _build_entry(self, value: object, ttl_seconds: float) -> CacheEntry:
         return CacheEntry(expires_at=self._now() + ttl_seconds, value=value)
