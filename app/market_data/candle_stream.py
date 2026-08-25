@@ -1,4 +1,5 @@
 from collections import Counter
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from app.market.candle_builder import CandleBuilder
@@ -101,10 +102,13 @@ class QualityAwareCandleBuilder:
             return None
 
         closed_decision_snapshot = self._last_bucket_snapshot
-        closed_quality_base = self._quality(
-            carried_forward=False,
-            last_price_age_seconds=None,
-            max_carry_forward_age_seconds=None,
+        closed_quality_base = replace(
+            self._quality(
+                carried_forward=False,
+                last_price_age_seconds=None,
+                max_carry_forward_age_seconds=None,
+            ),
+            decision_snapshot=closed_decision_snapshot,
         )
         closed = self._builder.on_snapshot(snapshot)
         carried, price_age = self._builder.take_last_closed_metadata()
@@ -142,17 +146,20 @@ class QualityAwareCandleBuilder:
 
         results: list[CandleBuildResult] = []
         for index, (candle, carried, price_age) in enumerate(finalized):
-            quality = self._quality(
-                carried_forward=carried,
-                last_price_age_seconds=price_age,
-                max_carry_forward_age_seconds=max_carry_forward_age_seconds,
-            )
             decision_snapshot = (
                 closed_bucket_snapshot
                 if index == 0
                 and closed_bucket_snapshot is not None
                 and candle.opened_at <= closed_bucket_snapshot.timestamp < candle.closed_at
                 else None
+            )
+            quality = replace(
+                self._quality(
+                    carried_forward=carried,
+                    last_price_age_seconds=price_age,
+                    max_carry_forward_age_seconds=max_carry_forward_age_seconds,
+                ),
+                decision_snapshot=decision_snapshot,
             )
             results.append(
                 CandleBuildResult(
@@ -258,4 +265,5 @@ class QualityAwareCandleBuilder:
             last_price_age_seconds=last_price_age_seconds,
             ordering_drop_ratio=quality.ordering_drop_ratio,
             degraded_reasons=tuple(reasons),
+            decision_snapshot=quality.decision_snapshot,
         )

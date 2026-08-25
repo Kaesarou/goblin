@@ -95,11 +95,16 @@ class BrokerClient(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def close_position(self, position_id: str) -> ClosePositionSubmission:
-        """Submit one close request and return as soon as it is accepted.
+    def close_position(
+        self,
+        position_id: str,
+        units_to_deduct: float | None = None,
+    ) -> ClosePositionSubmission:
+        """Submit one full or partial close request and return on acceptance.
 
-        Portfolio disappearance is confirmed asynchronously by the runtime. This
-        method must never poll the portfolio for closure confirmation.
+        ``units_to_deduct`` is broker-position units, not Goblin aggregate inventory
+        units. ``None`` requests a full close. Portfolio/accounting state changes
+        only after an independently confirmed fill.
         """
         raise NotImplementedError
 

@@ -109,9 +109,12 @@ def test_event_rollover_preserves_last_quote_from_closed_bucket():
     assert result.candle.opened_at == start.replace(second=0)
     assert result.candle.close == 100.4
     assert result.decision_snapshot == causal
-    assert result.decision_snapshot.timestamp == causal_at
-    assert result.decision_snapshot.bid == 100.2
-    assert result.decision_snapshot.ask == 100.6
+    assert result.quality.decision_snapshot == causal
+    assert result.quality.decision_snapshot.bid == 100.2
+    assert result.quality.decision_snapshot.ask == 100.6
+    assert result.quality.decision_snapshot.last == 100.4
+    assert result.quality.decision_snapshot.timestamp == causal_at
+    assert result.quality.decision_snapshot.received_at == causal_at
     assert result.decision_snapshot != future
 
 
@@ -127,6 +130,7 @@ def test_clocked_close_exposes_real_bucket_quote_but_not_carried_bucket_quote():
         max_carry_forward_age_seconds=180,
     )[0]
     assert first.decision_snapshot == real
+    assert first.quality.decision_snapshot == real
 
     carried = builder.finalize_until(
         datetime(2026, 7, 20, 12, 2, 1, tzinfo=timezone.utc),
@@ -135,6 +139,7 @@ def test_clocked_close_exposes_real_bucket_quote_but_not_carried_bucket_quote():
     )[0]
     assert carried.quality.carried_forward
     assert carried.decision_snapshot is None
+    assert carried.quality.decision_snapshot is None
 
 
 def test_stale_carried_price_degrades_but_single_ordering_drop_does_not():
