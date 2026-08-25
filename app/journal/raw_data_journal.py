@@ -11,6 +11,10 @@ RawStateObserver = Callable[[str, dict[str, Any]], None]
 
 logger = logging.getLogger(__name__)
 
+MARKET_RAW_SAMPLE_INTERVAL_SECONDS = 10.0
+MARKET_RAW_MAX_BYTES = 512 * 1024 * 1024
+MARKET_RAW_MIN_FREE_BYTES = 1024 * 1024 * 1024
+
 
 class RawDataJournal:
     """Raw journal with optional sampling and physical write budget.
@@ -18,6 +22,10 @@ class RawDataJournal:
     Sampling is persistence-only: callers still consume every market event before
     deciding whether the raw event should be retained on disk. Intentional sampling
     suppression is therefore not reported as a journal failure.
+
+    The market stream is bounded by default because it is fed by tick-level eToro
+    WebSocket updates. Other raw streams (notably finalized M1 candles) remain
+    exhaustive unless an explicit policy is supplied.
     """
 
     def __init__(
@@ -32,6 +40,13 @@ class RawDataJournal:
     ):
         self.journal = journal
         self.observer = observer
+        market_stream = journal.stream_name == "market"
+        if market_stream and sample_interval_seconds is None:
+            sample_interval_seconds = MARKET_RAW_SAMPLE_INTERVAL_SECONDS
+        if market_stream and max_bytes is None:
+            max_bytes = MARKET_RAW_MAX_BYTES
+        if market_stream and min_free_bytes is None:
+            min_free_bytes = MARKET_RAW_MIN_FREE_BYTES
         self.sample_interval = (
             None
             if sample_interval_seconds is None
