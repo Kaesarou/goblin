@@ -56,6 +56,10 @@ class CandleQuality:
     last_price_age_seconds: float | None = None
     ordering_drop_ratio: float = 0.0
     degraded_reasons: tuple[str, ...] = ()
+    # Exact causal executable quote retained inside candle_finalized even when
+    # the raw market stream is physically sampled. None means no in-bucket
+    # quote existed for that finalized candle (for example a carried bucket).
+    decision_snapshot: MarketSnapshot | None = None
 
 
 @dataclass(frozen=True)
