@@ -10,9 +10,6 @@ class EconomicsPolicy(StrEnum):
 class RecoverabilityConfig:
     enabled: bool=False
     min_rank_quantile: float=.75
-    target_recovery_pct: float=.005
-    adverse_barrier_pct: float=.05
-    horizon_minutes: int=2340
     gate_from_entry_fill_count: int=2
 
 @dataclass(frozen=True)
@@ -25,8 +22,6 @@ class InventoryRiskConfig:
 @dataclass(frozen=True)
 class InventoryStrategyConfig:
     name:str='INVENTORY_RR5_V1'
-    ema_span_0:float=790.0
-    ema_span_1:float=1080.0
     initial_ema_dist_pct:float=.0028
     # Frozen Passivbot effective per-slot wallet exposure used by dynamic
     # threshold/close math. This is strategy geometry, not a Goblin hard cap.
@@ -66,7 +61,6 @@ class HedgeConfig:
 class EconomicsConfig:
     policy:EconomicsPolicy=EconomicsPolicy.RESEARCH_GROSS_EDGE
     expected_holding_days:float=3.0
-    minimum_gross_capture_pct:float=0.0
 
 @dataclass(frozen=True)
 class GoblinV3Config:
@@ -89,9 +83,6 @@ def rr5_recoverability_experiment_config(
         recoverability=RecoverabilityConfig(
             enabled=True,
             min_rank_quantile=min_rank_quantile,
-            target_recovery_pct=base.recoverability.target_recovery_pct,
-            adverse_barrier_pct=base.recoverability.adverse_barrier_pct,
-            horizon_minutes=base.recoverability.horizon_minutes,
             gate_from_entry_fill_count=gate_from_entry_fill_count,
         ),
         risk=base.risk,
