@@ -20,7 +20,7 @@ CausalMarketState + PortfolioState
   -> BrokerOrderPlan
 ```
 
-SELL is **not** a mirrored alpha strategy. The only planned SELL sleeve is an aggregate portfolio hedge whose invariant is that it must reduce distance to the configured beta target.
+SELL is **not** a mirrored alpha strategy. The only planned SELL sleeve is an aggregate portfolio hedge whose invariant is that it must reduce distance to the configured beta target. Hedge execution remains disabled in the runtime until its beta/cost contract is validated independently.
 
 ## Design contracts
 
@@ -33,7 +33,63 @@ SELL is **not** a mirrored alpha strategy. The only planned SELL sleeve is an ag
 7. **Recoverability ranking is distinct from calibrated probability.** The current model is useful as a ranking signal; calibration is not assumed.
 8. **No legacy shadow.** V1 compatibility is not a runtime goal while Goblin remains demo-only.
 9. **Broker capability is explicit.** eToro currently closes by position id, so partial aggregate inventory exits require deterministic broker-leg translation.
-10. **Logs stay under `logs/`.** New events should be causal, versioned, compact, and sufficient to reconstruct decisions.
+10. **Logs stay under `logs/`.** New events are causal, versioned, compact, and sufficient to reconstruct decisions without serializing every internal accumulator every minute.
+
+## Runtime authority
+
+`app/main.py` now boots the V3 inventory runtime directly. It no longer instantiates the V1 `TrendStrategy`, directional candidate selector, WAIT/retest path, V1 cooldown authority or V1 position lifecycle.
+
+Execution authority is deliberately narrower than technical capability:
+
+- `paper`: allowed and recommended for prospective collection;
+- `etoro_demo`: allowed for broker-protocol validation on demo capital;
+- `etoro_live`: **rejected by the V3 bootstrap** until a later explicit production-authority decision.
+
+The current trading universe is equities only. Legacy settings such as `MAX_OPEN_POSITIONS`, `MAX_TRADES_PER_SESSION` and `BREAKEVEN_PROFILE` remain parseable because historical replay/test tooling still imports `Settings`, but they are not V3 runtime authority. RR5 geometry and hard inventory-risk caps are code-versioned in `app/v3/config.py` and written to the run manifest.
+
+## Causal market-data contract
+
+V3 decisions use `market_data_v2_ws_clocked_3` and runtime contract `inventory_runtime_v3_3`.
+
+A closed M1 candle owns the **last complete executable quote observed inside that same bucket**. `CandleBuildResult.decision_snapshot` carries this provenance explicitly. The first quote of the following minute may close the prior candle mechanically, but it is never relabelled as the prior candle's bid/ask.
+
+For clock-finalized/carry-forward states:
+
+- an in-bucket quote can carry decision authority when all other quality/risk gates pass;
+- an older causal quote may be retained only as non-authoritative provenance (`quality_ok=False`);
+- a quote timestamped at or after the candle close is never attached to that closed state.
+
+This keeps live executable-price economics causal and prevents a subtle replay/live drift without synthesizing bid/ask from OHLC.
+
+## Restart and broker-mutation safety
+
+Economic truth is the append-only V3 inventory event ledger in SQLite. Replaceable runtime snapshots preserve only causal state that cannot be reconstructed from fills alone: EMA/EWM accumulators, rolling history and trailing extrema.
+
+Startup is fail-closed:
+
+- active V1 `open_positions` / `pending_closes` rows block V3 startup; there is no automatic migration;
+- a V3 open/close submission interrupted before a knowable outcome blocks new risk;
+- explicit `ORDER_SUBMISSION_UNKNOWN` or `CLOSE_SUBMISSION_UNKNOWN` blocks new risk;
+- accepted closes with a persisted close-order id can resume confirmation polling;
+- every persisted broker leg is checked against the broker before normal authority resumes;
+- an active inventory missing its causal feature snapshot cannot regain new-risk authority silently.
+
+For eToro closes, an ambiguous submission is never converted into a simple rejection and never blindly retried. The inventory remains reserved until reconciliation establishes the outcome.
+
+## Compact logging contract
+
+The weekly `data/logs/` workflow remains the operational research artifact. V3 intentionally avoids turning every state update into JSONL:
+
+- `market.jsonl.gz`: raw market events only when price changes;
+- `candles.jsonl.gz`: one event per finalized M1 candle;
+- `trades.jsonl.gz`: material strategy transitions, intents and broker lifecycle events;
+- silent/no-op decision reasons: aggregate counters in heartbeats;
+- repeated decision states: transition-deduplicated;
+- repeated market-quality/maintenance faults: one transition plus one recovery;
+- EMA/EWM/trailing restart accumulators: SQLite only;
+- broker ledger: append-only, with repeated close-confirmation errors deduplicated by `action_id`.
+
+Normal complete decision windows do not dump the full symbol list. Incomplete windows remain explicit because missing causal data is analytically meaningful. The design target is to keep weekly ZIP volume in the same general order of magnitude as the existing raw-data collection, not multiply it merely because V3 has richer internal state.
 
 ## Point M — replay parity gate
 
@@ -97,4 +153,4 @@ That is now the active decision: the exact engine could not reproduce the histor
 
 The research replay can close an exact percentage of aggregate inventory units. eToro's public trading surface closes by position id, so live/demo execution cannot assume that an arbitrary 84% aggregate close maps to one broker request. `WholeLegCloseAllocator` makes that translation explicit and measurable instead of hiding it inside strategy math.
 
-This broker divergence must be measured separately from Point M before any production discussion.
+This broker divergence, real spread/slippage/carry costs and prospective multi-session behavior must be measured separately from Point M before any production discussion.
