@@ -198,18 +198,21 @@ class V3BrokerExecutor:
                 kind="close_position",
                 task_id=f"v3-close:{action_id}",
                 context=context,
-                operation=lambda current=context: self.broker.close_position(
-                    current.position_id,
-                    units_to_deduct=(
-                        None if current.full_close else current.requested_units
-                    ),
-                ),
+                operation=lambda current=context: self._submit_broker_close(current),
                 lane=BrokerTaskLane.CLOSE,
             )
             self._pending_actions.add(action_id)
             self._pending_close_position_ids.add(request.position_id)
             scheduled = True
         return scheduled
+
+    def _submit_broker_close(self, context: _CloseContext):
+        if context.full_close:
+            return self.broker.close_position(context.position_id)
+        return self.broker.close_position(
+            context.position_id,
+            units_to_deduct=context.requested_units,
+        )
 
     def drain(self) -> tuple[str, ...]:
         applied: list[str] = []
@@ -254,14 +257,19 @@ class V3BrokerExecutor:
             action_id = str(event.payload.get("action_id", ""))
             if event.event_type == "CLOSE_SUBMISSION_ACCEPTED" and action_id:
                 payload = event.payload
+                position_id = str(payload["position_id"])
+                full_close = bool(payload.get("full_close", True))
+                requested_units = float(payload.get("requested_units", 0.0))
+                if full_close and requested_units <= 0:
+                    requested_units = self._current_leg_units(position_id)
                 context = _CloseContext(
                     action_id=action_id,
                     intent=_restored_close_intent(payload, event.occurred_at),
                     inventory_id=event.inventory_id,
-                    position_id=str(payload["position_id"]),
+                    position_id=position_id,
                     trigger_price=float(payload["trigger_price"]),
-                    requested_units=float(payload.get("requested_units", 0.0)),
-                    full_close=bool(payload.get("full_close", True)),
+                    requested_units=requested_units,
+                    full_close=full_close,
                 )
                 accepted[action_id] = _PendingCloseConfirmation(
                     context=context,
@@ -279,6 +287,13 @@ class V3BrokerExecutor:
         self._pending_close_position_ids.update(
             pending.context.position_id for pending in accepted.values()
         )
+
+    def _current_leg_units(self, position_id: str) -> float:
+        for inventory in self.book.inventories:
+            for leg in inventory.broker_legs:
+                if leg.position_id == position_id:
+                    return float(leg.units)
+        return 0.0
 
     def verify_known_broker_legs(self) -> tuple[str, ...]:
         missing: list[str] = []
@@ -302,7 +317,11 @@ class V3BrokerExecutor:
         if completion.error is not None:
             unknown = isinstance(completion.error, EtoroOrderConfirmationUnknownError)
             self._append(
-                event_type=("ORDER_SUBMISSION_UNKNOWN" if unknown else "ORDER_SUBMISSION_FAILED"),
+                event_type=(
+                    "ORDER_SUBMISSION_UNKNOWN"
+                    if unknown
+                    else "ORDER_SUBMISSION_FAILED"
+                ),
                 inventory_id=context.inventory_id,
                 event_id=f"{context.action_id}:open-error",
                 payload={
@@ -362,7 +381,11 @@ class V3BrokerExecutor:
             self._pending_close_position_ids.discard(context.position_id)
             unknown = isinstance(completion.error, ClosePositionSubmissionUnknownError)
             self._append(
-                event_type=("CLOSE_SUBMISSION_UNKNOWN" if unknown else "CLOSE_SUBMISSION_FAILED"),
+                event_type=(
+                    "CLOSE_SUBMISSION_UNKNOWN"
+                    if unknown
+                    else "CLOSE_SUBMISSION_FAILED"
+                ),
                 inventory_id=context.inventory_id,
                 event_id=f"{context.action_id}:close-error",
                 payload={
@@ -385,7 +408,9 @@ class V3BrokerExecutor:
                 context=context,
                 exit_price=context.trigger_price,
                 filled_at=_utc_now(),
-                close_order_id=str(getattr(submission, "close_order_id", "paper")),
+                close_order_id=str(
+                    getattr(submission, "close_order_id", "paper")
+                ),
                 executed_units=context.requested_units,
             )
             return [context.intent.intent_id]
@@ -459,16 +484,17 @@ class V3BrokerExecutor:
                 },
             )
             return []
+        executed_units = (
+            float(execution.units)
+            if execution.units is not None
+            else self._current_leg_units(pending.context.position_id)
+        )
         self._confirm_close(
             context=pending.context,
             exit_price=float(execution.executed_exit_price),
             filled_at=execution.executed_at or _utc_now(),
             close_order_id=pending.close_order_id,
-            executed_units=(
-                pending.context.requested_units
-                if execution.units is None
-                else float(execution.units)
-            ),
+            executed_units=executed_units,
         )
         return [pending.context.intent.intent_id]
 
@@ -486,7 +512,11 @@ class V3BrokerExecutor:
             self.halted_reason = "close_fill_without_inventory"
             return
         leg = next(
-            (item for item in inventory.broker_legs if item.position_id == context.position_id),
+            (
+                item
+                for item in inventory.broker_legs
+                if item.position_id == context.position_id
+            ),
             None,
         )
         if leg is None:
