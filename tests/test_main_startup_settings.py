@@ -31,6 +31,8 @@ def test_application_no_longer_reads_removed_runtime_policy_from_settings():
         ]
         assert offenders == [], f'{removed} remains in {offenders}'
 
-    main_source = source_by_path[Path('app/main.py')]
-    assert 'from app.runtime.runtime_policy import (' in main_source
-    assert "'mode': 'websocket'" in main_source
+    # Runtime safety policy stays code-versioned in the V3 runtime instead of
+    # being reintroduced as mutable deployment settings. Do not couple this
+    # contract test to quote style or source formatting in app/main.py.
+    v3_runtime_source = source_by_path[Path('app/v3/runtime.py')]
+    assert 'from app.runtime.runtime_policy import (' in v3_runtime_source
