@@ -28,7 +28,7 @@ SELL is **not** a mirrored alpha strategy. The only planned SELL sleeve is an ag
 2. **Inventory is the economic object.** One Goblin inventory may aggregate several broker positions/legs.
 3. **Fills are truth.** Broker acceptance is not a fill. Inventory accounting changes on confirmed fills only.
 4. **Multi-day is normal.** Session close does not imply inventory close.
-5. **Hard risk outranks ML.** Recoverability may deny risk; it may never override max fills, symbol exposure, portfolio exposure, or catastrophic controls.
+5. **Hard risk outranks ML.** Recoverability may deny risk; it may never override max fills, max inventories, symbol exposure or portfolio exposure.
 6. **Gross and broker-net economics stay separate.** Demo research may execute a gross-positive hypothesis that a temporary broker makes net-negative, but logs must say so explicitly.
 7. **Recoverability ranking is distinct from calibrated probability.** The current model is useful as a ranking signal; calibration is not assumed.
 8. **No legacy shadow.** V1 compatibility is not a runtime goal while Goblin remains demo-only.
@@ -46,6 +46,8 @@ Execution authority is deliberately narrower than technical capability:
 - `etoro_live`: **rejected by the V3 bootstrap** until a later explicit production-authority decision.
 
 The current trading universe is equities only. Legacy settings such as `MAX_OPEN_POSITIONS`, `MAX_TRADES_PER_SESSION` and `BREAKEVEN_PROFILE` remain parseable because historical replay/test tooling still imports `Settings`, but they are not V3 runtime authority. RR5 geometry and hard inventory-risk caps are code-versioned in `app/v3/config.py` and written to the run manifest.
+
+V3 deliberately does **not** currently claim a persistent mark-to-market portfolio drawdown guard. The paper broker's account-equity field is static and therefore cannot honestly implement such a control. A future drawdown circuit breaker requires a restart-safe strategy-P&L/mark-to-market contract first. Until that exists, the enforced safety boundary is the bounded RR5 exposure/fill policy plus the explicit prohibition on `etoro_live`.
 
 ## Causal market-data contract
 
