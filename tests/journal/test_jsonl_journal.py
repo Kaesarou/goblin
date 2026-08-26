@@ -119,3 +119,66 @@ def test_legacy_write_behavior_remains_single_record(tmp_path):
     assert journal.written_count == 1
     assert journal.failed_count == 0
     assert journal.open_count == 1
+
+
+def test_trade_journal_soft_budget_suppresses_noise_but_keeps_critical_events(tmp_path):
+    journal_path = tmp_path / 'trades.jsonl.gz'
+    journal = JsonlJournal(
+        str(journal_path),
+        run_id='run-test',
+        stream_name='trades',
+        soft_max_bytes=1,
+        hard_max_bytes=100_000,
+        min_free_bytes=0,
+        critical_event_types={'v3_inventory_event'},
+    )
+
+    assert journal.write('v3_session_state', {'symbol': 'AAPL'}) is True
+    assert journal.write('v3_session_state', {'symbol': 'MSFT'}) is True
+    assert journal.write(
+        'v3_inventory_event',
+        {'inventory_event_type': 'ENTRY_FILLED'},
+    ) is True
+
+    with gzip.open(journal_path, 'rt', encoding='utf-8') as handle:
+        records = [json.loads(line) for line in handle]
+
+    assert [record['event_type'] for record in records] == [
+        'v3_session_state',
+        'v3_inventory_event',
+    ]
+    assert journal.written_count == 2
+    assert journal.suppressed_count == 1
+    assert journal.budget_reason == 'soft_max_bytes'
+
+
+def test_trade_journal_hard_budget_suppresses_even_critical_events(tmp_path):
+    journal_path = tmp_path / 'trades.jsonl.gz'
+    journal = JsonlJournal(
+        str(journal_path),
+        run_id='run-test',
+        stream_name='trades',
+        soft_max_bytes=1,
+        hard_max_bytes=1,
+        min_free_bytes=0,
+        critical_event_types={'v3_inventory_event'},
+    )
+
+    assert journal.write(
+        'v3_inventory_event',
+        {'inventory_event_type': 'ENTRY_FILLED'},
+    ) is True
+    assert journal.write(
+        'v3_inventory_event',
+        {'inventory_event_type': 'EXIT_FILLED'},
+    ) is True
+
+    with gzip.open(journal_path, 'rt', encoding='utf-8') as handle:
+        records = [json.loads(line) for line in handle]
+
+    assert [record['payload']['inventory_event_type'] for record in records] == [
+        'ENTRY_FILLED'
+    ]
+    assert journal.written_count == 1
+    assert journal.suppressed_count == 1
+    assert journal.budget_reason == 'hard_max_bytes'
