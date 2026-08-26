@@ -51,6 +51,28 @@ def test_configured_session_is_tradable_when_active():
     assert decision.reason == 'session_tradable'
 
 
+def test_session_semantic_equality_ignores_countdown_only():
+    session_service = service('09:00-15:00')
+    first = session_service.evaluate(
+        asset_class=AssetClass.EQUITY_US,
+        now=at(8, 0),
+    )
+    second = session_service.evaluate(
+        asset_class=AssetClass.EQUITY_US,
+        now=at(8, 1),
+    )
+
+    assert first.time_until_session_end_minutes != second.time_until_session_end_minutes
+    assert first == second
+    assert hash(first) == hash(second)
+
+    cutoff_state = session_service.evaluate(
+        asset_class=AssetClass.EQUITY_US,
+        now=at(12, 30),
+    )
+    assert first != cutoff_state
+
+
 def test_new_entries_are_blocked_during_last_hour():
     decision = service('09:00-15:00').evaluate(asset_class=AssetClass.EQUITY_US, now=at(12, 30))
 
