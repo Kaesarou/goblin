@@ -46,6 +46,34 @@ class TradingSessionDecision(NamedTuple):
     time_until_session_end_minutes: float | None
     session_key: str | None
 
+    def state_signature(self) -> tuple[object, ...]:
+        """Stable semantic session state used for transition detection.
+
+        ``time_until_session_end_minutes`` is deliberately excluded. It is an
+        informational countdown that changes on every evaluation and must not turn
+        an unchanged trading session into a new state on every runtime loop.
+        """
+        return (
+            self.asset_class,
+            self.session_active,
+            self.session_24_7,
+            self.collect_snapshots,
+            self.new_entries_allowed,
+            self.force_close_required,
+            self.reason,
+            self.session_start_time,
+            self.session_end_time,
+            self.session_key,
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, TradingSessionDecision):
+            return NotImplemented
+        return self.state_signature() == other.state_signature()
+
+    def __hash__(self) -> int:
+        return hash(self.state_signature())
+
 
 class TradingSessionState:
     def __init__(self):
