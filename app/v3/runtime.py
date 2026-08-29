@@ -29,11 +29,11 @@ from app.v3.live_execution import V3BrokerExecutor
 from app.v3.models import DecisionBatch, DecisionReason, MarketState, OrderIntent
 from app.v3.persistence import InventoryEventStore
 from app.v3.recovery import evaluate_restart_safety
-from app.v3.state_store import V3RuntimeStateStore, legacy_v1_state_counts
+from app.v3.state_store import V3RuntimeStateStore
 
 logger = logging.getLogger(__name__)
 
-V3_RUNTIME_CONTRACT_VERSION = "inventory_runtime_v3_3"
+V3_RUNTIME_CONTRACT_VERSION = "inventory_runtime_v3_4"
 
 _MATERIAL_DECISION_REASONS = frozenset(
     {
@@ -71,7 +71,7 @@ class V3DecisionWindowBatch:
 
 
 class V3DecisionWindowCoordinator:
-    """Synchronize completed M1 states without coupling to V1 TradeCandidate."""
+    """Synchronize completed M1 states without candidate-domain coupling."""
 
     def __init__(self, *, grace_seconds: float = DECISION_WINDOW_GRACE_SECONDS) -> None:
         self.grace_seconds = float(grace_seconds)
@@ -136,10 +136,10 @@ class V3DecisionWindowCoordinator:
 class GoblinV3Runtime:
     """Event-driven V3 runtime around the same pure planner used by replay.
 
-    Raw market/candle streams stay reconstructible and comparable with V1.
-    High-volume V3 diagnostics are aggregated into heartbeats; detailed trade
-    journal events are emitted only on material state changes, intents and
-    anomalies.
+    Raw market/candle streams stay reconstructible and comparable with the frozen
+    research corpus. High-volume V3 diagnostics are aggregated into heartbeats;
+    detailed trade journal events are emitted only on material state changes,
+    intents and anomalies.
     """
 
     def __init__(
@@ -265,21 +265,6 @@ class GoblinV3Runtime:
             return
 
         actual_now = _utc(now or datetime.now(UTC))
-        legacy_counts = legacy_v1_state_counts(self.settings.position_store_path)
-        if any(legacy_counts.values()):
-            self.trade_journal.write(
-                "v3_startup_rejected",
-                {
-                    "reason": "legacy_v1_position_state_present",
-                    "legacy_row_counts": legacy_counts,
-                },
-            )
-            raise RuntimeError(
-                "V3 refuses to start while V1 open/pending position state exists. "
-                "Flatten or explicitly resolve it before starting V3; no automatic "
-                "migration is performed."
-            )
-
         events = self.event_store.events()
         self.book = InventoryBook.from_events(events)
         restored_inventories = self.runtime_state_store.restore_inventory_book(self.book)
@@ -310,7 +295,7 @@ class GoblinV3Runtime:
                 )
 
         try:
-            missing_broker_legs = self.executor.verify_known_broker_legs()
+            broker_reconciliation_issues = self.executor.verify_known_broker_legs()
         except Exception as exc:
             self.trade_journal.write(
                 "v3_startup_rejected",
@@ -321,17 +306,17 @@ class GoblinV3Runtime:
                 },
             )
             raise RuntimeError("V3 broker-leg verification failed at startup") from exc
-        if missing_broker_legs:
+        if broker_reconciliation_issues:
             self.trade_journal.write(
                 "v3_startup_rejected",
                 {
-                    "reason": "persisted_broker_leg_missing",
-                    "position_ids": list(missing_broker_legs),
+                    "reason": "broker_leg_reconciliation_failed",
+                    "issues": list(broker_reconciliation_issues),
                 },
             )
             raise RuntimeError(
-                "V3 persisted inventory does not match the broker portfolio; "
-                "manual reconciliation is required."
+                "V3 persisted inventory does not match broker units; manual "
+                "reconciliation is required."
             )
 
         self.coordinator.initialize_symbols(self.monitored_symbols, now=actual_now)
@@ -360,11 +345,12 @@ class GoblinV3Runtime:
                 ),
                 "decision_quote_provenance": "last_complete_quote_in_closed_bucket",
                 "log_policy": {
-                    "raw_market": "price_changes_only",
+                    "raw_market": "sampled_10s_per_symbol",
                     "raw_candles": "one_event_per_finalized_candle",
                     "silent_decisions": "heartbeat_aggregates_only",
                     "decision_details": "material_state_changes_only",
                     "market_quality": "transition_only",
+                    "causal_state": "run_checkpoints_plus_sqlite_restart_cache",
                 },
             },
         )
@@ -830,10 +816,12 @@ class GoblinV3Runtime:
         self._last_fallback_monotonic = monotonic_now
 
     def _schedule_close_confirmation_checks(self, monotonic_now: float) -> None:
-        if monotonic_now - self._last_close_confirmation_monotonic < 10.0:
+        if monotonic_now - self._last_close_confirmation_monotonic < 1.0:
             return
         self._last_close_confirmation_monotonic = monotonic_now
-        self.executor.schedule_close_confirmation_checks()
+        self.executor.schedule_close_confirmation_checks(
+            monotonic_now=monotonic_now,
+        )
 
     def _drain_broker_tasks(self) -> None:
         resolved = self.executor.drain()
@@ -851,6 +839,13 @@ class GoblinV3Runtime:
                     equity = float(completion.value)
                     if math.isfinite(equity) and equity > 0:
                         self._equity = equity
+                        self.trade_journal.write(
+                            "v3_account_equity_snapshot",
+                            {
+                                "equity": equity,
+                                "source": "etoro_pnl_formula",
+                            },
+                        )
                         self._clear_maintenance_error(
                             "equity_refresh",
                             "v3_account_equity_recovered",
@@ -941,7 +936,12 @@ class GoblinV3Runtime:
             )
             previous = self.session_decisions.get(symbol)
             self.session_decisions[symbol] = decision
-            if previous != decision:
+            previous_signature = (
+                None
+                if previous is None
+                else previous.state_signature()
+            )
+            if previous_signature != decision.state_signature():
                 self.trade_journal.write(
                     "v3_session_state",
                     {
@@ -1146,6 +1146,7 @@ class GoblinV3Runtime:
                 sorted(self._decision_reason_counts.items())
             ),
             "market_data_coordinator": dict(self.coordinator.metrics),
+            "broker_confirmation": self.executor.confirmation_metrics(),
             "new_risk_allowed": self.executor.new_risk_allowed,
             "risk_halt_reason": self.executor.halted_reason,
         }
