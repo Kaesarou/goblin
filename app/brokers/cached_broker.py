@@ -101,6 +101,9 @@ class CachedBrokerClient(BrokerClient):
         # portfolio snapshot rather than compose per-position TTL cache entries.
         return self.delegate.get_open_position_units(position_ids)
 
+    def get_rate_limit_metrics(self) -> dict[str, object]:
+        return self.delegate.get_rate_limit_metrics()
+
     def get_close_execution(
         self,
         close_order_id: str,
