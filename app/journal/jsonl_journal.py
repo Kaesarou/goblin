@@ -29,6 +29,7 @@ TRADE_JOURNAL_CRITICAL_EVENT_TYPES = frozenset(
         'v3_inventory_event',
         'v3_intent_triggered',
         'raw_journal_budget_exhausted',
+        'trade_journal_budget_active',
     }
 )
 
@@ -57,6 +58,7 @@ class JsonlJournal:
         self.suppressed_count = 0
         self.budget_reason: str | None = None
         self._budget_warnings: set[str] = set()
+        self._budget_event_emitted = False
 
         trade_stream = self.stream_name == 'trades'
         if trade_stream and soft_max_bytes is None:
@@ -83,7 +85,9 @@ class JsonlJournal:
         if self._budget_blocks_write(event_type):
             self.suppressed_count += 1
             return True
+        return self._write_record(event_type, payload)
 
+    def _write_record(self, event_type: str, payload: dict[str, Any]) -> bool:
         next_sequence = self.sequence + 1
         try:
             record = {
@@ -182,6 +186,38 @@ class JsonlJournal:
             )
             return 0
 
+    def budget_metrics(self) -> dict[str, Any]:
+        size = self.path.stat().st_size if self.path.exists() else 0
+        free: int | None = None
+        if self.min_free_bytes is not None:
+            try:
+                free = shutil.disk_usage(self.path.parent).free
+            except OSError:
+                free = None
+        return {
+            'bytes': size,
+            'written_count': self.written_count,
+            'failed_count': self.failed_count,
+            'suppressed_count': self.suppressed_count,
+            'budget_reason': self.budget_reason,
+            'soft_max_bytes': self.soft_max_bytes,
+            'hard_max_bytes': self.hard_max_bytes,
+            'min_free_bytes': self.min_free_bytes,
+            'free_bytes': free,
+            'soft_cap_active': bool(
+                self.soft_max_bytes is not None and size >= self.soft_max_bytes
+            ),
+            'hard_cap_active': bool(
+                self.hard_max_bytes is not None and size >= self.hard_max_bytes
+            ),
+            'min_free_active': bool(
+                self.min_free_bytes is not None
+                and free is not None
+                and free <= self.min_free_bytes
+            ),
+            'budget_event_emitted': self._budget_event_emitted,
+        }
+
     def _budget_enabled(self) -> bool:
         return any(
             value is not None
@@ -237,21 +273,43 @@ class JsonlJournal:
         free: int | None = None,
     ) -> None:
         self.budget_reason = reason
-        if reason in self._budget_warnings:
-            return
-        self._budget_warnings.add(reason)
-        logger.warning(
-            'Journal budget active | stream=%s | reason=%s | path=%s | '
-            'size=%s | free=%s | soft_max=%s | hard_max=%s | min_free=%s',
-            self.stream_name,
-            reason,
-            self.path,
-            size,
-            free,
-            self.soft_max_bytes,
-            self.hard_max_bytes,
-            self.min_free_bytes,
-        )
+        first_activation = reason not in self._budget_warnings
+        if first_activation:
+            self._budget_warnings.add(reason)
+            logger.warning(
+                'Journal budget active | stream=%s | reason=%s | path=%s | '
+                'size=%s | free=%s | soft_max=%s | hard_max=%s | min_free=%s',
+                self.stream_name,
+                reason,
+                self.path,
+                size,
+                free,
+                self.soft_max_bytes,
+                self.hard_max_bytes,
+                self.min_free_bytes,
+            )
+
+        # At the soft threshold we have already proved above that neither the hard
+        # cap nor the free-disk reserve blocks writes. Persist exactly one marker
+        # without recursively re-entering the budget check so offline analysis can
+        # locate when suppression began. Never force a marker past hard/min-free.
+        if (
+            first_activation
+            and reason == 'soft_max_bytes'
+            and self.stream_name == 'trades'
+            and not self._budget_event_emitted
+        ):
+            self._budget_event_emitted = self._write_record(
+                'trade_journal_budget_active',
+                {
+                    'reason': reason,
+                    'bytes_at_activation': size,
+                    'free_bytes': free,
+                    'soft_max_bytes': self.soft_max_bytes,
+                    'hard_max_bytes': self.hard_max_bytes,
+                    'min_free_bytes': self.min_free_bytes,
+                },
+            )
 
     def _open_append(self) -> TextIO:
         self.open_count += 1
