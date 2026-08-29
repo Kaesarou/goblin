@@ -33,12 +33,19 @@ def extract_account_metrics(payload: dict[str, Any]) -> EtoroAccountMetrics:
     manual_orders_for_open = [
         order for order in orders_for_open if _is_manual_order(order)
     ]
-    pending_open_amount = sum(_optional_float(order.get("amount")) for order in manual_orders_for_open)
-    pending_order_amount = sum(_optional_float(order.get("amount")) for order in orders)
+    pending_open_amount = sum(
+        _optional_float(order.get("amount"))
+        for order in manual_orders_for_open
+    )
+    pending_order_amount = sum(
+        _optional_float(order.get("amount")) for order in orders
+    )
 
     available_cash = credit - pending_open_amount - pending_order_amount
 
-    direct_invested = sum(_optional_float(position.get("amount")) for position in positions)
+    direct_invested = sum(
+        _optional_float(position.get("amount")) for position in positions
+    )
     mirror_position_invested = sum(
         _optional_float(position.get("amount"))
         for mirror in mirrors
@@ -62,14 +69,17 @@ def extract_account_metrics(payload: dict[str, Any]) -> EtoroAccountMetrics:
         + pending_external_costs
     )
 
-    direct_unrealized = sum(_position_unrealized_pnl(position) for position in positions)
+    direct_unrealized = sum(
+        _position_unrealized_pnl(position) for position in positions
+    )
     mirror_unrealized = sum(
         _position_unrealized_pnl(position)
         for mirror in mirrors
         for position in _dict_items(mirror.get("positions"))
     )
     mirror_closed_profit = sum(
-        _optional_float(mirror.get("closedPositionsNetProfit")) for mirror in mirrors
+        _optional_float(mirror.get("closedPositionsNetProfit"))
+        for mirror in mirrors
     )
     unrealized_pnl = direct_unrealized + mirror_unrealized + mirror_closed_profit
 
@@ -96,13 +106,17 @@ def extract_account_equity(payload: dict[str, Any]) -> float:
 def _account_root(payload: dict[str, Any]) -> dict[str, Any]:
     current: dict[str, Any] = payload
     for _ in range(4):
-        if "credit" in current:
+        # ``ordersForOpen`` is part of the P&L contract and intentionally
+        # distinguishes this payload from the older portfolio response that also
+        # exposes ``credit``. Accepting a bare portfolio credit recreated the
+        # week-5 sizing bug, so fail closed if the P&L shape is not proven.
+        if "credit" in current and "ordersForOpen" in current:
             return current
         nested = current.get("data")
         if not isinstance(nested, dict):
             break
         current = nested
-    raise ValueError("Unable to locate eToro P&L account payload with credit field")
+    raise ValueError("Unable to locate eToro P&L account payload")
 
 
 def _position_unrealized_pnl(position: dict[str, Any]) -> float:
