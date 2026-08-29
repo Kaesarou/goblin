@@ -84,13 +84,18 @@ class EtoroClient(BrokerClient):
 
     etoro_api_base_url = 'https://public-api.etoro.com'
 
-    def __init__(self, settings: Settings):
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        get_rate_governor: EtoroGetRateGovernor | None = None,
+    ):
         self.settings = settings
         self.env = broker_environment_from_name(settings.broker)
         self.position_instruments: dict[str, int] = {}
-        self.instrument_ids_by_symbol: dict[int | str, int] = {}
+        self.instrument_ids_by_symbol: dict[str, int] = {}
         self.symbol_by_instrument_id: dict[int, str] = {}
-        self._get_rate_governor = EtoroGetRateGovernor()
+        self._get_rate_governor = get_rate_governor or EtoroGetRateGovernor()
 
     def get_account_equity(self) -> float:
         equity = extract_account_equity(self.get_pnl())
@@ -158,6 +163,7 @@ class EtoroClient(BrokerClient):
             position_id=executed_position.position_id,
             executed_entry_price=executed_position.executed_entry_price,
             executed_units=executed_position.executed_units,
+            executed_notional=executed_position.executed_notional,
         )
 
     def close_position(
