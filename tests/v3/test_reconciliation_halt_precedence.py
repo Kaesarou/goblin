@@ -9,8 +9,6 @@ from app.v3.live_execution import (
 )
 from app.v3.persistence import InventoryEvent, InventoryEventStore
 
-# This module verifies halt precedence before the dedicated stale threshold. Use a
-# current anchor so CI wall time cannot accidentally turn the pending close stale.
 NOW = datetime.now(timezone.utc)
 
 
@@ -145,35 +143,37 @@ def _last_reconciliation(runner: QueueRunner) -> dict:
     )
 
 
-def test_reconciliation_failure_supersedes_pending_fill_halt_and_survives_fill(tmp_path):
+def test_additional_unexplained_reduction_supersedes_pending_fill_and_survives_fill(tmp_path):
     executor, runner = _executor(tmp_path)
     pending = executor._pending_close_confirmations["close:p1"]
     base = time.monotonic()
     pending.next_attempt_monotonic = base + 10_000
 
-    # First audit sees exactly the expected 84% broker reduction. Accounting must
-    # wait for the economic fill price, so new risk is halted.
     executor.schedule_close_confirmation_checks(monotonic_now=base)
     executor.schedule_close_confirmation_checks(
-        monotonic_now=base + BROKER_RECONCILIATION_INTERVAL_SECONDS + 0.001
+        monotonic_now=base + BROKER_RECONCILIATION_INTERVAL_SECONDS + 1.0
     )
     first = _last_reconciliation(runner)
     runner.complete(first, value={"p1": 0.16})
     executor.drain()
     assert executor.halted_reason == "broker_quantity_reduction_pending_economic_fill"
 
-    # A later audit detects an unrelated quantitative mismatch. This stronger
-    # integrity halt must replace the temporary pending-fill reason.
     runner.tasks.clear()
+    last_scheduled = executor._last_broker_reconciliation_monotonic
+    assert last_scheduled is not None
     executor.schedule_close_confirmation_checks(
-        monotonic_now=base + 2 * BROKER_RECONCILIATION_INTERVAL_SECONDS + 0.002
+        monotonic_now=last_scheduled + BROKER_RECONCILIATION_INTERVAL_SECONDS + 1.0
     )
     second = _last_reconciliation(runner)
     runner.complete(second, value={"p1": 0.10})
     executor.drain()
-    assert executor.halted_reason == "broker_leg_reconciliation_failed"
 
-    # Confirming the economic close must not accidentally clear the mismatch.
+    # Exposure follows the broker, but a second unexplained reduction cannot be
+    # attributed to the already-pending 84% close and therefore remains fail-closed.
+    assert executor.halted_reason == "broker_quantity_reduction_unattributed"
+    assert executor.book.active_for_symbol("AAPL").total_units == 0.10
+    assert not executor.new_risk_allowed
+
     pending = executor._pending_close_confirmations["close:p1"]
     executor._confirm_close(
         context=pending.context,
@@ -182,7 +182,7 @@ def test_reconciliation_failure_supersedes_pending_fill_halt_and_survives_fill(t
         close_order_id="order-p1",
         executed_units=0.84,
     )
-    assert executor.halted_reason == "broker_leg_reconciliation_failed"
+    assert executor.halted_reason == "broker_quantity_reduction_unattributed"
     assert not executor.new_risk_allowed
 
 
@@ -192,11 +192,9 @@ def test_multi_leg_pending_economic_halt_clears_only_after_every_observed_fill(t
     for pending in executor._pending_close_confirmations.values():
         pending.next_attempt_monotonic = base + 10_000
 
-    # One coherent portfolio observation proves that both accepted partial closes
-    # have already reduced broker quantity, while neither economic fill is known.
     executor.schedule_close_confirmation_checks(monotonic_now=base)
     executor.schedule_close_confirmation_checks(
-        monotonic_now=base + BROKER_RECONCILIATION_INTERVAL_SECONDS + 0.001
+        monotonic_now=base + BROKER_RECONCILIATION_INTERVAL_SECONDS + 1.0
     )
     reconciliation = _last_reconciliation(runner)
     runner.complete(reconciliation, value={"p1": 0.16, "p2": 0.16})
@@ -218,8 +216,6 @@ def test_multi_leg_pending_economic_halt_clears_only_after_every_observed_fill(t
         executed_units=0.84,
     )
 
-    # Confirming one leg resolves only that leg. The second observed broker
-    # reduction is still economically unknown, so BUY authority must stay blocked.
     assert executor.halted_reason == "broker_quantity_reduction_pending_economic_fill"
     assert not executor.new_risk_allowed
     assert executor.confirmation_metrics()["pending_economic_fill_action_ids"] == [

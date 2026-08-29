@@ -160,7 +160,7 @@ def test_confirmed_fill_clears_stale_halt_when_no_other_uncertainty_remains(tmp_
     assert executor.book.active_for_symbol("AAPL").total_units == pytest.approx(0.16)
 
 
-def test_reconciliation_mismatch_supersedes_stale_and_is_not_cleared_by_fill(tmp_path):
+def test_incompatible_broker_reduction_supersedes_stale_and_is_not_cleared_by_fill(tmp_path):
     executor, runner = _executor(tmp_path)
     base = time.monotonic()
     executor.schedule_close_confirmation_checks(
@@ -183,7 +183,12 @@ def test_reconciliation_mismatch_supersedes_stale_and_is_not_cleared_by_fill(tmp
     runner.complete(task, value={"p1": 0.10})
     executor.drain()
 
-    assert executor.halted_reason == "broker_leg_reconciliation_failed"
+    # A 0.90 observed reduction cannot be confidently attributed to a pending
+    # request for 0.84 units. Quantity follows the broker, but new risk remains
+    # blocked under an explicit unattributed-reduction state.
+    assert executor.halted_reason == "broker_quantity_reduction_unattributed"
+    assert executor.book.active_for_symbol("AAPL").total_units == pytest.approx(0.10)
+    assert not executor.new_risk_allowed
 
     executor._confirm_close(
         context=pending.context,
@@ -192,7 +197,7 @@ def test_reconciliation_mismatch_supersedes_stale_and_is_not_cleared_by_fill(tmp
         close_order_id="order-1",
         executed_units=0.84,
     )
-    assert executor.halted_reason == "broker_leg_reconciliation_failed"
+    assert executor.halted_reason == "broker_quantity_reduction_unattributed"
     assert not executor.new_risk_allowed
 
 
