@@ -12,9 +12,11 @@ from uuid import uuid4
 class BrokerTaskLane(StrEnum):
     STANDARD = 'standard'
     CLOSE = 'close'
+    QUERY = 'query'
 
 
 CLOSE_TASK_KINDS = frozenset({'close_position'})
+QUERY_TASK_KINDS = frozenset({'v3_close_execution_lookup', 'v3_broker_reconciliation'})
 
 
 @dataclass(frozen=True)
@@ -30,11 +32,10 @@ class BrokerTaskCompletion:
 class BrokerTaskRunner:
     """Run blocking broker work outside the market-data consumer.
 
-    Standard broker work is serialized on one worker to avoid hidden request
-    bursts. Position closes use a second, independently serialized lane so a
-    slow order confirmation or portfolio lookup can never delay a TP/SL close.
-    Runtime state is never mutated in either worker: callers drain completions
-    and apply them from the main event loop.
+    Standard account/order work, close mutations and read-only reconciliation are
+    isolated on independent single-worker lanes. A slow GET/confirmation lookup
+    can therefore never queue in front of a TP/SL close mutation. Runtime state is
+    mutated only by callers draining structured completions on the main loop.
     """
 
     def __init__(self) -> None:
@@ -46,6 +47,10 @@ class BrokerTaskRunner:
             BrokerTaskLane.CLOSE: ThreadPoolExecutor(
                 max_workers=1,
                 thread_name_prefix='goblin-broker-close',
+            ),
+            BrokerTaskLane.QUERY: ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix='goblin-broker-query',
             ),
         }
         self._pending: dict[
@@ -122,6 +127,8 @@ class BrokerTaskRunner:
     def _lane_for_kind(kind: str) -> BrokerTaskLane:
         if kind in CLOSE_TASK_KINDS:
             return BrokerTaskLane.CLOSE
+        if kind in QUERY_TASK_KINDS:
+            return BrokerTaskLane.QUERY
         return BrokerTaskLane.STANDARD
 
     def _complete(self, task_id: str, future: Future) -> None:
