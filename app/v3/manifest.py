@@ -33,7 +33,10 @@ from app.research.summary import (
     RESEARCH_SUMMARY_SCHEMA_VERSION,
     research_summary_contract_metadata,
 )
-from app.v3.live_execution import POINT_M_DUST_NOTIONAL_USD
+from app.v3.live_execution import (
+    BROKER_RECONCILIATION_INTERVAL_SECONDS,
+    POINT_M_DUST_NOTIONAL_USD,
+)
 from app.v3.run_artifacts import (
     V3_REPLAY_CHECKPOINT_SCHEMA_VERSION,
     V3_RUN_QC_SCHEMA_VERSION,
@@ -41,7 +44,7 @@ from app.v3.run_artifacts import (
 from app.v3.runtime import V3_RUNTIME_CONTRACT_VERSION
 from app.v3.state_store import V3_RUNTIME_STATE_VERSION
 
-V3_RUN_MANIFEST_SCHEMA_VERSION = 18
+V3_RUN_MANIFEST_SCHEMA_VERSION = 19
 _SENSITIVE_SETTINGS = {"ETORO_API_KEY", "ETORO_USER_KEY"}
 
 
@@ -171,6 +174,20 @@ def build_v3_run_manifest(
                 "dust_policy": "full_close_when_projected_residual_below_threshold",
                 "confirmed_units_required_for_partial_accounting": True,
                 "broker_units_reconciled_at_startup": True,
+                "broker_units_reconciliation": {
+                    "startup": True,
+                    "periodic_interval_seconds": (
+                        BROKER_RECONCILIATION_INTERVAL_SECONDS
+                    ),
+                    "query_lane": "shared_serial_with_close_confirmation",
+                    "close_confirmation_priority": True,
+                    "mismatch_policy": "halt_new_risk_reduce_only_allowed",
+                    "query_failure_policy": "halt_new_risk_reduce_only_allowed",
+                    "pending_reduction_policy": (
+                        "halt_new_risk_until_economic_fill_confirmed"
+                    ),
+                    "stale_snapshot_policy": "discard_and_retry",
+                },
                 "confirmation_retry_authority": "v3_scheduler_single_http_attempt",
                 "confirmation_query_lane": "isolated_from_close_mutations",
             },
