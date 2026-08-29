@@ -446,24 +446,30 @@ class V3BrokerExecutor:
             payload = event.payload
             position_id = str(payload["position_id"])
             action_ids = [str(value) for value in payload.get("action_ids", [])]
+            unresolved_action_ids = [
+                action_id for action_id in action_ids if action_id not in resolved
+            ]
+            if action_ids and not unresolved_action_ids:
+                continue
             active_action_ids = [
                 action_id
-                for action_id in action_ids
-                if action_id in accepted and action_id not in resolved
+                for action_id in unresolved_action_ids
+                if action_id in accepted
             ]
             attribution_confident = bool(payload.get("attribution_confident", False))
-            if len(active_action_ids) == 1:
+            if len(active_action_ids) == 1 and len(unresolved_action_ids) == 1:
                 action_id = active_action_ids[0]
                 self._pending_economic_fill_action_ids.add(action_id)
-                self._reconciled_close_quantities[action_id] = _ReconciledCloseQuantity(
-                    action_id=action_id,
-                    inventory_id=event.inventory_id,
-                    position_id=position_id,
-                    reconciled_book_units=float(payload["reconciled_book_units"]),
-                    broker_units=float(payload["broker_units"]),
-                    entry_price_basis=float(payload["entry_price_basis"]),
-                    attribution_confident=attribution_confident,
-                )
+                if action_id not in self._reconciled_close_quantities:
+                    self._reconciled_close_quantities[action_id] = _ReconciledCloseQuantity(
+                        action_id=action_id,
+                        inventory_id=event.inventory_id,
+                        position_id=position_id,
+                        reconciled_book_units=float(payload["reconciled_book_units"]),
+                        broker_units=float(payload["broker_units"]),
+                        entry_price_basis=float(payload["entry_price_basis"]),
+                        attribution_confident=attribution_confident,
+                    )
                 if not attribution_confident:
                     self._unattributed_reconciled_position_ids.add(position_id)
             elif bool(payload.get("economic_fill_pending", True)):
