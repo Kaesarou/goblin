@@ -9,7 +9,7 @@ def test_execution_and_rest_market_data_share_one_user_key_get_governor(tmp_path
         BROKER="etoro_demo",
         ETORO_API_KEY="api-key",
         ETORO_USER_KEY="user-key",
-        INSTRUMENT_ID_CACHE_PATH=str(tmp_path / "instrument_ids.json"),
+        ETORO_INSTRUMENT_ID_CACHE_PATH=str(tmp_path / "instrument_ids.json"),
     )
 
     clients = build_runtime_clients(settings)
