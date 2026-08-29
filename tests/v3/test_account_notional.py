@@ -8,7 +8,7 @@ from app.runtime.broker_task_runner import BrokerTaskCompletion, BrokerTaskLane
 from app.v3.book import InventoryBook
 from app.v3.live_execution import POINT_M_DUST_NOTIONAL_USD, V3BrokerExecutor
 from app.v3.models import ExecutionStyle, IntentPurpose, OrderIntent
-from app.v3.persistence import InventoryEventStore
+from app.v3.persistence import InventoryEvent, InventoryEventStore
 
 NOW = datetime(2026, 8, 29, 10, 0, tzinfo=timezone.utc)
 
@@ -69,28 +69,38 @@ def test_partial_close_scales_account_notional_and_event_replay_preserves_it(tmp
     assert updated.average_entry_price == pytest.approx(200.0)
 
     store = InventoryEventStore(tmp_path / "events.sqlite")
-    store.append_entry_fill(
-        event_id="entry",
-        inventory_id="inv",
-        symbol="AIR.PA",
-        position_id="p1",
-        units=1.25,
-        price=200.0,
-        fee=0.0,
-        occurred_at=NOW,
-        strategy_version="INVENTORY_RR5_ETORO5_V1",
-        extra_payload={"notional": 400.0},
+    store.append(
+        InventoryEvent(
+            event_id="entry",
+            inventory_id="inv",
+            event_type="ENTRY_FILLED",
+            occurred_at=NOW,
+            payload={
+                "symbol": "AIR.PA",
+                "position_id": "p1",
+                "units": 1.25,
+                "price": 200.0,
+                "notional": 400.0,
+                "fee": 0.0,
+            },
+            strategy_version="INVENTORY_RR5_ETORO5_V1",
+        )
     )
-    store.append_exit_fill(
-        event_id="exit",
-        inventory_id="inv",
-        symbol="AIR.PA",
-        position_id="p1",
-        units=1.0,
-        price=205.0,
-        fee=0.0,
-        occurred_at=NOW,
-        strategy_version="INVENTORY_RR5_ETORO5_V1",
+    store.append(
+        InventoryEvent(
+            event_id="exit",
+            inventory_id="inv",
+            event_type="EXIT_FILLED",
+            occurred_at=NOW,
+            payload={
+                "symbol": "AIR.PA",
+                "position_id": "p1",
+                "units": 1.0,
+                "price": 205.0,
+                "fee": 0.0,
+            },
+            strategy_version="INVENTORY_RR5_ETORO5_V1",
+        )
     )
     rebuilt = InventoryBook.from_events(store.events())
     rebuilt_inventory = rebuilt.active_for_symbol("AIR.PA")
@@ -101,7 +111,7 @@ def test_partial_close_scales_account_notional_and_event_replay_preserves_it(tmp
 
 
 def test_point_m_dust_uses_account_currency_notional_not_asset_quote_value(tmp_path):
-    # Asset quote residual would be 0.16 * $200 = 32, above the $10 threshold.
+    # Asset quote residual would be 0.16 * 200 = 32, above the $10 threshold.
     # But the position represents only $50 of account exposure, so its 16%
     # residual is $8 and Point M dust policy must collapse it to a full close.
     book = InventoryBook()
@@ -127,6 +137,7 @@ def test_point_m_dust_uses_account_currency_notional_not_asset_quote_value(tmp_p
         model_version=None,
     )
     inventory = book.active_for_symbol("AIR.PA")
+    assert inventory is not None
     intent = OrderIntent(
         intent_id="dust-fx",
         purpose=IntentPurpose.PROFIT_EXIT,
