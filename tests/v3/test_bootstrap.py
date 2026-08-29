@@ -7,7 +7,10 @@ from app.instruments.instrument_registry import InstrumentRegistry
 from app.journal.run_paths import build_run_journal_paths
 from app.main import _assert_v3_execution_mode
 from app.v3.config import RecoverabilityConfig, etoro5_research_config, rr5_research_config
-from app.v3.live_execution import POINT_M_DUST_NOTIONAL_USD
+from app.v3.live_execution import (
+    BROKER_RECONCILIATION_INTERVAL_SECONDS,
+    POINT_M_DUST_NOTIONAL_USD,
+)
 from app.v3.manifest import build_v3_run_manifest
 from app.v3.recoverability import RecoverabilityScorer
 
@@ -58,12 +61,27 @@ def test_v3_manifest_declares_authority_and_replayable_log_budget(tmp_path):
         removed_runs=(),
     )
 
+    assert manifest["schema_version"] == 19
     assert manifest["strategy"]["name"] == "INVENTORY_RR5_V1"
     assert manifest["strategy"]["direction_model"] is None
     assert manifest["strategy"]["wait_confirmation"] is None
     assert manifest["models"]["recoverability"]["enabled"] is False
     assert manifest["risk"]["live_authority"]["etoro_live_allowed"] is False
     assert manifest["risk"]["hedge_execution_enabled"] is False
+    broker_execution = manifest["runtime"]["broker_execution"]
+    reconciliation = broker_execution["broker_units_reconciliation"]
+    assert reconciliation == {
+        "startup": True,
+        "periodic_interval_seconds": BROKER_RECONCILIATION_INTERVAL_SECONDS,
+        "query_lane": "shared_serial_with_close_confirmation",
+        "close_confirmation_priority": True,
+        "mismatch_policy": "halt_new_risk_reduce_only_allowed",
+        "query_failure_policy": "halt_new_risk_reduce_only_allowed",
+        "pending_reduction_policy": (
+            "halt_new_risk_until_economic_fill_confirmed"
+        ),
+        "stale_snapshot_policy": "discard_and_retry",
+    }
     budget = manifest["runtime"]["journals"]["v3_log_budget"]
     assert budget["raw_market"] == "sampled_10s_per_symbol_tick_processing_in_memory"
     assert budget["raw_market_max_bytes_per_run"] == 1024 * 1024 * 1024
