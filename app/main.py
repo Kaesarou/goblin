@@ -425,7 +425,11 @@ def main() -> None:
         )
         checkpoint_started = True
         runtime.run()
-        run_status = "completed"
+        run_status = (
+            "interrupted"
+            if runtime.stop_reason == "interrupted"
+            else "completed"
+        )
     except Exception as exc:
         run_status = "failed"
         logger.exception("Goblin V3 runtime failed: %s", exc)
