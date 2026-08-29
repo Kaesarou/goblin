@@ -1,5 +1,6 @@
 import logging
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import cast
 
@@ -91,6 +92,14 @@ class CachedBrokerClient(BrokerClient):
             self.position_status_ttl_seconds,
         )
         return is_open
+
+    def get_open_position_units(
+        self,
+        position_ids: Iterable[str],
+    ) -> dict[str, float | None]:
+        # Reconciliation is safety-critical and should observe one coherent broker
+        # portfolio snapshot rather than compose per-position TTL cache entries.
+        return self.delegate.get_open_position_units(position_ids)
 
     def get_close_execution(
         self,
