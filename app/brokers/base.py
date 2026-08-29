@@ -9,6 +9,7 @@ from typing import Any
 class OpenPositionResult:
     position_id: str
     executed_entry_price: float | None = None
+    executed_units: float | None = None
 
 
 @dataclass(frozen=True)
