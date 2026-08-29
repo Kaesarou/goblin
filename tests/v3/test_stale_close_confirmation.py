@@ -1,6 +1,8 @@
 import time
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from app.runtime.broker_task_runner import BrokerTaskCompletion, BrokerTaskLane
 from app.v3.book import InventoryBook
 from app.v3.live_execution import (
@@ -102,7 +104,7 @@ def _executor(tmp_path):
     return executor, runner
 
 
-def test_pending_close_only_halts_after_explicit_stale_age(tmp_path):
+def test_pending_close_only_halts_after_explicit_stale_age(tmp_path, monkeypatch):
     executor, _ = _executor(tmp_path)
     base = time.monotonic()
 
@@ -119,9 +121,10 @@ def test_pending_close_only_halts_after_explicit_stale_age(tmp_path):
     assert not executor.new_risk_allowed
     assert executor.halted_reason == "stale_close_confirmation"
 
+    metrics_now = NOW + timedelta(seconds=CONFIRMATION_STALE_HALT_SECONDS + 60)
     executor.schedule_close_confirmation_checks(
         monotonic_now=base + 2,
-        utc_now=NOW + timedelta(seconds=CONFIRMATION_STALE_HALT_SECONDS + 60),
+        utc_now=metrics_now,
     )
     stale_events = [
         event
@@ -130,6 +133,7 @@ def test_pending_close_only_halts_after_explicit_stale_age(tmp_path):
     ]
     assert len(stale_events) == 1
     assert stale_events[0].payload["action_id"] == "close:p1"
+    monkeypatch.setattr("app.v3.live_execution._utc_now", lambda: metrics_now)
     assert executor.confirmation_metrics()["stale_pending_count"] == 1
 
 
@@ -153,7 +157,7 @@ def test_confirmed_fill_clears_stale_halt_when_no_other_uncertainty_remains(tmp_
 
     assert executor.halted_reason is None
     assert executor.new_risk_allowed
-    assert executor.book.active_for_symbol("AAPL").total_units == 0.16
+    assert executor.book.active_for_symbol("AAPL").total_units == pytest.approx(0.16)
 
 
 def test_reconciliation_mismatch_supersedes_stale_and_is_not_cleared_by_fill(tmp_path):
