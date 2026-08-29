@@ -27,6 +27,7 @@ CONFIRMATION_INITIAL_DELAY_SECONDS = 10.0
 CONFIRMATION_BACKOFF_BASE_SECONDS = 15.0
 CONFIRMATION_BACKOFF_MAX_SECONDS = 300.0
 CONFIRMATION_429_MIN_SECONDS = 60.0
+CONFIRMATION_STALE_HALT_SECONDS = 15.0 * 60.0
 BROKER_RECONCILIATION_INTERVAL_SECONDS = 60.0
 BROKER_UNIT_ABS_TOLERANCE = 1e-8
 BROKER_UNIT_REL_TOLERANCE = 1e-6
@@ -38,7 +39,15 @@ _RECONCILIATION_RECOVERABLE_HALT_REASONS = frozenset(
 )
 _RECONCILIATION_FAILURE_OVERRIDABLE_HALT_REASONS = (
     _RECONCILIATION_RECOVERABLE_HALT_REASONS
-    | frozenset({"broker_quantity_reduction_pending_economic_fill"})
+    | frozenset(
+        {
+            "broker_quantity_reduction_pending_economic_fill",
+            "stale_close_confirmation",
+        }
+    )
+)
+_STALE_CONFIRMATION_OVERRIDABLE_HALT_REASONS = frozenset(
+    {"broker_quantity_reduction_pending_economic_fill"}
 )
 
 
@@ -124,6 +133,7 @@ class V3BrokerExecutor:
         self._confirmation_timeouts = 0
         self._confirmation_5xx = 0
         self._confirmation_recovered = 0
+        self._stale_confirmation_actions_logged: set[str] = set()
         self._broker_unit_reductions_observed = 0
         self._broker_units_unavailable = 0
         self._observed_broker_reductions: set[tuple[object, ...]] = set()
@@ -313,8 +323,10 @@ class V3BrokerExecutor:
         self,
         *,
         monotonic_now: float | None = None,
+        utc_now: datetime | None = None,
     ) -> int:
         now = time.monotonic() if monotonic_now is None else float(monotonic_now)
+        self._refresh_stale_confirmation_halt(utc_now or _utc_now())
         # Confirmation and quantitative reconciliation share one read-only lane.
         # Confirmations always win when due; reconciliation only uses an idle gap.
         if self._confirmation_tasks or self._broker_reconciliation_in_flight:
@@ -487,6 +499,7 @@ class V3BrokerExecutor:
         else:
             self._last_broker_reconciliation_status = "ok"
             self._last_broker_reconciliation_issues = ()
+        self._refresh_stale_confirmation_halt(_utc_now())
         return issues
 
     def _handle_broker_reconciliation(
@@ -516,6 +529,7 @@ class V3BrokerExecutor:
             self._last_broker_reconciliation_monotonic = (
                 time.monotonic() - BROKER_RECONCILIATION_INTERVAL_SECONDS
             )
+            self._refresh_stale_confirmation_halt(_utc_now())
             return
 
         previous_status = self._last_broker_reconciliation_status
@@ -572,6 +586,7 @@ class V3BrokerExecutor:
                 or self.halted_reason in _RECONCILIATION_RECOVERABLE_HALT_REASONS
             ):
                 self.halted_reason = "broker_quantity_reduction_pending_economic_fill"
+            self._refresh_stale_confirmation_halt(_utc_now())
             return
 
         self._last_broker_reconciliation_status = "ok"
@@ -579,6 +594,7 @@ class V3BrokerExecutor:
             self._broker_reconciliation_recovered += 1
         if self.halted_reason in _RECONCILIATION_RECOVERABLE_HALT_REASONS:
             self.halted_reason = None
+        self._refresh_stale_confirmation_halt(_utc_now())
 
     def _compare_broker_units(
         self,
@@ -654,15 +670,68 @@ class V3BrokerExecutor:
             },
         )
 
+    def _refresh_stale_confirmation_halt(self, now: datetime) -> None:
+        actual_now = _as_utc(now)
+        stale: list[tuple[str, _PendingCloseConfirmation, float]] = []
+        for action_id, pending in self._pending_close_confirmations.items():
+            age = max(
+                0.0,
+                (actual_now - _as_utc(pending.accepted_at)).total_seconds(),
+            )
+            if age >= CONFIRMATION_STALE_HALT_SECONDS:
+                stale.append((action_id, pending, age))
+
+        if stale:
+            if (
+                self.halted_reason is None
+                or self.halted_reason in _STALE_CONFIRMATION_OVERRIDABLE_HALT_REASONS
+            ):
+                self.halted_reason = "stale_close_confirmation"
+            for action_id, pending, age in stale:
+                if action_id in self._stale_confirmation_actions_logged:
+                    continue
+                self._stale_confirmation_actions_logged.add(action_id)
+                self._append(
+                    event_type="CLOSE_CONFIRMATION_STALE",
+                    inventory_id=pending.context.inventory_id,
+                    event_id=f"{action_id}:close-confirmation-stale",
+                    payload={
+                        "action_id": action_id,
+                        "position_id": pending.context.position_id,
+                        "close_order_id": pending.close_order_id,
+                        "accepted_at": pending.accepted_at,
+                        "age_seconds": age,
+                        "stale_halt_seconds": CONFIRMATION_STALE_HALT_SECONDS,
+                    },
+                )
+            return
+
+        if self.halted_reason == "stale_close_confirmation":
+            self.halted_reason = None
+
     def confirmation_metrics(self) -> dict[str, object]:
         now = _utc_now()
         oldest_seconds = 0.0
+        stale_count = 0
         if self._pending_close_confirmations:
             oldest = min(
                 pending.accepted_at
                 for pending in self._pending_close_confirmations.values()
             )
-            oldest_seconds = max(0.0, (now - oldest).total_seconds())
+            oldest_seconds = max(0.0, (now - _as_utc(oldest)).total_seconds())
+            stale_count = sum(
+                1
+                for pending in self._pending_close_confirmations.values()
+                if (now - _as_utc(pending.accepted_at)).total_seconds()
+                >= CONFIRMATION_STALE_HALT_SECONDS
+            )
+        broker_rate_limit = {}
+        getter = getattr(self.broker, "get_rate_limit_metrics", None)
+        if callable(getter):
+            try:
+                broker_rate_limit = dict(getter())
+            except Exception:
+                broker_rate_limit = {"status": "unavailable"}
         return {
             "pending": len(self._pending_close_confirmations),
             "in_flight": len(self._confirmation_tasks),
@@ -673,8 +742,11 @@ class V3BrokerExecutor:
             "http_5xx": self._confirmation_5xx,
             "recovered": self._confirmation_recovered,
             "oldest_pending_seconds": oldest_seconds,
+            "stale_halt_seconds": CONFIRMATION_STALE_HALT_SECONDS,
+            "stale_pending_count": stale_count,
             "broker_quantity_reductions_observed": self._broker_unit_reductions_observed,
             "broker_units_unavailable": self._broker_units_unavailable,
+            "broker_get_rate_limit": broker_rate_limit,
             "broker_reconciliation": {
                 "interval_seconds": BROKER_RECONCILIATION_INTERVAL_SECONDS,
                 "in_flight": self._broker_reconciliation_in_flight,
@@ -737,16 +809,66 @@ class V3BrokerExecutor:
         if not isinstance(result, OpenPositionResult):
             self.halted_reason = "invalid_open_completion"
             return []
+
         price = float(result.executed_entry_price or context.trigger_price)
-        units = context.intent.notional / price
+        if not math.isfinite(price) or price <= 0:
+            self.halted_reason = "invalid_open_execution_price"
+            return []
+
+        if result.executed_units is not None:
+            units = float(result.executed_units)
+            units_source = "broker_confirmed"
+        elif result.executed_entry_price is None:
+            # Paper execution has no independent broker fill quantity. It is the
+            # only supported mode where V3 deliberately derives units locally.
+            units = context.intent.notional / price
+            units_source = "paper_derived"
+        else:
+            # A real broker position with known price but unknown units cannot be
+            # inserted into the economic ledger without fabricating quantity.
+            self.halted_reason = "open_execution_units_missing"
+            self._append(
+                event_type="ORDER_SUBMISSION_UNKNOWN",
+                inventory_id=context.inventory_id,
+                event_id=f"{context.action_id}:open-units-unknown",
+                payload={
+                    "action_id": context.action_id,
+                    "intent_id": context.intent.intent_id,
+                    "symbol": context.intent.symbol,
+                    "position_id": result.position_id,
+                    "executed_entry_price": result.executed_entry_price,
+                    "reason": "confirmed_position_units_missing",
+                },
+            )
+            return []
+
+        if not math.isfinite(units) or units <= 0:
+            self.halted_reason = "invalid_open_execution_units"
+            self._append(
+                event_type="ORDER_SUBMISSION_UNKNOWN",
+                inventory_id=context.inventory_id,
+                event_id=f"{context.action_id}:open-units-invalid",
+                payload={
+                    "action_id": context.action_id,
+                    "intent_id": context.intent.intent_id,
+                    "symbol": context.intent.symbol,
+                    "position_id": result.position_id,
+                    "executed_units": result.executed_units,
+                    "reason": "invalid_confirmed_position_units",
+                },
+            )
+            return []
+
         payload = {
             "action_id": context.action_id,
             "intent_id": context.intent.intent_id,
             "symbol": context.intent.symbol,
             "position_id": result.position_id,
             "units": units,
+            "units_source": units_source,
             "price": price,
-            "notional": context.intent.notional,
+            "requested_notional": context.intent.notional,
+            "notional": units * price,
             "fee": 0.0,
             "estimated_cost": (
                 None
@@ -894,12 +1016,14 @@ class V3BrokerExecutor:
                         "attempt_count": pending.attempt_count,
                     },
                 )
+            self._refresh_stale_confirmation_halt(_utc_now())
             return []
         execution = completion.value
         if execution is None:
             pending.next_attempt_monotonic = (
                 time.monotonic() + CONFIRMATION_BACKOFF_BASE_SECONDS
             )
+            self._refresh_stale_confirmation_halt(_utc_now())
             return []
         if not isinstance(execution, BrokerCloseExecution):
             self.halted_reason = "invalid_close_execution"
@@ -1016,11 +1140,12 @@ class V3BrokerExecutor:
         self._pending_close_confirmations.pop(context.action_id, None)
         self._pending_actions.discard(context.action_id)
         self._pending_close_position_ids.discard(context.position_id)
-        if (
-            self.halted_reason == "broker_quantity_reduction_pending_economic_fill"
-            and not self._pending_close_confirmations
-        ):
+        if self.halted_reason in {
+            "broker_quantity_reduction_pending_economic_fill",
+            "stale_close_confirmation",
+        }:
             self.halted_reason = None
+        self._refresh_stale_confirmation_halt(_utc_now())
 
     def _append(
         self,
@@ -1084,6 +1209,12 @@ def _confirmation_backoff_seconds(
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _restored_close_intent(payload: dict, occurred_at: datetime) -> OrderIntent:
