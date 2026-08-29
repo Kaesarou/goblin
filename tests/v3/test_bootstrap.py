@@ -2,6 +2,11 @@ from datetime import datetime, timezone
 
 import pytest
 
+from app.brokers.etoro.get_rate_governor import (
+    ETORO_GET_429_FALLBACK_SECONDS,
+    ETORO_GET_MAX_REQUESTS_PER_WINDOW,
+    ETORO_GET_RATE_WINDOW_SECONDS,
+)
 from app.config.settings import Settings
 from app.instruments.instrument_registry import InstrumentRegistry
 from app.journal.run_paths import build_run_journal_paths
@@ -9,6 +14,7 @@ from app.main import _assert_v3_execution_mode
 from app.v3.config import RecoverabilityConfig, etoro5_research_config, rr5_research_config
 from app.v3.live_execution import (
     BROKER_RECONCILIATION_INTERVAL_SECONDS,
+    CONFIRMATION_STALE_HALT_SECONDS,
     POINT_M_DUST_NOTIONAL_USD,
 )
 from app.v3.manifest import build_v3_run_manifest
@@ -69,6 +75,11 @@ def test_v3_manifest_declares_authority_and_replayable_log_budget(tmp_path):
     assert manifest["risk"]["live_authority"]["etoro_live_allowed"] is False
     assert manifest["risk"]["hedge_execution_enabled"] is False
     broker_execution = manifest["runtime"]["broker_execution"]
+    assert broker_execution["confirmed_open_units_required"] is True
+    assert broker_execution["open_units_authority"] == "etoro_order_openingData.units"
+    assert broker_execution["close_confirmation_stale_halt_seconds"] == (
+        CONFIRMATION_STALE_HALT_SECONDS
+    )
     reconciliation = broker_execution["broker_units_reconciliation"]
     assert reconciliation == {
         "startup": True,
@@ -82,11 +93,22 @@ def test_v3_manifest_declares_authority_and_replayable_log_budget(tmp_path):
         ),
         "stale_snapshot_policy": "discard_and_retry",
     }
+    assert broker_execution["etoro_get_rate_governor"] == {
+        "max_requests_per_window": ETORO_GET_MAX_REQUESTS_PER_WINDOW,
+        "window_seconds": ETORO_GET_RATE_WINDOW_SECONDS,
+        "global_429_cooldown": True,
+        "honor_retry_after": True,
+        "fallback_429_cooldown_seconds": ETORO_GET_429_FALLBACK_SECONDS,
+        "post_close_mutations_governed": False,
+    }
     budget = manifest["runtime"]["journals"]["v3_log_budget"]
     assert budget["raw_market"] == "sampled_10s_per_symbol_tick_processing_in_memory"
     assert budget["raw_market_max_bytes_per_run"] == 1024 * 1024 * 1024
     assert budget["raw_candles"] == "one_per_finalized_candle_with_decision_quote"
     assert budget["silent_decisions"] == "heartbeat_aggregates_only"
+    assert budget["trade_budget_activation"] == (
+        "unique_in_stream_marker_plus_heartbeat_metrics"
+    )
     assert budget["causal_restart_state"] == (
         "sqlite_restart_cache_plus_start_end_run_checkpoints"
     )
