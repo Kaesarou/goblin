@@ -14,36 +14,21 @@ logger = logging.getLogger(__name__)
 TRADE_JOURNAL_SOFT_MAX_BYTES = 256 * 1024 * 1024
 TRADE_JOURNAL_HARD_MAX_BYTES = 384 * 1024 * 1024
 TRADE_JOURNAL_MIN_FREE_BYTES = 1024 * 1024 * 1024
+# Only events reachable from the V3 production entry point receive soft-budget
+# priority. V1 lifecycle names were deliberately removed so dead contracts cannot
+# silently retain authority through the journal layer.
 TRADE_JOURNAL_CRITICAL_EVENT_TYPES = frozenset(
     {
         'runtime_started',
         'runtime_stopped',
-        'runtime_interrupted',
-        'order_submitted',
-        'order_failed',
-        'order_filled',
-        'order_confirmation_unknown',
-        'order_confirmation_recovered',
-        'order_confirmation_manual_intervention_required',
-        'position_opened',
-        'position_updated',
-        'position_close_requested',
-        'position_close_submitted',
-        'position_close_confirmation_pending',
-        'position_close_confirmed',
-        'position_close_submission_unknown',
-        'position_close_rejected',
-        'position_close_confirmation_delayed',
-        'position_close_manual_intervention_required',
-        'force_close_requested',
-        'force_close_completed',
-        'force_close',
+        'error',
         'v3_runtime_started',
         'v3_runtime_stopped',
         'v3_runtime_interrupted',
         'v3_startup_rejected',
         'v3_inventory_event',
         'v3_intent_triggered',
+        'raw_journal_budget_exhausted',
     }
 )
 
