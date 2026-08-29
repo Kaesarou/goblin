@@ -31,6 +31,8 @@ CONFIRMATION_STALE_HALT_SECONDS = 15.0 * 60.0
 BROKER_RECONCILIATION_INTERVAL_SECONDS = 60.0
 BROKER_UNIT_ABS_TOLERANCE = 1e-8
 BROKER_UNIT_REL_TOLERANCE = 1e-6
+BROKER_RECONCILIATION_ATTRIBUTION_REL_TOLERANCE = 0.01
+BROKER_RECONCILIATION_ATTRIBUTION_ABS_TOLERANCE = 1e-4
 _RECONCILIATION_RECOVERABLE_HALT_REASONS = frozenset(
     {
         "broker_leg_reconciliation_failed",
@@ -104,6 +106,7 @@ class _ReconciledCloseQuantity:
     reconciled_book_units: float
     broker_units: float
     entry_price_basis: float
+    attribution_confident: bool
 
 
 class V3BrokerExecutor:
@@ -344,8 +347,6 @@ class V3BrokerExecutor:
     ) -> int:
         now = time.monotonic() if monotonic_now is None else float(monotonic_now)
         self._refresh_stale_confirmation_halt(utc_now or _utc_now())
-        # Confirmation and quantitative reconciliation share one read-only lane.
-        # Confirmations always win when due; reconciliation only uses an idle gap.
         if self._confirmation_tasks or self._broker_reconciliation_in_flight:
             return 0
         due = [
@@ -450,6 +451,7 @@ class V3BrokerExecutor:
                 for action_id in action_ids
                 if action_id in accepted and action_id not in resolved
             ]
+            attribution_confident = bool(payload.get("attribution_confident", False))
             if len(active_action_ids) == 1:
                 action_id = active_action_ids[0]
                 self._pending_economic_fill_action_ids.add(action_id)
@@ -460,8 +462,11 @@ class V3BrokerExecutor:
                     reconciled_book_units=float(payload["reconciled_book_units"]),
                     broker_units=float(payload["broker_units"]),
                     entry_price_basis=float(payload["entry_price_basis"]),
+                    attribution_confident=attribution_confident,
                 )
-            elif not action_ids and bool(payload.get("economic_fill_pending", True)):
+                if not attribution_confident:
+                    self._unattributed_reconciled_position_ids.add(position_id)
+            elif bool(payload.get("economic_fill_pending", True)):
                 self._unattributed_reconciled_position_ids.add(position_id)
 
         if self._unattributed_reconciled_position_ids and self.halted_reason is None:
@@ -537,10 +542,9 @@ class V3BrokerExecutor:
         elif reductions_observed:
             self._last_broker_reconciliation_status = "pending_economic_fill"
             self._last_broker_reconciliation_issues = ()
-            if (
-                self.halted_reason is None
-                and not self._unattributed_reconciled_position_ids
-            ):
+            if self._unattributed_reconciled_position_ids:
+                self.halted_reason = "broker_quantity_reduction_unattributed"
+            elif self.halted_reason is None:
                 self.halted_reason = "broker_quantity_reduction_pending_economic_fill"
         else:
             self._last_broker_reconciliation_status = "ok"
@@ -622,9 +626,11 @@ class V3BrokerExecutor:
         self._last_broker_reconciliation_issues = ()
         if reductions_observed:
             self._last_broker_reconciliation_status = "pending_economic_fill"
-            if (
+            if self._unattributed_reconciled_position_ids:
+                self.halted_reason = "broker_quantity_reduction_unattributed"
+            elif (
                 self.halted_reason is None
-                and not self._unattributed_reconciled_position_ids
+                or self.halted_reason in _RECONCILIATION_RECOVERABLE_HALT_REASONS
             ):
                 self.halted_reason = "broker_quantity_reduction_pending_economic_fill"
             self._refresh_stale_confirmation_halt(_utc_now())
@@ -644,6 +650,9 @@ class V3BrokerExecutor:
     ) -> tuple[tuple[str, ...], bool]:
         issues: list[str] = []
         reductions_observed = False
+        already_reconciled_positions = {
+            value.position_id for value in self._reconciled_close_quantities.values()
+        } | set(self._unattributed_reconciled_position_ids)
         for expectation in context.expectations:
             broker_units = units_by_position.get(expectation.position_id)
             if broker_units is None:
@@ -655,10 +664,19 @@ class V3BrokerExecutor:
                 continue
             if broker_units < expectation.book_units:
                 reductions_observed = True
+                repeated_unexplained_reduction = (
+                    expectation.position_id in already_reconciled_positions
+                )
                 self._reconcile_broker_quantity_reduction(
                     expectation=expectation,
                     broker_units=broker_units,
+                    allow_action_attribution=not repeated_unexplained_reduction,
                 )
+                if repeated_unexplained_reduction:
+                    issues.append(
+                        f"{expectation.position_id}:book={expectation.book_units:.12g}:"
+                        f"broker={broker_units:.12g}:additional_unexplained_reduction"
+                    )
                 continue
             issues.append(
                 f"{expectation.position_id}:book={expectation.book_units:.12g}:"
@@ -671,6 +689,7 @@ class V3BrokerExecutor:
         *,
         expectation: _BrokerLegExpectation,
         broker_units: float,
+        allow_action_attribution: bool,
     ) -> None:
         inventory = next(
             item
@@ -693,6 +712,14 @@ class V3BrokerExecutor:
             for action_id, pending in self._pending_close_confirmations.items()
             if pending.context.position_id == expectation.position_id
         )
+        attribution_confident = False
+        if allow_action_attribution and len(matching_action_ids) == 1:
+            pending = self._pending_close_confirmations[matching_action_ids[0]]
+            attribution_confident = _migration_units_close(
+                reconciled_book_units,
+                pending.context.requested_units,
+            )
+
         previous_account_notional = (
             float(leg.account_notional)
             if leg.account_notional is not None
@@ -723,11 +750,15 @@ class V3BrokerExecutor:
                 "pending_requested_units": expectation.pending_requested_units,
                 "economic_fill_pending": True,
                 "action_ids": matching_action_ids,
+                "attribution_confident": attribution_confident,
                 "source": "broker_portfolio",
             },
             occurred_at=observed_at,
         )
-        if inserted or not _units_close(self._current_leg_units(expectation.position_id), actual_broker_units):
+        if inserted or not _units_close(
+            self._current_leg_units(expectation.position_id),
+            actual_broker_units,
+        ):
             self.book.reconcile_broker_leg_units(
                 position_id=expectation.position_id,
                 broker_units=actual_broker_units,
@@ -737,7 +768,7 @@ class V3BrokerExecutor:
         if inserted:
             self._broker_unit_reductions_observed += 1
 
-        if len(matching_action_ids) == 1:
+        if allow_action_attribution and len(matching_action_ids) == 1:
             action_id = matching_action_ids[0]
             self._pending_economic_fill_action_ids.add(action_id)
             self._reconciled_close_quantities[action_id] = _ReconciledCloseQuantity(
@@ -747,17 +778,17 @@ class V3BrokerExecutor:
                 reconciled_book_units=reconciled_book_units,
                 broker_units=actual_broker_units,
                 entry_price_basis=float(leg.entry_price),
+                attribution_confident=attribution_confident,
             )
-            if self.halted_reason is None:
-                self.halted_reason = "broker_quantity_reduction_pending_economic_fill"
+            if not attribution_confident:
+                self._unattributed_reconciled_position_ids.add(expectation.position_id)
         else:
             self._unattributed_reconciled_position_ids.add(expectation.position_id)
-            if (
-                self.halted_reason is None
-                or self.halted_reason
-                in _RECONCILIATION_FAILURE_OVERRIDABLE_HALT_REASONS
-            ):
-                self.halted_reason = "broker_quantity_reduction_unattributed"
+
+        if self._unattributed_reconciled_position_ids:
+            self.halted_reason = "broker_quantity_reduction_unattributed"
+        elif self.halted_reason is None:
+            self.halted_reason = "broker_quantity_reduction_pending_economic_fill"
 
     def _refresh_stale_confirmation_halt(self, now: datetime) -> None:
         actual_now = _as_utc(now)
@@ -771,7 +802,9 @@ class V3BrokerExecutor:
                 stale.append((action_id, pending, age))
 
         if stale:
-            if (
+            if self._unattributed_reconciled_position_ids:
+                self.halted_reason = "broker_quantity_reduction_unattributed"
+            elif (
                 self.halted_reason is None
                 or self.halted_reason in _STALE_CONFIRMATION_OVERRIDABLE_HALT_REASONS
             ):
@@ -1203,6 +1236,17 @@ class V3BrokerExecutor:
             if executed_units <= 0:
                 self.halted_reason = "close_execution_units_invalid"
                 return
+            if reconciled.attribution_confident and not _migration_units_close(
+                executed_units,
+                reconciled.reconciled_book_units,
+            ):
+                self._unattributed_reconciled_position_ids.add(context.position_id)
+                if self.halted_reason in {
+                    None,
+                    "broker_quantity_reduction_pending_economic_fill",
+                    "stale_close_confirmation",
+                }:
+                    self.halted_reason = "broker_quantity_reduction_unattributed"
             confirmed_at = _utc_now()
             self._append(
                 event_type="EXIT_ECONOMICS_CONFIRMED",
@@ -1227,6 +1271,7 @@ class V3BrokerExecutor:
                     "purpose": context.intent.purpose.value,
                     "executed_at": filled_at,
                     "quantity_already_reconciled": True,
+                    "attribution_confident": reconciled.attribution_confident,
                 },
                 occurred_at=confirmed_at,
             )
@@ -1311,7 +1356,14 @@ class V3BrokerExecutor:
         self._pending_close_position_ids.discard(context.position_id)
         self._pending_economic_fill_action_ids.discard(context.action_id)
         self._reconciled_close_quantities.pop(context.action_id, None)
-        if (
+        if self._unattributed_reconciled_position_ids:
+            if self.halted_reason in {
+                None,
+                "broker_quantity_reduction_pending_economic_fill",
+                "stale_close_confirmation",
+            }:
+                self.halted_reason = "broker_quantity_reduction_unattributed"
+        elif (
             self.halted_reason == "broker_quantity_reduction_pending_economic_fill"
             and not self._pending_economic_fill_action_ids
         ):
@@ -1346,6 +1398,15 @@ def _units_close(left: float, right: float) -> bool:
         float(right),
         rel_tol=BROKER_UNIT_REL_TOLERANCE,
         abs_tol=BROKER_UNIT_ABS_TOLERANCE,
+    )
+
+
+def _migration_units_close(left: float, right: float) -> bool:
+    return math.isclose(
+        float(left),
+        float(right),
+        rel_tol=BROKER_RECONCILIATION_ATTRIBUTION_REL_TOLERANCE,
+        abs_tol=BROKER_RECONCILIATION_ATTRIBUTION_ABS_TOLERANCE,
     )
 
 
