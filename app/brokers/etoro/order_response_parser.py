@@ -15,6 +15,10 @@ POSITION_NESTED_KEYS = ('position', 'Position', 'data', 'Data', 'order', 'Order'
 CLOSE_STATUS_ID_KEYS = ('statusID', 'statusId')
 AVG_PRICE_KEYS = ('avgPrice',)
 OPENING_UNITS_KEYS = ('units', 'Units')
+INVESTED_AMOUNT_ACCOUNT_KEYS = (
+    'investedAmountCurrency',
+    'InvestedAmountCurrency',
+)
 EXECUTED_STATUS_NAMES = ('executed', 'filled')
 REJECTED_STATUS_NAMES = ('rejected', 'failed', 'cancelled', 'canceled', 'error')
 
@@ -24,6 +28,7 @@ class ExecutedPositionDetails:
     position_id: str
     executed_entry_price: float
     executed_units: float
+    executed_notional: float | None = None
 
 
 def extract_order_id(payload: dict) -> str:
@@ -94,10 +99,15 @@ def extract_executed_position_details_list(payload: dict) -> list[ExecutedPositi
             continue
         avg_price = extract_optional_float(opening_data, AVG_PRICE_KEYS)
         units = extract_optional_float(opening_data, OPENING_UNITS_KEYS)
+        invested_amount = extract_optional_float(
+            execution,
+            INVESTED_AMOUNT_ACCOUNT_KEYS,
+        )
         # V3 opens by cash amount. eToro is authoritative for the resulting units;
         # deriving units locally from amount / avgPrice is unsafe for FX-converted
-        # equities and broker rounding. An execution is therefore not ready until
-        # both average price and broker-confirmed units are present and positive.
+        # equities and broker rounding. The account-currency invested amount is
+        # retained separately when eToro provides it so risk exposure never becomes
+        # an asset-currency value merely because quantity accounting is corrected.
         if (
             avg_price is None
             or avg_price <= 0
@@ -110,6 +120,11 @@ def extract_executed_position_details_list(payload: dict) -> list[ExecutedPositi
                 position_id=position_id,
                 executed_entry_price=avg_price,
                 executed_units=units,
+                executed_notional=(
+                    invested_amount
+                    if invested_amount is not None and invested_amount > 0
+                    else None
+                ),
             )
         )
     return executed_positions
@@ -117,6 +132,28 @@ def extract_executed_position_details_list(payload: dict) -> list[ExecutedPositi
 
 def has_executed_position_details(payload: dict) -> bool:
     return bool(extract_executed_position_details_list(payload))
+
+
+def extract_order_error_code(payload: dict) -> int | None:
+    error_code = extract_optional_int(payload, ORDER_ERROR_CODE_KEYS)
+    if error_code is not None:
+        return error_code
+    status = payload.get('status')
+    if isinstance(status, dict):
+        return extract_optional_int(status, ORDER_ERROR_CODE_KEYS)
+    return None
+
+
+def extract_order_error_message(payload: dict) -> str | None:
+    error_message = payload.get('errorMessage')
+    if error_message:
+        return str(error_message)
+    status = payload.get('status')
+    if isinstance(status, dict):
+        status_error_message = status.get('errorMessage')
+        if status_error_message:
+            return str(status_error_message)
+    return None
 
 
 def is_order_executed(payload: dict) -> bool:
@@ -154,28 +191,6 @@ def is_order_rejected(payload: dict) -> bool:
 
     status_name = str(status.get('name', '')).lower()
     return status_name in REJECTED_STATUS_NAMES
-
-
-def extract_order_error_code(payload: dict) -> int | None:
-    error_code = extract_optional_int(payload, ORDER_ERROR_CODE_KEYS)
-    if error_code is not None:
-        return error_code
-    status = payload.get('status')
-    if isinstance(status, dict):
-        return extract_optional_int(status, ORDER_ERROR_CODE_KEYS)
-    return None
-
-
-def extract_order_error_message(payload: dict) -> str | None:
-    error_message = payload.get('errorMessage')
-    if error_message:
-        return str(error_message)
-    status = payload.get('status')
-    if isinstance(status, dict):
-        status_error_message = status.get('errorMessage')
-        if status_error_message:
-            return str(status_error_message)
-    return None
 
 
 def is_close_response_accepted(payload: dict, position_id: str) -> bool:
