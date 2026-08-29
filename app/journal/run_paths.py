@@ -19,6 +19,9 @@ class RunJournalPaths:
     summary: Path
     partial_summary: Path
     manifest: Path
+    state_start: Path
+    state_end: Path
+    run_qc: Path
 
 
 def build_run_journal_paths(
@@ -41,6 +44,9 @@ def build_run_journal_paths(
         summary=base / 'summary.json',
         partial_summary=base / 'summary.partial.json',
         manifest=base / 'manifest.json',
+        state_start=base / 'state_start.json.gz',
+        state_end=base / 'state_end.json.gz',
+        run_qc=base / 'run_qc.json',
     )
 
 
