@@ -88,16 +88,17 @@ def _executor(tmp_path, result: OpenPositionResult):
     return executor, book, store
 
 
-def test_broker_confirmed_units_win_over_requested_notional_divided_by_price(tmp_path):
+def test_broker_confirmed_units_and_account_notional_are_preserved_independently(tmp_path):
     # 400 / 200 would be 2 units. The broker confirms 1.2345 units instead
-    # (representative of FX conversion / broker rounding). V3 must preserve the
-    # broker quantity exactly or quantitative reconciliation will false-positive.
+    # (representative of FX conversion / broker rounding) while account-currency
+    # invested amount remains about $400. V3 must preserve both independently.
     executor, book, store = _executor(
         tmp_path,
         OpenPositionResult(
             position_id="p1",
             executed_entry_price=200.0,
             executed_units=1.2345,
+            executed_notional=399.25,
         ),
     )
 
@@ -109,13 +110,47 @@ def test_broker_confirmed_units_win_over_requested_notional_divided_by_price(tmp
     assert inventory.total_units == pytest.approx(1.2345)
     assert inventory.broker_legs[0].units == pytest.approx(1.2345)
     assert inventory.total_units != pytest.approx(2.0)
+    assert inventory.total_notional == pytest.approx(399.25)
+    assert inventory.broker_legs[0].account_notional == pytest.approx(399.25)
 
     entry = next(event for event in store.events() if event.event_type == "ENTRY_FILLED")
     assert entry.payload["units"] == pytest.approx(1.2345)
     assert entry.payload["units_source"] == "broker_confirmed"
     assert entry.payload["requested_notional"] == pytest.approx(400.0)
-    assert entry.payload["notional"] == pytest.approx(246.9)
+    assert entry.payload["notional"] == pytest.approx(399.25)
+    assert entry.payload["notional_source"] == "broker_confirmed_account_currency"
+    assert entry.payload["asset_notional_at_entry"] == pytest.approx(246.9)
+
+    rebuilt = InventoryBook.from_events(store.events())
+    rebuilt_inventory = rebuilt.active_for_symbol("AIR.PA")
+    assert rebuilt_inventory is not None
+    assert rebuilt_inventory.total_units == pytest.approx(1.2345)
+    assert rebuilt_inventory.total_notional == pytest.approx(399.25)
+    assert rebuilt_inventory.broker_legs[0].account_notional == pytest.approx(399.25)
     assert evaluate_restart_safety(store.events()).safe
+
+
+def test_missing_broker_account_notional_falls_back_to_requested_cash_not_asset_value(tmp_path):
+    executor, book, store = _executor(
+        tmp_path,
+        OpenPositionResult(
+            position_id="p1",
+            executed_entry_price=200.0,
+            executed_units=1.2345,
+            executed_notional=None,
+        ),
+    )
+
+    assert executor.schedule(_intent(), snapshot=_snapshot())
+    assert executor.drain() == ("open-1",)
+
+    inventory = book.active_for_symbol("AIR.PA")
+    assert inventory is not None
+    assert inventory.total_notional == pytest.approx(400.0)
+    assert inventory.total_notional != pytest.approx(1.2345 * 200.0)
+    entry = next(event for event in store.events() if event.event_type == "ENTRY_FILLED")
+    assert entry.payload["notional"] == pytest.approx(400.0)
+    assert entry.payload["notional_source"] == "requested_account_currency"
 
 
 def test_real_open_with_price_but_without_confirmed_units_fails_closed(tmp_path):
