@@ -56,22 +56,28 @@ class Broker:
         return {str(position_id): 1.0 for position_id in position_ids}
 
 
-def _accepted_close_event() -> InventoryEvent:
+def _accepted_close_event(
+    *,
+    position_id: str = "p1",
+    action_id: str | None = None,
+    close_order_id: str | None = None,
+) -> InventoryEvent:
+    actual_action_id = action_id or f"close:{position_id}"
     return InventoryEvent(
-        event_id="accepted",
+        event_id=f"accepted:{position_id}",
         inventory_id="inv",
         event_type="CLOSE_SUBMISSION_ACCEPTED",
         occurred_at=NOW,
         payload={
-            "action_id": "close:p1",
+            "action_id": actual_action_id,
             "intent_id": "close",
-            "position_id": "p1",
+            "position_id": position_id,
             "symbol": "AAPL",
             "purpose": "profit_exit",
             "trigger_price": 105.0,
             "requested_units": 0.84,
             "full_close": False,
-            "close_order_id": "order-1",
+            "close_order_id": close_order_id or f"order-{position_id}",
         },
         strategy_version="INVENTORY_RR5_ETORO5_V1",
     )
@@ -98,6 +104,36 @@ def _executor(tmp_path):
         model_version=None,
     )
     executor.restore_pending_close_confirmations((_accepted_close_event(),))
+    return executor, runner
+
+
+def _multi_executor(tmp_path):
+    book = InventoryBook()
+    for position_id, price in (("p1", 100.0), ("p2", 102.0)):
+        book.apply_entry_fill(
+            inventory_id="inv",
+            symbol="AAPL",
+            position_id=position_id,
+            units=1.0,
+            price=price,
+            fee=0.0,
+            filled_at=NOW,
+        )
+    runner = QueueRunner()
+    executor = V3BrokerExecutor(
+        broker=Broker(),
+        task_runner=runner,
+        event_store=InventoryEventStore(tmp_path / "v3-multi.sqlite"),
+        book=book,
+        strategy_version="INVENTORY_RR5_ETORO5_V1",
+        model_version=None,
+    )
+    executor.restore_pending_close_confirmations(
+        (
+            _accepted_close_event(position_id="p1"),
+            _accepted_close_event(position_id="p2"),
+        )
+    )
     return executor, runner
 
 
@@ -143,8 +179,62 @@ def test_reconciliation_failure_supersedes_pending_fill_halt_and_survives_fill(t
         context=pending.context,
         exit_price=105.0,
         filled_at=NOW,
-        close_order_id="order-1",
+        close_order_id="order-p1",
         executed_units=0.84,
     )
     assert executor.halted_reason == "broker_leg_reconciliation_failed"
     assert not executor.new_risk_allowed
+
+
+def test_multi_leg_pending_economic_halt_clears_only_after_every_observed_fill(tmp_path):
+    executor, runner = _multi_executor(tmp_path)
+    base = time.monotonic()
+    for pending in executor._pending_close_confirmations.values():
+        pending.next_attempt_monotonic = base + 10_000
+
+    # One coherent portfolio observation proves that both accepted partial closes
+    # have already reduced broker quantity, while neither economic fill is known.
+    executor.schedule_close_confirmation_checks(monotonic_now=base)
+    executor.schedule_close_confirmation_checks(
+        monotonic_now=base + BROKER_RECONCILIATION_INTERVAL_SECONDS + 0.001
+    )
+    reconciliation = _last_reconciliation(runner)
+    runner.complete(reconciliation, value={"p1": 0.16, "p2": 0.16})
+    executor.drain()
+
+    assert executor.halted_reason == "broker_quantity_reduction_pending_economic_fill"
+    assert not executor.new_risk_allowed
+    assert executor.confirmation_metrics()["pending_economic_fill_action_ids"] == [
+        "close:p1",
+        "close:p2",
+    ]
+
+    first = executor._pending_close_confirmations["close:p1"]
+    executor._confirm_close(
+        context=first.context,
+        exit_price=105.0,
+        filled_at=NOW,
+        close_order_id="order-p1",
+        executed_units=0.84,
+    )
+
+    # Confirming one leg resolves only that leg. The second observed broker
+    # reduction is still economically unknown, so BUY authority must stay blocked.
+    assert executor.halted_reason == "broker_quantity_reduction_pending_economic_fill"
+    assert not executor.new_risk_allowed
+    assert executor.confirmation_metrics()["pending_economic_fill_action_ids"] == [
+        "close:p2"
+    ]
+
+    second = executor._pending_close_confirmations["close:p2"]
+    executor._confirm_close(
+        context=second.context,
+        exit_price=106.0,
+        filled_at=NOW,
+        close_order_id="order-p2",
+        executed_units=0.84,
+    )
+
+    assert executor.confirmation_metrics()["pending_economic_fill_count"] == 0
+    assert executor.halted_reason is None
+    assert executor.new_risk_allowed
