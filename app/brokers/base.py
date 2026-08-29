@@ -10,6 +10,7 @@ class OpenPositionResult:
     position_id: str
     executed_entry_price: float | None = None
     executed_units: float | None = None
+    executed_notional: float | None = None
 
 
 @dataclass(frozen=True)
