@@ -7,7 +7,7 @@ from app.market.models import MarketSnapshot
 from app.runtime.broker_task_runner import BrokerTaskCompletion, BrokerTaskLane
 from app.v3.book import InventoryBook
 from app.v3.execution import ProRataPartialCloseAllocator
-from app.v3.live_execution import V3BrokerExecutor
+from app.v3.live_execution import POINT_M_DUST_NOTIONAL_USD, V3BrokerExecutor
 from app.v3.models import ExecutionStyle, IntentPurpose, OrderIntent
 from app.v3.persistence import InventoryEventStore
 
@@ -162,6 +162,40 @@ def test_paper_executor_closes_84_percent_then_full_remainder(tmp_path):
     assert executor.drain() == ("c100",)
     assert book.active_for_symbol("AAPL") is None
     assert not broker.is_position_open("p1")
+
+
+def test_profit_exit_collapses_point_m_dust_to_full_close(tmp_path):
+    book = InventoryBook()
+    broker = PaperBrokerClient(equity=100_000)
+    broker.positions["p1"] = {"position_id": "p1", "symbol": "AAPL"}
+    book.apply_entry_fill(
+        inventory_id="inv",
+        symbol="AAPL",
+        position_id="p1",
+        units=0.5,
+        price=100.0,
+        fee=0.0,
+        filled_at=NOW,
+    )
+    executor = _executor(tmp_path, broker, book)
+    inventory = book.active_for_symbol("AAPL")
+
+    assert POINT_M_DUST_NOTIONAL_USD == 10.0
+    assert executor.schedule(_close_intent(inventory, 0.84, "dust"), snapshot=_snapshot())
+    assert executor.drain() == ("dust",)
+    assert book.active_for_symbol("AAPL") is None
+    assert not broker.is_position_open("p1")
+
+    started = next(
+        event
+        for event in executor.event_store.events()
+        if event.event_type == "CLOSE_SUBMISSION_STARTED"
+    )
+    assert started.payload["strategy_close_fraction"] == pytest.approx(0.84)
+    assert started.payload["execution_close_fraction"] == pytest.approx(1.0)
+    assert started.payload["projected_remaining_notional_usd"] == pytest.approx(8.0)
+    assert started.payload["dust_collapse"] is True
+    assert started.payload["full_close"] is True
 
 
 def test_two_leg_pro_rata_partial_close_preserves_weighted_entry(tmp_path):
