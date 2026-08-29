@@ -92,6 +92,12 @@ def _executor(tmp_path, *, units=None):
     return executor, runner, broker
 
 
+def _after_interval(base: float, multiple: int = 1) -> float:
+    # The scheduler receives time.monotonic() floats. Test the semantic contract
+    # (the interval has elapsed) rather than exact IEEE-754 equality at +60.0.
+    return base + multiple * BROKER_RECONCILIATION_INTERVAL_SECONDS + 0.001
+
+
 def _reconciliation_task(runner: QueueRunner) -> dict:
     return next(
         task for task in runner.tasks if task["kind"] == "v3_broker_reconciliation"
@@ -125,13 +131,13 @@ def test_periodic_reconciliation_uses_shared_query_lane(tmp_path):
 
     assert executor.schedule_close_confirmation_checks(monotonic_now=base) == 0
     assert executor.schedule_close_confirmation_checks(
-        monotonic_now=base + BROKER_RECONCILIATION_INTERVAL_SECONDS
+        monotonic_now=_after_interval(base)
     ) == 1
 
     task = _reconciliation_task(runner)
     assert task["lane"] is BrokerTaskLane.QUERY
     assert executor.schedule_close_confirmation_checks(
-        monotonic_now=base + BROKER_RECONCILIATION_INTERVAL_SECONDS + 1
+        monotonic_now=_after_interval(base) + 1
     ) == 0
 
 
@@ -139,9 +145,7 @@ def test_matching_periodic_reconciliation_keeps_new_risk_enabled(tmp_path):
     executor, runner, _ = _executor(tmp_path, units={"p1": 1.0})
     base = time.monotonic()
     executor.schedule_close_confirmation_checks(monotonic_now=base)
-    executor.schedule_close_confirmation_checks(
-        monotonic_now=base + BROKER_RECONCILIATION_INTERVAL_SECONDS
-    )
+    executor.schedule_close_confirmation_checks(monotonic_now=_after_interval(base))
     task = _reconciliation_task(runner)
     runner.complete(task, value={"p1": 1.0})
 
@@ -157,9 +161,7 @@ def test_periodic_mismatch_halts_then_exact_match_recovers(tmp_path):
     executor, runner, _ = _executor(tmp_path, units={"p1": 0.5})
     base = time.monotonic()
     executor.schedule_close_confirmation_checks(monotonic_now=base)
-    executor.schedule_close_confirmation_checks(
-        monotonic_now=base + BROKER_RECONCILIATION_INTERVAL_SECONDS
-    )
+    executor.schedule_close_confirmation_checks(monotonic_now=_after_interval(base))
     first = _reconciliation_task(runner)
     runner.complete(first, value={"p1": 0.5})
     executor.drain()
@@ -173,7 +175,7 @@ def test_periodic_mismatch_halts_then_exact_match_recovers(tmp_path):
 
     runner.tasks.clear()
     executor.schedule_close_confirmation_checks(
-        monotonic_now=base + 2 * BROKER_RECONCILIATION_INTERVAL_SECONDS
+        monotonic_now=_after_interval(base, 2)
     )
     second = _reconciliation_task(runner)
     runner.complete(second, value={"p1": 1.0})
@@ -195,9 +197,7 @@ def test_pending_close_quantity_reduction_halts_for_economic_fill_not_mismatch(t
     pending.next_attempt_monotonic = base + 10_000
 
     executor.schedule_close_confirmation_checks(monotonic_now=base)
-    executor.schedule_close_confirmation_checks(
-        monotonic_now=base + BROKER_RECONCILIATION_INTERVAL_SECONDS
-    )
+    executor.schedule_close_confirmation_checks(monotonic_now=_after_interval(base))
     task = _reconciliation_task(runner)
     runner.complete(task, value={"p1": 0.16})
     executor.drain()
@@ -218,7 +218,7 @@ def test_confirmation_due_has_priority_over_periodic_reconciliation(tmp_path):
     base = time.monotonic()
     pending.next_attempt_monotonic = base
     executor._last_broker_reconciliation_monotonic = (
-        base - BROKER_RECONCILIATION_INTERVAL_SECONDS
+        base - BROKER_RECONCILIATION_INTERVAL_SECONDS - 0.001
     )
 
     assert executor.schedule_close_confirmation_checks(monotonic_now=base) == 1
@@ -233,9 +233,7 @@ def test_inflight_book_change_discards_stale_reconciliation_result(tmp_path):
     executor, runner, _ = _executor(tmp_path, units={"p1": 1.0})
     base = time.monotonic()
     executor.schedule_close_confirmation_checks(monotonic_now=base)
-    executor.schedule_close_confirmation_checks(
-        monotonic_now=base + BROKER_RECONCILIATION_INTERVAL_SECONDS
-    )
+    executor.schedule_close_confirmation_checks(monotonic_now=_after_interval(base))
     task = _reconciliation_task(runner)
 
     executor.book.apply_entry_fill(
