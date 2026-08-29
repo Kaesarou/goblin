@@ -8,11 +8,17 @@ from app.brokers.etoro.http_retry_policy import is_retryable_http_status
 
 
 class FakeResponse:
-    def __init__(self, status_code: int, payload: dict | None = None):
+    def __init__(
+        self,
+        status_code: int,
+        payload: dict | None = None,
+        headers: dict | None = None,
+    ):
         self.status_code = status_code
         self._payload = payload or {}
         self.content = b'{}'
         self.text = str(self._payload)
+        self.headers = headers or {}
 
     @property
     def ok(self) -> bool:
@@ -52,6 +58,25 @@ def test_etoro_client_get_retries_retryable_status_before_success(monkeypatch):
     assert client._get('/path') == {'ok': True}
     assert len(calls) == 2
     assert sleeps == [delay_seconds_for_attempt(1)]
+
+
+def test_etoro_client_get_honors_retry_after(monkeypatch):
+    client = build_uninitialized_client()
+    sleeps = []
+    responses = [
+        FakeResponse(429, headers={'Retry-After': '7'}),
+        FakeResponse(200, {'ok': True}),
+    ]
+
+    monkeypatch.setattr(
+        requests,
+        'get',
+        lambda *args, **kwargs: responses.pop(0),
+    )
+    monkeypatch.setattr('time.sleep', lambda seconds: sleeps.append(seconds))
+
+    assert client._get('/path') == {'ok': True}
+    assert sleeps == [7.0]
 
 
 def test_etoro_client_get_does_not_retry_non_retryable_status(monkeypatch):
