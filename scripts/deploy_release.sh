@@ -47,6 +47,8 @@ next_image_env="$app_dir/.deployment.env.next"
 previous_compose="$app_dir/.docker-compose.production.yml.previous"
 previous_image_env="$app_dir/.deployment.env.previous"
 
+deployment_diagnostics="$release_dir/deployment-failure.log"
+
 cp "$incoming_compose" "$next_compose"
 printf 'GOBLIN_IMAGE=%s\n' "$image" > "$next_image_env"
 
@@ -75,8 +77,27 @@ start_release() {
     up --detach --remove-orphans --wait --wait-timeout 90
 }
 
+capture_failed_release_diagnostics() {
+  {
+    printf '=== Goblin failed release diagnostics ===\n'
+    printf 'git_sha=%s\nimage=%s\ncaptured_at=%s\n' \
+      "$git_sha" "$image" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '\n=== docker compose ps -a ===\n'
+    docker compose \
+      --project-directory "$app_dir" \
+      --env-file "$image_env" \
+      -f "$compose_file" \
+      ps -a || true
+    printf '\n=== docker inspect goblin-bot ===\n'
+    docker inspect goblin-bot || true
+    printf '\n=== docker logs --tail 500 goblin-bot ===\n'
+    docker logs --timestamps --tail 500 goblin-bot || true
+  } 2>&1 | tee "$deployment_diagnostics" >&2 || true
+}
+
 if ! start_release; then
   printf 'Deployment failed for %s\n' "$image" >&2
+  capture_failed_release_diagnostics
   if [[ "$had_previous" == true ]]; then
     printf 'Restoring the previous Goblin image\n' >&2
     mv "$previous_compose" "$compose_file"
@@ -95,6 +116,7 @@ running_image="$(docker inspect --format '{{.Config.Image}}' "$container_id")"
 
 if [[ "$running_image" != "$image" ]]; then
   printf 'Running image mismatch: expected %s, got %s\n' "$image" "$running_image" >&2
+  capture_failed_release_diagnostics
   exit 1
 fi
 

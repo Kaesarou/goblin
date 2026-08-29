@@ -38,6 +38,23 @@ class InventoryBook:
                     fee=float(payload.get("fee", 0.0)),
                     filled_at=event.occurred_at,
                 )
+            elif event.event_type == "BROKER_QUANTITY_RECONCILED":
+                payload = event.payload
+                book.reconcile_broker_leg_units(
+                    position_id=str(payload["position_id"]),
+                    broker_units=float(payload["broker_units"]),
+                    observed_at=event.occurred_at,
+                )
+            elif event.event_type == "EXIT_ECONOMICS_CONFIRMED":
+                payload = event.payload
+                book.apply_exit_economics(
+                    inventory_id=event.inventory_id,
+                    position_id=str(payload["position_id"]),
+                    exit_price=float(payload["price"]),
+                    units=float(payload["units"]),
+                    entry_price_basis=float(payload["entry_price_basis"]),
+                    fee=float(payload.get("fee", 0.0)),
+                )
             elif event.event_type == "EXIT_FILLED":
                 payload = event.payload
                 book.apply_exit_fill(
@@ -151,6 +168,118 @@ class InventoryBook:
             )
         self._inventories[inventory_id] = updated
         self._inventory_by_position_id[position_id] = inventory_id
+        return updated
+
+    def reconcile_broker_leg_units(
+        self,
+        *,
+        position_id: str,
+        broker_units: float,
+        observed_at: datetime,
+    ) -> InventoryState:
+        """Apply broker-authoritative remaining units without inventing economics.
+
+        This operation is intentionally reduce-only. It is used when the broker
+        portfolio proves that an already-known position contains fewer units than
+        the append-only economic ledger. The missing quantity may represent a
+        previously executed close whose price/fees are still unknown. Exposure is
+        reconciled immediately, while realized PnL is finalized later by a
+        separate ``EXIT_ECONOMICS_CONFIRMED`` event.
+        """
+
+        try:
+            inventory_id = self._inventory_by_position_id[position_id]
+        except KeyError as exc:
+            raise KeyError(f"Unknown broker position reconciliation: {position_id}") from exc
+        inventory = self._inventories[inventory_id]
+        leg = next(item for item in inventory.broker_legs if item.position_id == position_id)
+        actual_units = float(broker_units)
+        if actual_units < -_CLOSE_TOLERANCE:
+            raise ValueError("Broker reconciliation requires non-negative units")
+        if actual_units > leg.units + _CLOSE_TOLERANCE:
+            raise ValueError(
+                f"Broker reconciliation cannot increase units: position_id={position_id}, "
+                f"broker_units={actual_units}, leg_units={leg.units}"
+            )
+        actual_units = max(0.0, min(actual_units, leg.units))
+        if abs(actual_units - leg.units) <= _CLOSE_TOLERANCE:
+            return inventory
+
+        leg_account_notional = _leg_account_notional(leg)
+        if actual_units <= _CLOSE_TOLERANCE:
+            self._inventory_by_position_id.pop(position_id, None)
+            remaining_legs = tuple(
+                item for item in inventory.broker_legs if item.position_id != position_id
+            )
+        else:
+            remaining_leg = replace(
+                leg,
+                units=actual_units,
+                account_notional=(leg_account_notional * actual_units / leg.units),
+            )
+            remaining_legs = tuple(
+                remaining_leg if item.position_id == position_id else item
+                for item in inventory.broker_legs
+            )
+
+        if not remaining_legs:
+            updated = replace(
+                inventory,
+                total_units=0.0,
+                total_notional=0.0,
+                wallet_exposure_pct=0.0,
+                last_fill_at=observed_at,
+                broker_legs=(),
+                status=InventoryStatus.CLOSED,
+            )
+        else:
+            total_units = sum(item.units for item in remaining_legs)
+            cost = sum(item.units * item.entry_price for item in remaining_legs)
+            account_notional = sum(
+                _leg_account_notional(item) for item in remaining_legs
+            )
+            updated = replace(
+                inventory,
+                total_units=total_units,
+                average_entry_price=cost / total_units,
+                total_notional=account_notional,
+                last_fill_at=observed_at,
+                broker_legs=remaining_legs,
+                trailing_min_since_open=None,
+                trailing_max_since_min=None,
+                trailing_max_since_open=None,
+                trailing_min_since_max=None,
+            )
+        self._inventories[inventory_id] = updated
+        return updated
+
+    def apply_exit_economics(
+        self,
+        *,
+        inventory_id: str,
+        position_id: str,
+        exit_price: float,
+        units: float,
+        entry_price_basis: float,
+        fee: float,
+    ) -> InventoryState:
+        """Finalize PnL for quantity that was already reconciled from the broker."""
+
+        inventory = self._inventories.get(inventory_id)
+        if inventory is None:
+            raise KeyError(f"Unknown inventory economics confirmation: {inventory_id}")
+        actual_units = float(units)
+        actual_exit_price = float(exit_price)
+        actual_entry_price = float(entry_price_basis)
+        if actual_units <= 0 or actual_exit_price <= 0 or actual_entry_price <= 0:
+            raise ValueError("Exit economics confirmation requires positive units/prices")
+        realized = actual_units * (actual_exit_price - actual_entry_price)
+        updated = replace(
+            inventory,
+            realized_pnl=inventory.realized_pnl + realized,
+            fees_paid=inventory.fees_paid + float(fee),
+        )
+        self._inventories[inventory_id] = updated
         return updated
 
     def apply_exit_fill(
