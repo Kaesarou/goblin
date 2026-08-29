@@ -38,6 +38,7 @@ from app.v3.persistence import InventoryEvent, InventoryEventStore
 from app.v3.planner import InventoryPlanner
 from app.v3.recoverability import RecoverabilityScorer
 from app.v3.risk import InventoryRiskPolicy
+from app.v3.run_artifacts import write_run_qc, write_runtime_checkpoint
 from app.v3.runtime import GoblinV3Runtime
 from app.v3.state_store import V3RuntimeStateStore
 
@@ -411,9 +412,24 @@ def main() -> None:
         run_paths.root,
     )
 
+    checkpoint_started = False
     try:
+        # Startup performs restart restore and broker-unit reconciliation. Capture
+        # exactly that causal boundary before the first prospective event is run.
+        runtime.startup()
+        write_runtime_checkpoint(
+            run_paths.state_start,
+            runtime=runtime,
+            phase="start",
+            asof=datetime.now(timezone.utc),
+        )
+        checkpoint_started = True
         runtime.run()
-        run_status = "completed"
+        run_status = (
+            "interrupted"
+            if runtime.stop_reason == "interrupted"
+            else "completed"
+        )
     except Exception as exc:
         run_status = "failed"
         logger.exception("Goblin V3 runtime failed: %s", exc)
@@ -427,6 +443,16 @@ def main() -> None:
         )
         raise
     finally:
+        if checkpoint_started:
+            try:
+                write_runtime_checkpoint(
+                    run_paths.state_end,
+                    runtime=runtime,
+                    phase="end",
+                    asof=datetime.now(timezone.utc),
+                )
+            except Exception:
+                logger.exception("V3 end checkpoint write failed")
         if research_pipeline is not None:
             research_pipeline.flush()
         else:
@@ -450,6 +476,18 @@ def main() -> None:
         )
         write_run_manifest(settings.daily_summary_path, summary)
         write_run_manifest(run_paths.summary, summary)
+        try:
+            write_run_qc(
+                run_paths.run_qc,
+                run_paths=run_paths,
+                runtime=runtime,
+                trade_journal=trade_journal,
+                market_journal=market_journal,
+                candle_journal=candle_journal,
+                status=run_status,
+            )
+        except Exception:
+            logger.exception("V3 run QC write failed")
         for manifest_path in (run_paths.manifest, settings.run_manifest_path):
             finalize_run_manifest(
                 manifest_path,

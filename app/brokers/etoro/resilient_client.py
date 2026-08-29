@@ -104,14 +104,19 @@ class ResilientEtoroClient(EtoroClient):
         )
         logger.info(
             'eToro position confirmed | order_id=%s | position_id=%s | '
-            'instrument_id=%s | side=%s | executed_entry_price=%s',
+            'instrument_id=%s | side=%s | executed_entry_price=%s | '
+            'executed_units=%s | executed_notional=%s',
             order_id,
             executed_position.position_id,
             instrument_id,
             normalized_side,
             executed_position.executed_entry_price,
+            executed_position.executed_units,
+            executed_position.executed_notional,
         )
         return OpenPositionResult(
             position_id=executed_position.position_id,
             executed_entry_price=executed_position.executed_entry_price,
+            executed_units=executed_position.executed_units,
+            executed_notional=executed_position.executed_notional,
         )

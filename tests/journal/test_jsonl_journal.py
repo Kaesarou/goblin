@@ -121,7 +121,7 @@ def test_legacy_write_behavior_remains_single_record(tmp_path):
     assert journal.open_count == 1
 
 
-def test_trade_journal_soft_budget_suppresses_noise_but_keeps_critical_events(tmp_path):
+def test_trade_journal_soft_budget_suppresses_noise_and_marks_activation_once(tmp_path):
     journal_path = tmp_path / 'trades.jsonl.gz'
     journal = JsonlJournal(
         str(journal_path),
@@ -135,6 +135,7 @@ def test_trade_journal_soft_budget_suppresses_noise_but_keeps_critical_events(tm
 
     assert journal.write('v3_session_state', {'symbol': 'AAPL'}) is True
     assert journal.write('v3_session_state', {'symbol': 'MSFT'}) is True
+    assert journal.write('v3_session_state', {'symbol': 'NVDA'}) is True
     assert journal.write(
         'v3_inventory_event',
         {'inventory_event_type': 'ENTRY_FILLED'},
@@ -145,11 +146,20 @@ def test_trade_journal_soft_budget_suppresses_noise_but_keeps_critical_events(tm
 
     assert [record['event_type'] for record in records] == [
         'v3_session_state',
+        'trade_journal_budget_active',
         'v3_inventory_event',
     ]
-    assert journal.written_count == 2
-    assert journal.suppressed_count == 1
+    marker = records[1]
+    assert marker['payload']['reason'] == 'soft_max_bytes'
+    assert marker['payload']['soft_max_bytes'] == 1
+    assert journal.written_count == 3
+    assert journal.suppressed_count == 2
     assert journal.budget_reason == 'soft_max_bytes'
+    metrics = journal.budget_metrics()
+    assert metrics['soft_cap_active'] is True
+    assert metrics['hard_cap_active'] is False
+    assert metrics['budget_event_emitted'] is True
+    assert metrics['suppressed_count'] == 2
 
 
 def test_trade_journal_hard_budget_suppresses_even_critical_events(tmp_path):
@@ -182,3 +192,4 @@ def test_trade_journal_hard_budget_suppresses_even_critical_events(tmp_path):
     assert journal.written_count == 1
     assert journal.suppressed_count == 1
     assert journal.budget_reason == 'hard_max_bytes'
+    assert journal.budget_metrics()['budget_event_emitted'] is False

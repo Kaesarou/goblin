@@ -183,6 +183,29 @@ class V3RuntimeStateStore:
             restored.append(iid)
         return tuple(sorted(restored))
 
+    def export_feature_state(self, engine: OnlineFeatureEngine) -> dict[str, Any]:
+        """Return the causal state needed to replay a run without the VPS SQLite."""
+
+        return {
+            symbol: {
+                "state_version": V3_RUNTIME_STATE_VERSION,
+                "asof": _dt(state.last_opened_at),
+                "state": _feature_state_payload(state),
+            }
+            for symbol, state in sorted(engine.states.items())
+            if state.last_opened_at is not None
+        }
+
+    def export_inventory_runtime_state(self, book: InventoryBook) -> dict[str, Any]:
+        return {
+            inventory.inventory_id: {
+                "state_version": V3_RUNTIME_STATE_VERSION,
+                "state": _inventory_runtime_payload(inventory),
+            }
+            for inventory in sorted(book.inventories, key=lambda item: item.inventory_id)
+            if inventory.total_units > 0
+        }
+
     def feature_state_symbols(self) -> tuple[str, ...]:
         with self._connect() as connection:
             rows = connection.execute(
@@ -212,33 +235,6 @@ class V3RuntimeStateStore:
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.path)
-
-
-def legacy_v1_state_counts(path: str | Path) -> dict[str, int]:
-    """Count V1 lifecycle rows without importing V1 strategy-domain code."""
-
-    db_path = Path(path)
-    if not db_path.exists():
-        return {"open_positions": 0, "pending_closes": 0}
-    counts: dict[str, int] = {}
-    with sqlite3.connect(db_path) as connection:
-        tables = {
-            str(row[0])
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        }
-        for table in ("open_positions", "pending_closes"):
-            counts[table] = (
-                int(
-                    connection.execute(
-                        f"SELECT COUNT(*) FROM {table}"
-                    ).fetchone()[0]
-                )
-                if table in tables
-                else 0
-            )
-    return counts
 
 
 def _feature_state_payload(state: Any) -> dict[str, Any]:

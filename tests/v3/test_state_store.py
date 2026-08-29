@@ -1,11 +1,10 @@
-import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from app.instruments.models import AssetClass
 from app.market.models import Candle
 from app.v3.book import InventoryBook
 from app.v3.features import OnlineFeatureEngine
-from app.v3.state_store import V3RuntimeStateStore, legacy_v1_state_counts
+from app.v3.state_store import V3_RUNTIME_STATE_VERSION, V3RuntimeStateStore
 
 UTC = timezone.utc
 NOW = datetime(2026, 8, 25, 7, 0, tzinfo=UTC)
@@ -97,13 +96,29 @@ def test_inventory_runtime_state_roundtrip_and_post_fill_reset_wins(tmp_path):
     assert after_fill.trailing_max_since_open is None
 
 
-def test_legacy_v1_state_is_detected_without_importing_v1_domain(tmp_path):
-    path = tmp_path / "state.sqlite"
-    with sqlite3.connect(path) as connection:
-        connection.execute("CREATE TABLE open_positions(position_id TEXT)")
-        connection.execute("CREATE TABLE pending_closes(position_id TEXT)")
-        connection.execute("INSERT INTO open_positions VALUES ('legacy-1')")
-    assert legacy_v1_state_counts(path) == {
-        "open_positions": 1,
-        "pending_closes": 0,
-    }
+def test_state_exports_make_causal_restart_state_available_to_run_artifacts(tmp_path):
+    engine = OnlineFeatureEngine({"AIR.PA": AssetClass.EQUITY_EU})
+    for minute in range(5):
+        engine.update(_candle(minute, 100.0 + minute / 100.0))
+
+    book = InventoryBook()
+    book.apply_entry_fill(
+        inventory_id="inv-1",
+        symbol="AIR.PA",
+        position_id="p1",
+        units=1.0,
+        price=100.0,
+        fee=0.0,
+        filled_at=NOW,
+    )
+    book.observe_candle(symbol="AIR.PA", high=103.0, low=97.0, close=101.0)
+
+    store = V3RuntimeStateStore(tmp_path / "state.sqlite")
+    feature_state = store.export_feature_state(engine)
+    inventory_state = store.export_inventory_runtime_state(book)
+
+    assert feature_state["AIR.PA"]["state_version"] == V3_RUNTIME_STATE_VERSION
+    assert feature_state["AIR.PA"]["state"]["last_opened_at"] is not None
+    assert inventory_state["inv-1"]["state_version"] == V3_RUNTIME_STATE_VERSION
+    assert inventory_state["inv-1"]["state"]["trailing_min_since_open"] == 97.0
+    assert inventory_state["inv-1"]["state"]["trailing_max_since_open"] == 103.0

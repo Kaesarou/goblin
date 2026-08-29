@@ -51,7 +51,7 @@ def test_configured_session_is_tradable_when_active():
     assert decision.reason == 'session_tradable'
 
 
-def test_session_semantic_equality_ignores_countdown_only():
+def test_session_semantic_equality_and_inequality_ignore_countdown_only():
     session_service = service('09:00-15:00')
     first = session_service.evaluate(
         asset_class=AssetClass.EQUITY_US,
@@ -64,6 +64,7 @@ def test_session_semantic_equality_ignores_countdown_only():
 
     assert first.time_until_session_end_minutes != second.time_until_session_end_minutes
     assert first == second
+    assert not first != second
     assert hash(first) == hash(second)
 
     cutoff_state = session_service.evaluate(

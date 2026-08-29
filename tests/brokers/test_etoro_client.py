@@ -19,7 +19,8 @@ def build_filled_order_details(position_id: int = 9001) -> dict:
             {
                 'positionId': position_id,
                 'state': 'open',
-                'openingData': {'avgPrice': 238.0},
+                'investedAmountCurrency': 5.0,
+                'openingData': {'avgPrice': 238.0, 'units': 0.021},
             }
         ],
     }
@@ -141,6 +142,8 @@ def test_etoro_open_position_sends_demo_buy_order(monkeypatch):
 
     assert result.position_id == '9001'
     assert result.executed_entry_price == 238.0
+    assert result.executed_units == pytest.approx(0.021)
+    assert result.executed_notional == pytest.approx(5.0)
     assert captured == {
         'path': '/api/v2/trading/execution/demo/orders',
         'payload': {
@@ -184,6 +187,7 @@ def test_etoro_open_position_uses_fixed_sell_safety_stop(monkeypatch):
     )
 
     assert result.position_id == '9002'
+    assert result.executed_units == pytest.approx(0.021)
     assert captured['payload']['transaction'] == 'sellShort'
     assert captured['payload']['StopLossRate'] == 338.42143
     assert 'TakeProfitRate' not in captured['payload']
@@ -206,8 +210,14 @@ def test_etoro_open_position_rejects_multiple_executions(monkeypatch):
         lambda *args, **kwargs: {
             'status': {'id': 1, 'name': 'Executed', 'errorCode': 0},
             'positionExecutions': [
-                {'positionId': 9001, 'openingData': {'avgPrice': 238.0}},
-                {'positionId': 9002, 'openingData': {'avgPrice': 239.0}},
+                {
+                    'positionId': 9001,
+                    'openingData': {'avgPrice': 238.0, 'units': 1.0},
+                },
+                {
+                    'positionId': 9002,
+                    'openingData': {'avgPrice': 239.0, 'units': 1.0},
+                },
             ],
         },
     )

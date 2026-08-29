@@ -82,3 +82,42 @@ def test_close_lane_is_not_blocked_by_slow_standard_broker_work():
     assert completions['close-position-1'].value == 'closed'
     assert completions['open-order-1'].lane == BrokerTaskLane.STANDARD
     assert completions['open-order-1'].value == 'open-confirmed'
+
+
+def test_close_lane_is_not_blocked_by_slow_confirmation_query():
+    runner = BrokerTaskRunner()
+    query_started = Event()
+    release_query = Event()
+    close_finished = Event()
+
+    def slow_confirmation_lookup():
+        query_started.set()
+        assert release_query.wait(2)
+        return 'confirmed'
+
+    def close_position():
+        close_finished.set()
+        return 'closed'
+
+    runner.submit(
+        kind='v3_close_execution_lookup',
+        task_id='confirm-1',
+        operation=slow_confirmation_lookup,
+    )
+    assert query_started.wait(1)
+
+    runner.submit(
+        kind='close_position',
+        task_id='close-position-1',
+        operation=close_position,
+    )
+
+    assert close_finished.wait(1)
+    release_query.set()
+    runner.close(wait=True)
+    completions = {item.task_id: item for item in runner.drain()}
+
+    assert completions['confirm-1'].lane == BrokerTaskLane.QUERY
+    assert completions['confirm-1'].value == 'confirmed'
+    assert completions['close-position-1'].lane == BrokerTaskLane.CLOSE
+    assert completions['close-position-1'].value == 'closed'

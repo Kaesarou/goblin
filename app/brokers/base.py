@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -8,6 +9,8 @@ from typing import Any
 class OpenPositionResult:
     position_id: str
     executed_entry_price: float | None = None
+    executed_units: float | None = None
+    executed_notional: float | None = None
 
 
 @dataclass(frozen=True)
@@ -122,6 +125,26 @@ class BrokerClient(ABC):
         Implementations must not derive a fill from close-request acceptance.
         """
         raise NotImplementedError
+
+    def get_open_position_units(
+        self,
+        position_ids: Iterable[str],
+    ) -> dict[str, float | None]:
+        """Return current broker units for requested open positions.
+
+        ``None`` means that the position is absent or its units cannot be parsed.
+        Broker implementations should override this with one portfolio request when
+        possible; the default falls back to existence-only checks.
+        """
+
+        return {
+            str(position_id): (0.0 if not self.is_position_open(str(position_id)) else None)
+            for position_id in position_ids
+        }
+
+    def get_rate_limit_metrics(self) -> dict[str, object]:
+        """Return broker read-rate telemetry when the implementation exposes it."""
+        return {}
 
     def remember_position_instrument(self, position_id: str, symbol: str) -> None:
         """Restore broker-specific metadata needed to manage a position."""

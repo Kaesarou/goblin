@@ -6,14 +6,6 @@ from app.v3.models import InventoryState
 
 
 @dataclass(frozen=True)
-class LegClosePlan:
-    position_ids: tuple[str, ...]
-    planned_units: float
-    target_units: float
-    absolute_error_units: float
-
-
-@dataclass(frozen=True)
 class PartialLegCloseRequest:
     position_id: str
     units: float
@@ -26,37 +18,6 @@ class PartialLegClosePlan:
     planned_units: float
     target_units: float
     absolute_error_units: float
-
-
-class WholeLegCloseAllocator:
-    """Legacy whole-leg translation retained for historical comparisons."""
-
-    def plan(self, inventory: InventoryState, target_units: float) -> LegClosePlan:
-        legs = tuple(leg for leg in inventory.broker_legs if leg.units > 0)
-        if target_units <= 0 or not legs:
-            return LegClosePlan((), 0.0, max(0.0, target_units), max(0.0, target_units))
-
-        target = min(float(target_units), sum(leg.units for leg in legs))
-        best_ids: tuple[str, ...] = ()
-        best_units = 0.0
-        best_key = (abs(target), 0, ())
-        count = len(legs)
-        for mask in range(1, 1 << count):
-            selected = tuple(legs[index] for index in range(count) if mask & (1 << index))
-            units = sum(leg.units for leg in selected)
-            error = abs(units - target)
-            ids = tuple(sorted(leg.position_id for leg in selected))
-            key = (error, len(selected), ids)
-            if key < best_key:
-                best_key = key
-                best_ids = ids
-                best_units = units
-        return LegClosePlan(
-            position_ids=best_ids,
-            planned_units=best_units,
-            target_units=target,
-            absolute_error_units=abs(best_units - target),
-        )
 
 
 class ProRataPartialCloseAllocator:

@@ -9,6 +9,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from app.brokers.etoro.get_rate_governor import (
+    ETORO_GET_429_FALLBACK_SECONDS,
+    ETORO_GET_MAX_REQUESTS_PER_WINDOW,
+    ETORO_GET_RATE_WINDOW_SECONDS,
+)
 from app.journal.raw_data_journal import (
     MARKET_RAW_MAX_BYTES,
     MARKET_RAW_MIN_FREE_BYTES,
@@ -33,10 +38,19 @@ from app.research.summary import (
     RESEARCH_SUMMARY_SCHEMA_VERSION,
     research_summary_contract_metadata,
 )
+from app.v3.live_execution import (
+    BROKER_RECONCILIATION_INTERVAL_SECONDS,
+    CONFIRMATION_STALE_HALT_SECONDS,
+    POINT_M_DUST_NOTIONAL_USD,
+)
+from app.v3.run_artifacts import (
+    V3_REPLAY_CHECKPOINT_SCHEMA_VERSION,
+    V3_RUN_QC_SCHEMA_VERSION,
+)
 from app.v3.runtime import V3_RUNTIME_CONTRACT_VERSION
 from app.v3.state_store import V3_RUNTIME_STATE_VERSION
 
-V3_RUN_MANIFEST_SCHEMA_VERSION = 17
+V3_RUN_MANIFEST_SCHEMA_VERSION = 19
 _SENSITIVE_SETTINGS = {"ETORO_API_KEY", "ETORO_USER_KEY"}
 
 
@@ -140,7 +154,10 @@ def build_v3_run_manifest(
                 "v3_runtime_state": V3_RUNTIME_STATE_VERSION,
                 "executable_prices": EXECUTABLE_PRICE_CONTRACT_VERSION,
                 "quote_quality": QUOTE_QUALITY_CONTRACT_VERSION,
-                "broker_exit_translation": "pro_rata_partial_close_v1",
+                "broker_exit_translation": "pro_rata_partial_close_point_m_dust_v2",
+                "broker_open_accounting": "broker_confirmed_opening_units_v1",
+                "replay_checkpoint": V3_REPLAY_CHECKPOINT_SCHEMA_VERSION,
+                "run_qc": V3_RUN_QC_SCHEMA_VERSION,
             },
             "market_data": {
                 "mode": "websocket",
@@ -160,7 +177,43 @@ def build_v3_run_manifest(
                 "partial_close_supported": True,
                 "partial_close_request_field": "UnitsToDeduct",
                 "allocation": "same_fraction_of_every_active_broker_leg",
+                "point_m_dust_notional_usd": POINT_M_DUST_NOTIONAL_USD,
+                "dust_policy": "full_close_when_projected_residual_below_threshold",
+                "confirmed_open_units_required": True,
+                "open_units_authority": "etoro_order_openingData.units",
+                "paper_open_units_policy": "requested_notional_divided_by_trigger_price",
                 "confirmed_units_required_for_partial_accounting": True,
+                "broker_units_reconciled_at_startup": True,
+                "broker_units_reconciliation": {
+                    "startup": True,
+                    "periodic_interval_seconds": (
+                        BROKER_RECONCILIATION_INTERVAL_SECONDS
+                    ),
+                    "query_lane": "shared_serial_with_close_confirmation",
+                    "close_confirmation_priority": True,
+                    "mismatch_policy": "halt_new_risk_reduce_only_allowed",
+                    "query_failure_policy": "halt_new_risk_reduce_only_allowed",
+                    "pending_reduction_policy": (
+                        "halt_new_risk_until_economic_fill_confirmed"
+                    ),
+                    "stale_snapshot_policy": "discard_and_retry",
+                },
+                "confirmation_retry_authority": "v3_scheduler_single_http_attempt",
+                "confirmation_query_lane": "isolated_from_close_mutations",
+                "close_confirmation_stale_halt_seconds": (
+                    CONFIRMATION_STALE_HALT_SECONDS
+                ),
+                "stale_confirmation_policy": (
+                    "halt_new_risk_keep_reduce_only_and_reconciliation"
+                ),
+                "etoro_get_rate_governor": {
+                    "max_requests_per_window": ETORO_GET_MAX_REQUESTS_PER_WINDOW,
+                    "window_seconds": ETORO_GET_RATE_WINDOW_SECONDS,
+                    "global_429_cooldown": True,
+                    "honor_retry_after": True,
+                    "fallback_429_cooldown_seconds": ETORO_GET_429_FALLBACK_SECONDS,
+                    "post_close_mutations_governed": False,
+                },
             },
             "quote_quality_policy": quote_quality_contract_metadata(),
             "watchlist": symbols,
@@ -182,7 +235,12 @@ def build_v3_run_manifest(
                     "silent_decisions": "heartbeat_aggregates_only",
                     "decision_details": "material_state_changes_only",
                     "market_quality": "transition_only",
-                    "causal_restart_state": "sqlite_only",
+                    "trade_budget_activation": (
+                        "unique_in_stream_marker_plus_heartbeat_metrics"
+                    ),
+                    "causal_restart_state": (
+                        "sqlite_restart_cache_plus_start_end_run_checkpoints"
+                    ),
                 },
             },
             "research": {
@@ -205,6 +263,8 @@ def build_v3_run_manifest(
             "schemas": {
                 "research_state": RESEARCH_STATE_SCHEMA_VERSION,
                 "research_summary": RESEARCH_SUMMARY_SCHEMA_VERSION,
+                "replay_checkpoint": V3_REPLAY_CHECKPOINT_SCHEMA_VERSION,
+                "run_qc": V3_RUN_QC_SCHEMA_VERSION,
             },
             "market_stream": str(run_paths.market),
             "candle_stream": str(run_paths.candles),
@@ -213,11 +273,15 @@ def build_v3_run_manifest(
             "research_stream": str(run_paths.research),
             "research_summary": str(run_paths.research_summary),
             "etoro_payload_schema": str(run_paths.etoro_payload_schema),
+            "state_start": str(run_paths.state_start),
+            "state_end": str(run_paths.state_end),
+            "run_qc": str(run_paths.run_qc),
             "raw_market_retained": "sampled_10s_per_symbol",
             "raw_candles_retained": True,
             "decision_quote_retained_with_candle": True,
             "v3_inventory_events_retained": True,
-            "v3_causal_state_retained_in_sqlite": True,
+            "v3_causal_state_retained_in_run_checkpoints": True,
+            "sqlite_required_for_offline_replay": False,
         },
         "files": {
             "manifest": str(run_paths.manifest),
@@ -234,6 +298,9 @@ def build_v3_run_manifest(
             "research_summary": str(run_paths.research_summary),
             "etoro_payload_schema": str(run_paths.etoro_payload_schema),
             "latest_etoro_payload_schema": str(latest_payload_schema_path),
+            "state_start": str(run_paths.state_start),
+            "state_end": str(run_paths.state_end),
+            "run_qc": str(run_paths.run_qc),
             "state_db": settings.position_store_path,
         },
     }

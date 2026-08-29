@@ -20,6 +20,7 @@ from app.brokers.etoro.portfolio_position_parser import (
     contains_open_position,
     extract_open_positions,
     extract_position_id,
+    extract_position_units,
 )
 
 
@@ -144,6 +145,8 @@ def resolve_unknown_open_order(
                         result=OpenPositionResult(
                             position_id=item.position_id,
                             executed_entry_price=item.executed_entry_price,
+                            executed_units=item.executed_units,
+                            executed_notional=item.executed_notional,
                         ),
                         matched_by='order_lookup',
                         details=details,
@@ -171,6 +174,19 @@ def resolve_unknown_open_order(
             executed_entry_price=_optional_float(
                 position,
                 ('openRate', 'OpenRate', 'entryRate', 'entryPrice', 'rate'),
+            ),
+            executed_units=extract_position_units(position),
+            executed_notional=_optional_float(
+                position,
+                (
+                    'investedAmountCurrency',
+                    'InvestedAmountCurrency',
+                    'amount',
+                    'Amount',
+                    'invested',
+                    'Invested',
+                    'investment',
+                ),
             ),
         ),
         matched_by='portfolio',
@@ -252,7 +268,15 @@ def _matching_portfolio_positions(
             continue
         candidate_amount = _optional_float(
             position,
-            ('amount', 'Amount', 'invested', 'Invested', 'investment'),
+            (
+                'investedAmountCurrency',
+                'InvestedAmountCurrency',
+                'amount',
+                'Amount',
+                'invested',
+                'Invested',
+                'investment',
+            ),
         )
         if (
             candidate_amount is not None

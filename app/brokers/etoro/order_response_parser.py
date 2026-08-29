@@ -14,6 +14,11 @@ POSITION_EXECUTION_KEYS = ('positionExecutions', 'positions')
 POSITION_NESTED_KEYS = ('position', 'Position', 'data', 'Data', 'order', 'Order')
 CLOSE_STATUS_ID_KEYS = ('statusID', 'statusId')
 AVG_PRICE_KEYS = ('avgPrice',)
+OPENING_UNITS_KEYS = ('units', 'Units')
+INVESTED_AMOUNT_ACCOUNT_KEYS = (
+    'investedAmountCurrency',
+    'InvestedAmountCurrency',
+)
 EXECUTED_STATUS_NAMES = ('executed', 'filled')
 REJECTED_STATUS_NAMES = ('rejected', 'failed', 'cancelled', 'canceled', 'error')
 
@@ -22,6 +27,8 @@ REJECTED_STATUS_NAMES = ('rejected', 'failed', 'cancelled', 'canceled', 'error')
 class ExecutedPositionDetails:
     position_id: str
     executed_entry_price: float
+    executed_units: float
+    executed_notional: float | None = None
 
 
 def extract_order_id(payload: dict) -> str:
@@ -91,9 +98,35 @@ def extract_executed_position_details_list(payload: dict) -> list[ExecutedPositi
         if position_id is None or not isinstance(opening_data, dict):
             continue
         avg_price = extract_optional_float(opening_data, AVG_PRICE_KEYS)
-        if avg_price is None or avg_price <= 0:
+        units = extract_optional_float(opening_data, OPENING_UNITS_KEYS)
+        invested_amount = extract_optional_float(
+            execution,
+            INVESTED_AMOUNT_ACCOUNT_KEYS,
+        )
+        # V3 opens by cash amount. eToro is authoritative for the resulting units;
+        # deriving units locally from amount / avgPrice is unsafe for FX-converted
+        # equities and broker rounding. The account-currency invested amount is
+        # retained separately when eToro provides it so risk exposure never becomes
+        # an asset-currency value merely because quantity accounting is corrected.
+        if (
+            avg_price is None
+            or avg_price <= 0
+            or units is None
+            or units <= 0
+        ):
             continue
-        executed_positions.append(ExecutedPositionDetails(position_id=position_id, executed_entry_price=avg_price))
+        executed_positions.append(
+            ExecutedPositionDetails(
+                position_id=position_id,
+                executed_entry_price=avg_price,
+                executed_units=units,
+                executed_notional=(
+                    invested_amount
+                    if invested_amount is not None and invested_amount > 0
+                    else None
+                ),
+            )
+        )
     return executed_positions
 
 
