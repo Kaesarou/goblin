@@ -33,7 +33,7 @@ from app.v3.state_store import V3RuntimeStateStore
 
 logger = logging.getLogger(__name__)
 
-V3_RUNTIME_CONTRACT_VERSION = "inventory_runtime_v3_4"
+V3_RUNTIME_CONTRACT_VERSION = "inventory_runtime_v3_5"
 
 _MATERIAL_DECISION_REASONS = frozenset(
     {
@@ -238,6 +238,7 @@ class GoblinV3Runtime:
         self._equity: float | None = None
         self._started = False
         self._stop_requested = False
+        self.stop_reason: str | None = None
         self._last_fallback_monotonic = 0.0
         self._last_close_confirmation_monotonic = 0.0
         self._last_equity_monotonic = 0.0
@@ -358,6 +359,7 @@ class GoblinV3Runtime:
     def run(self, *, timeout_seconds: float = 1.0) -> None:
         if not self._started:
             self.startup()
+        self.stop_reason = None
         try:
             while not self._stop_requested:
                 self.loop_id += 1
@@ -386,8 +388,11 @@ class GoblinV3Runtime:
                     now=now,
                 )
         except KeyboardInterrupt:
+            self.stop_reason = "interrupted"
             self.trade_journal.write("v3_runtime_interrupted", {})
         finally:
+            if self.stop_reason is None:
+                self.stop_reason = "requested"
             self.stop()
 
     def stop(self) -> None:
@@ -1139,6 +1144,23 @@ class GoblinV3Runtime:
         self._maintenance_errors.discard(key)
         self.trade_journal.write(event_type, payload)
 
+    def _journal_budget_metrics(self) -> dict[str, object]:
+        return {
+            "trades": self.trade_journal.trade_journal.budget_metrics(),
+            "market": {
+                **self.market_journal.journal.budget_metrics(),
+                "sampled_out_count": self.market_journal.sampled_out_count,
+                "budget_suppressed_count": self.market_journal.budget_suppressed_count,
+                "budget_exhausted": self.market_journal.budget_exhausted,
+            },
+            "candles": {
+                **self.candle_journal.journal.budget_metrics(),
+                "sampled_out_count": self.candle_journal.sampled_out_count,
+                "budget_suppressed_count": self.candle_journal.budget_suppressed_count,
+                "budget_exhausted": self.candle_journal.budget_exhausted,
+            },
+        }
+
     def _heartbeat_metrics(self) -> dict[str, object]:
         return {
             **self.metrics,
@@ -1147,6 +1169,8 @@ class GoblinV3Runtime:
             ),
             "market_data_coordinator": dict(self.coordinator.metrics),
             "broker_confirmation": self.executor.confirmation_metrics(),
+            "journal_budget": self._journal_budget_metrics(),
+            "stop_reason": self.stop_reason,
             "new_risk_allowed": self.executor.new_risk_allowed,
             "risk_halt_reason": self.executor.halted_reason,
         }
