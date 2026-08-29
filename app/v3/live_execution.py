@@ -229,9 +229,14 @@ class V3BrokerExecutor:
             else intent.notional / max(float(snapshot.bid), 1e-12)
         )
         strategy_target_units = min(inventory.total_units, strategy_target_units)
+        remaining_fraction = max(
+            0.0,
+            (inventory.total_units - strategy_target_units)
+            / max(inventory.total_units, 1e-12),
+        )
         projected_remaining_notional = max(
             0.0,
-            (inventory.total_units - strategy_target_units) * float(snapshot.bid),
+            inventory.total_notional * remaining_fraction,
         )
         dust_collapse = bool(
             intent.purpose == IntentPurpose.PROFIT_EXIT
@@ -859,6 +864,19 @@ class V3BrokerExecutor:
             )
             return []
 
+        if result.executed_notional is not None:
+            account_notional = float(result.executed_notional)
+            notional_source = "broker_confirmed_account_currency"
+        else:
+            # The order amount itself is expressed in account currency. It is a
+            # safer fallback for risk exposure than units * price, which is in the
+            # instrument quotation currency for non-USD equities.
+            account_notional = float(context.intent.notional)
+            notional_source = "requested_account_currency"
+        if not math.isfinite(account_notional) or account_notional <= 0:
+            self.halted_reason = "invalid_open_account_notional"
+            return []
+
         payload = {
             "action_id": context.action_id,
             "intent_id": context.intent.intent_id,
@@ -868,7 +886,9 @@ class V3BrokerExecutor:
             "units_source": units_source,
             "price": price,
             "requested_notional": context.intent.notional,
-            "notional": units * price,
+            "notional": account_notional,
+            "notional_source": notional_source,
+            "asset_notional_at_entry": units * price,
             "fee": 0.0,
             "estimated_cost": (
                 None
@@ -889,6 +909,7 @@ class V3BrokerExecutor:
             position_id=result.position_id,
             units=units,
             price=price,
+            account_notional=account_notional,
             fee=0.0,
             filled_at=_utc_now(),
         )
