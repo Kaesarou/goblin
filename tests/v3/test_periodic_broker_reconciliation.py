@@ -1,8 +1,6 @@
 import time
 from datetime import datetime, timezone
 
-import pytest
-
 from app.runtime.broker_task_runner import BrokerTaskCompletion, BrokerTaskLane
 from app.v3.book import InventoryBook
 from app.v3.live_execution import (
@@ -201,7 +199,7 @@ def test_pending_close_quantity_reduction_halts_for_economic_fill_not_mismatch(t
         monotonic_now=base + BROKER_RECONCILIATION_INTERVAL_SECONDS
     )
     task = _reconciliation_task(runner)
-    runner.complete(task, value={"p1": pytest.approx(0.16)})
+    runner.complete(task, value={"p1": 0.16})
     executor.drain()
 
     assert executor.halted_reason == "broker_quantity_reduction_pending_economic_fill"
