@@ -36,6 +36,10 @@ _RECONCILIATION_RECOVERABLE_HALT_REASONS = frozenset(
         "broker_reconciliation_unavailable",
     }
 )
+_RECONCILIATION_FAILURE_OVERRIDABLE_HALT_REASONS = (
+    _RECONCILIATION_RECOVERABLE_HALT_REASONS
+    | frozenset({"broker_quantity_reduction_pending_economic_fill"})
+)
 
 
 @dataclass(frozen=True)
@@ -494,6 +498,12 @@ class V3BrokerExecutor:
         if not isinstance(context, _BrokerReconciliationContext):
             self._broker_reconciliation_errors += 1
             self._last_broker_reconciliation_status = "invalid_context"
+            if (
+                self.halted_reason is None
+                or self.halted_reason
+                in _RECONCILIATION_FAILURE_OVERRIDABLE_HALT_REASONS
+            ):
+                self.halted_reason = "broker_reconciliation_unavailable"
             return
 
         current_context = self._broker_reconciliation_context()
@@ -517,7 +527,8 @@ class V3BrokerExecutor:
             )
             if (
                 self.halted_reason is None
-                or self.halted_reason in _RECONCILIATION_RECOVERABLE_HALT_REASONS
+                or self.halted_reason
+                in _RECONCILIATION_FAILURE_OVERRIDABLE_HALT_REASONS
             ):
                 self.halted_reason = "broker_reconciliation_unavailable"
             return
@@ -531,7 +542,8 @@ class V3BrokerExecutor:
             )
             if (
                 self.halted_reason is None
-                or self.halted_reason in _RECONCILIATION_RECOVERABLE_HALT_REASONS
+                or self.halted_reason
+                in _RECONCILIATION_FAILURE_OVERRIDABLE_HALT_REASONS
             ):
                 self.halted_reason = "broker_reconciliation_unavailable"
             return
@@ -546,7 +558,8 @@ class V3BrokerExecutor:
             self._last_broker_reconciliation_issues = issues
             if (
                 self.halted_reason is None
-                or self.halted_reason in _RECONCILIATION_RECOVERABLE_HALT_REASONS
+                or self.halted_reason
+                in _RECONCILIATION_FAILURE_OVERRIDABLE_HALT_REASONS
             ):
                 self.halted_reason = "broker_leg_reconciliation_failed"
             return
@@ -577,9 +590,9 @@ class V3BrokerExecutor:
         for expectation in context.expectations:
             broker_units = units_by_position.get(expectation.position_id)
             if broker_units is None:
-                # Paper execution and compatibility brokers may prove existence
-                # without exposing units. eToro returns 0 for absence and a
-                # numeric quantity for an open position, so no second GET is needed.
+                # Compatibility/paper brokers may prove existence without units.
+                # The eToro parser fails before reaching this point if an open
+                # broker position has no quantitative units field.
                 self._broker_units_unavailable += 1
                 continue
 
