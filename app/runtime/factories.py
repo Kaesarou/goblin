@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 from app.brokers.base import BrokerClient
 from app.brokers.cached_broker import CachedBrokerClient
+from app.brokers.etoro.get_rate_governor import EtoroGetRateGovernor
 from app.brokers.etoro.market_data_client import EtoroRestMarketDataClient
 from app.brokers.etoro.resilient_client import ResilientEtoroClient
 from app.brokers.etoro.websocket_feed import EtoroWebSocketMarketDataFeed
@@ -27,10 +28,15 @@ def build_runtime_clients(
     *,
     websocket_payload_observer: WebSocketPayloadObserver | None = None,
 ) -> RuntimeClients:
+    # eToro's read ceiling is per user key, not per client object. Market-data
+    # fallback/search, portfolio/PnL and close-confirmation GETs therefore share
+    # one rolling-window governor even though they run on independent worker lanes.
+    get_rate_governor = EtoroGetRateGovernor()
     market_data = EtoroRestMarketDataClient(
         api_key=settings.etoro_api_key,
         user_key=settings.etoro_user_key,
         instrument_id_cache_path=settings.instrument_id_cache_path,
+        get_rate_governor=get_rate_governor,
     )
     live_feed = EtoroWebSocketMarketDataFeed(
         api_key=settings.etoro_api_key,
@@ -45,6 +51,7 @@ def build_runtime_clients(
         execution: BrokerClient = PaperBrokerClient()
     else:
         etoro = ResilientEtoroClient(settings=settings)
+        etoro._get_rate_governor = get_rate_governor
         etoro.instrument_ids_by_symbol = market_data.instrument_ids_by_symbol
         etoro.symbol_by_instrument_id = market_data.symbol_by_instrument_id
         execution = etoro

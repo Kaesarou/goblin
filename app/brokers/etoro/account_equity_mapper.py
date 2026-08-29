@@ -1,64 +1,26 @@
-from app.brokers.etoro.scalar_extractors import extract_optional_float
+from __future__ import annotations
 
+from typing import Any
 
-ACCOUNT_EQUITY_KEYS = (
-    'equity',
-    'Equity',
-    'accountEquity',
-    'AccountEquity',
-    'netLiquidationValue',
-    'NetLiquidationValue',
-    'netLiq',
-    'NetLiq',
-    'balance',
-    'Balance',
-    'cash',
-    'Cash',
-    'credit',
-    'Credit',
-    'availableBalance',
-    'AvailableBalance',
-    'availableCash',
-    'AvailableCash',
-)
-
-NESTED_ACCOUNT_EQUITY_KEYS = (
-    'clientPortfolio',
-    'ClientPortfolio',
-    'portfolio',
-    'Portfolio',
-    'account',
-    'Account',
-    'cashAvailable',
-    'CashAvailable',
-    'data',
-    'Data',
+from app.brokers.etoro.pnl_mapper import (
+    extract_account_equity as _extract_account_equity_from_pnl,
 )
 
 
-def extract_account_equity(payload: dict) -> float:
-    equity = extract_optional_account_equity(payload)
+def extract_account_equity(payload: dict[str, Any]) -> float:
+    """Return account equity from an eToro P&L payload only.
 
-    if equity is None:
-        raise ValueError(f'Unable to extract account equity from eToro portfolio: {payload}')
+    Historical Goblin code accepted fields such as ``credit``, ``cash`` and
+    ``availableBalance`` as if they were equity. Those values are liquidity
+    components, not total account value. The P&L contract is now the sole source
+    of account equity and follows eToro's documented calculation formula.
+    """
 
-    if equity <= 0:
-        raise ValueError(f'Invalid eToro account equity={equity}. Portfolio={payload}')
-
-    return equity
+    return _extract_account_equity_from_pnl(payload)
 
 
-def extract_optional_account_equity(payload: dict) -> float | None:
-    direct_equity = extract_optional_float(payload, ACCOUNT_EQUITY_KEYS)
-    if direct_equity is not None:
-        return direct_equity
-
-    for key in NESTED_ACCOUNT_EQUITY_KEYS:
-        value = payload.get(key)
-
-        if isinstance(value, dict):
-            nested_equity = extract_optional_account_equity(value)
-            if nested_equity is not None:
-                return nested_equity
-
-    return None
+def extract_optional_account_equity(payload: dict[str, Any]) -> float | None:
+    try:
+        return extract_account_equity(payload)
+    except (KeyError, TypeError, ValueError):
+        return None

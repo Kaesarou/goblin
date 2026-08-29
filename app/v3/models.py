@@ -31,7 +31,7 @@ class RecoverabilityAssessment:
 
 @dataclass(frozen=True)
 class BrokerLeg:
-    position_id:str; units:float; entry_price:float; opened_at:datetime; side:str='BUY'
+    position_id:str; units:float; entry_price:float; opened_at:datetime; side:str='BUY'; account_notional:float|None=None
 
 @dataclass(frozen=True)
 class InventoryState:

@@ -12,7 +12,10 @@ RawStateObserver = Callable[[str, dict[str, Any]], None]
 logger = logging.getLogger(__name__)
 
 MARKET_RAW_SAMPLE_INTERVAL_SECONDS = 10.0
-MARKET_RAW_MAX_BYTES = 512 * 1024 * 1024
+# A long-lived weekly run must not truncate otherwise healthy 10-second sampled
+# market data. Observed volume is well below this guardrail and the global free
+# disk reserve remains authoritative.
+MARKET_RAW_MAX_BYTES = 1024 * 1024 * 1024
 MARKET_RAW_MIN_FREE_BYTES = 1024 * 1024 * 1024
 
 
@@ -55,16 +58,22 @@ class RawDataJournal:
         self.max_bytes = max_bytes
         self.min_free_bytes = min_free_bytes
         self.state_observer = state_observer
+        # Keep the aggregate for backward-compatible summaries, but distinguish
+        # deliberate sampling from actual loss caused by a physical budget.
         self.suppressed_count = 0
+        self.sampled_out_count = 0
+        self.budget_suppressed_count = 0
         self.budget_exhausted = False
         self.budget_reason: str | None = None
         self._last_written_at_by_symbol: dict[str, datetime] = {}
 
     def write(self, event_type: str, payload: dict[str, Any]) -> bool:
         if self._sampled_out(payload):
+            self.sampled_out_count += 1
             self.suppressed_count += 1
             return True
         if self._budget_blocks_write():
+            self.budget_suppressed_count += 1
             self.suppressed_count += 1
             return True
         written = self.journal.write(event_type, payload)

@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+import pytest
+
 from app.brokers.base import BrokerClient, BrokerCloseExecution, OpenPositionResult
 from app.market.models import MarketSnapshot
 from app.runtime.broker_queries import (
@@ -33,7 +35,11 @@ class PortfolioBroker(BrokerClient):
             'positionExecutions': [
                 {
                     'positionId': 'p-new',
-                    'openingData': {'avgPrice': 101.5},
+                    'investedAmountCurrency': 100.0,
+                    'openingData': {
+                        'avgPrice': 101.5,
+                        'units': 0.9852216748768473,
+                    },
                 }
             ],
         }
@@ -81,10 +87,11 @@ def test_unknown_order_recovers_from_order_lookup_before_portfolio():
 
     assert resolution.status == 'confirmed'
     assert resolution.matched_by == 'order_lookup'
-    assert resolution.result == OpenPositionResult(
-        position_id='p-new',
-        executed_entry_price=101.5,
-    )
+    assert resolution.result is not None
+    assert resolution.result.position_id == 'p-new'
+    assert resolution.result.executed_entry_price == pytest.approx(101.5)
+    assert resolution.result.executed_units == pytest.approx(0.9852216748768473)
+    assert resolution.result.executed_notional == pytest.approx(100.0)
     assert broker.order_calls == 1
     assert broker.portfolio_calls == 0
 

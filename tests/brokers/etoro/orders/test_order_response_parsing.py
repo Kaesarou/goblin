@@ -15,7 +15,10 @@ from app.brokers.etoro.order_response_parser import (
 )
 
 
-def executed_order_payload(avg_price: float = 238.0) -> dict:
+def executed_order_payload(
+    avg_price: float = 238.0,
+    units: float = 1.25,
+) -> dict:
     return {
         'status': {
             'id': 1,
@@ -28,6 +31,7 @@ def executed_order_payload(avg_price: float = 238.0) -> dict:
                 'state': 'open',
                 'openingData': {
                     'avgPrice': avg_price,
+                    'units': units,
                 },
             }
         ],
@@ -47,7 +51,7 @@ def filled_order_payload(*, with_position_details: bool = True) -> dict:
             {
                 'positionId': '123',
                 'state': 'open',
-                'openingData': {'avgPrice': 238.0},
+                'openingData': {'avgPrice': 238.0, 'units': 0.75},
             }
         ]
     return payload
@@ -86,12 +90,15 @@ def test_extract_position_id_returns_none_when_missing():
     assert extract_position_id_from_order_details({'status': {'id': 1, 'name': 'Executed'}, 'positionExecutions': []}) is None
 
 
-def test_extract_executed_position_details_from_opening_data_avg_price():
-    details = extract_executed_position_details(executed_order_payload(avg_price=238.0))
+def test_extract_executed_position_details_from_opening_data():
+    details = extract_executed_position_details(
+        executed_order_payload(avg_price=238.0, units=1.234567)
+    )
 
     assert details is not None
     assert details.position_id == '9001'
     assert details.executed_entry_price == 238.0
+    assert details.executed_units == pytest.approx(1.234567)
 
 
 def test_extract_executed_position_details_returns_none_when_opening_data_is_missing():
@@ -102,21 +109,35 @@ def test_extract_executed_position_details_returns_none_when_opening_data_is_mis
 
 
 def test_extract_executed_position_details_returns_none_when_avg_price_is_missing():
-    payload = {'positionExecutions': [{'positionId': 9001, 'openingData': {}}]}
+    payload = {'positionExecutions': [{'positionId': 9001, 'openingData': {'units': 1.0}}]}
+
+    assert extract_executed_position_details(payload) is None
+    assert not has_executed_position_details(payload)
+
+
+def test_extract_executed_position_details_returns_none_when_units_are_missing():
+    payload = {'positionExecutions': [{'positionId': 9001, 'openingData': {'avgPrice': 238.0}}]}
 
     assert extract_executed_position_details(payload) is None
     assert not has_executed_position_details(payload)
 
 
 def test_extract_executed_position_details_returns_none_when_avg_price_is_not_positive():
-    payload = {'positionExecutions': [{'positionId': 9001, 'openingData': {'avgPrice': 0}}]}
+    payload = {'positionExecutions': [{'positionId': 9001, 'openingData': {'avgPrice': 0, 'units': 1.0}}]}
+
+    assert extract_executed_position_details(payload) is None
+    assert not has_executed_position_details(payload)
+
+
+def test_extract_executed_position_details_returns_none_when_units_are_not_positive():
+    payload = {'positionExecutions': [{'positionId': 9001, 'openingData': {'avgPrice': 238.0, 'units': 0}}]}
 
     assert extract_executed_position_details(payload) is None
     assert not has_executed_position_details(payload)
 
 
 def test_extract_executed_position_details_does_not_parse_legacy_rate_fields():
-    payload = {'positionExecutions': [{'positionId': 9001, 'openingData': {'rate': 238.0}}]}
+    payload = {'positionExecutions': [{'positionId': 9001, 'openingData': {'rate': 238.0, 'units': 1.0}}]}
 
     assert extract_executed_position_details(payload) is None
     assert not has_executed_position_details(payload)
@@ -125,8 +146,8 @@ def test_extract_executed_position_details_does_not_parse_legacy_rate_fields():
 def test_extract_executed_position_details_list_returns_all_supported_position_executions():
     payload = {
         'positionExecutions': [
-            {'positionId': 9001, 'openingData': {'avgPrice': 238.0}},
-            {'positionId': 9002, 'openingData': {'avgPrice': 239.0}},
+            {'positionId': 9001, 'openingData': {'avgPrice': 238.0, 'units': 1.0}},
+            {'positionId': 9002, 'openingData': {'avgPrice': 239.0, 'units': 2.0}},
         ]
     }
 
@@ -134,6 +155,7 @@ def test_extract_executed_position_details_list_returns_all_supported_position_e
 
     assert [item.position_id for item in details] == ['9001', '9002']
     assert [item.executed_entry_price for item in details] == [238.0, 239.0]
+    assert [item.executed_units for item in details] == [1.0, 2.0]
     assert extract_executed_position_details(payload) is None
     assert has_executed_position_details(payload)
 
@@ -145,6 +167,7 @@ def test_filled_order_with_position_execution_is_executed_not_rejected():
     assert is_order_rejected(payload) is False
     assert has_executed_position_details(payload) is True
     assert extract_executed_position_details(payload).executed_entry_price == 238.0
+    assert extract_executed_position_details(payload).executed_units == 0.75
 
 
 def test_filled_order_without_position_details_is_executed_but_not_ready():
