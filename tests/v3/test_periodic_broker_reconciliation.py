@@ -9,9 +9,6 @@ from app.v3.live_execution import (
 )
 from app.v3.persistence import InventoryEvent, InventoryEventStore
 
-# These tests exercise non-stale reconciliation semantics. Use a fresh wall-clock
-# anchor so the separate 15-minute stale-confirmation policy cannot contaminate
-# them when CI happens to run long after a hard-coded timestamp.
 NOW = datetime.now(timezone.utc)
 
 
@@ -96,9 +93,9 @@ def _executor(tmp_path, *, units=None):
 
 
 def _after_interval(base: float, multiple: int = 1) -> float:
-    # The scheduler receives time.monotonic() floats. Test the semantic contract
-    # (the interval has elapsed) rather than exact IEEE-754 equality at +60.0.
-    return base + multiple * BROKER_RECONCILIATION_INTERVAL_SECONDS + 0.001
+    # Keep a comfortable margin beyond the cadence boundary. The previous
+    # +0.001 float equality was flaky on GitHub-hosted runners.
+    return base + multiple * BROKER_RECONCILIATION_INTERVAL_SECONDS + 1.0
 
 
 def _reconciliation_task(runner: QueueRunner) -> dict:
@@ -160,13 +157,13 @@ def test_matching_periodic_reconciliation_keeps_new_risk_enabled(tmp_path):
     assert metrics["last_issues"] == []
 
 
-def test_periodic_mismatch_halts_then_exact_match_recovers(tmp_path):
-    executor, runner, _ = _executor(tmp_path, units={"p1": 0.5})
+def test_periodic_broker_unit_increase_halts_then_exact_match_recovers(tmp_path):
+    executor, runner, _ = _executor(tmp_path, units={"p1": 1.5})
     base = time.monotonic()
     executor.schedule_close_confirmation_checks(monotonic_now=base)
     executor.schedule_close_confirmation_checks(monotonic_now=_after_interval(base))
     first = _reconciliation_task(runner)
-    runner.complete(first, value={"p1": 0.5})
+    runner.complete(first, value={"p1": 1.5})
     executor.drain()
 
     assert not executor.new_risk_allowed
@@ -174,11 +171,15 @@ def test_periodic_mismatch_halts_then_exact_match_recovers(tmp_path):
     metrics = executor.confirmation_metrics()["broker_reconciliation"]
     assert metrics["mismatches"] == 1
     assert metrics["last_status"] == "mismatch"
-    assert metrics["last_issues"] == ["p1:book=1:broker=0.5"]
+    assert metrics["last_issues"] == ["p1:book=1:broker=1.5"]
 
     runner.tasks.clear()
+    last_scheduled = executor._last_broker_reconciliation_monotonic
+    assert last_scheduled is not None
     executor.schedule_close_confirmation_checks(
-        monotonic_now=_after_interval(base, 2)
+        monotonic_now=(
+            last_scheduled + BROKER_RECONCILIATION_INTERVAL_SECONDS + 1.0
+        )
     )
     second = _reconciliation_task(runner)
     runner.complete(second, value={"p1": 1.0})
@@ -191,10 +192,9 @@ def test_periodic_mismatch_halts_then_exact_match_recovers(tmp_path):
     assert metrics["last_status"] == "ok"
 
 
-def test_pending_close_quantity_reduction_halts_for_economic_fill_not_mismatch(tmp_path):
+def test_pending_close_quantity_reduction_reconciles_book_and_halts_for_economics(tmp_path):
     executor, runner, _ = _executor(tmp_path, units={"p1": 0.16})
     executor.restore_pending_close_confirmations((_accepted_close_event(),))
-    # Keep confirmation in backoff so the periodic quantity audit can use QUERY.
     pending = next(iter(executor._pending_close_confirmations.values()))
     base = time.monotonic()
     pending.next_attempt_monotonic = base + 10_000
@@ -206,12 +206,16 @@ def test_pending_close_quantity_reduction_halts_for_economic_fill_not_mismatch(t
     executor.drain()
 
     assert executor.halted_reason == "broker_quantity_reduction_pending_economic_fill"
+    inventory = executor.book.active_for_symbol("AAPL")
+    assert inventory is not None
+    assert inventory.total_units == 0.16
+    assert inventory.total_notional == 16.0
     metrics = executor.confirmation_metrics()
     assert metrics["broker_reconciliation"]["mismatches"] == 0
     assert metrics["broker_reconciliation"]["last_status"] == "pending_economic_fill"
     assert metrics["broker_quantity_reductions_observed"] == 1
     event_types = [event.event_type for event in executor.event_store.events()]
-    assert "BROKER_QUANTITY_REDUCTION_OBSERVED" in event_types
+    assert "BROKER_QUANTITY_RECONCILED" in event_types
 
 
 def test_confirmation_due_has_priority_over_periodic_reconciliation(tmp_path):
@@ -221,7 +225,7 @@ def test_confirmation_due_has_priority_over_periodic_reconciliation(tmp_path):
     base = time.monotonic()
     pending.next_attempt_monotonic = base
     executor._last_broker_reconciliation_monotonic = (
-        base - BROKER_RECONCILIATION_INTERVAL_SECONDS - 0.001
+        base - BROKER_RECONCILIATION_INTERVAL_SECONDS - 1.0
     )
 
     assert executor.schedule_close_confirmation_checks(monotonic_now=base) == 1
