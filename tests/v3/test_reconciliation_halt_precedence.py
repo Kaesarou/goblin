@@ -9,7 +9,9 @@ from app.v3.live_execution import (
 )
 from app.v3.persistence import InventoryEvent, InventoryEventStore
 
-NOW = datetime(2026, 8, 29, 8, 0, tzinfo=timezone.utc)
+# This module verifies halt precedence before the dedicated stale threshold. Use a
+# current anchor so CI wall time cannot accidentally turn the pending close stale.
+NOW = datetime.now(timezone.utc)
 
 
 class QueueRunner:
