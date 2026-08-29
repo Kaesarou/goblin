@@ -141,6 +141,10 @@ class BrokerClient(ABC):
             for position_id in position_ids
         }
 
+    def get_rate_limit_metrics(self) -> dict[str, object]:
+        """Return broker read-rate telemetry when the implementation exposes it."""
+        return {}
+
     def remember_position_instrument(self, position_id: str, symbol: str) -> None:
         """Restore broker-specific metadata needed to manage a position."""
         return None
