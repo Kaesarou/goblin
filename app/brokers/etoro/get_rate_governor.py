@@ -12,16 +12,17 @@ ETORO_GET_429_FALLBACK_SECONDS = 60.0
 
 
 class EtoroGetRateGovernor:
-    """Serialize the eToro user-key read budget across execution threads.
+    """Serialize the eToro user-key REST GET budget across client threads.
 
-    eToro applies GET limits over a rolling one-minute window. Goblin uses
-    separate worker pools for maintenance and close confirmation, so a per-task
-    backoff is not sufficient: all account/trading GETs on the execution client
-    must share one budget and one global 429 cooldown.
+    eToro applies GET limits over a rolling one-minute window for a user key.
+    Goblin has independent execution, maintenance and REST market-data callers,
+    so endpoint-local retry/backoff is not sufficient: every eToro REST GET using
+    that user key shares one budget and one global 429 cooldown.
 
     The default 45/minute budget intentionally leaves headroom below the broker's
-    published 60/minute read ceiling for incidental account calls and timing
-    jitter. POST close mutations are deliberately outside this governor.
+    published 60/minute read ceiling for incidental calls and timing jitter. POST
+    order/close mutations and the WebSocket market-data stream are deliberately
+    outside this governor.
     """
 
     def __init__(
