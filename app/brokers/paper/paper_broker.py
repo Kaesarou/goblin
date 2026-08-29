@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -105,6 +106,20 @@ class PaperBrokerClient(BrokerClient):
 
     def is_position_open(self, position_id: str) -> bool:
         return position_id in self.positions
+
+    def get_open_position_units(
+        self,
+        position_ids: Iterable[str],
+    ) -> dict[str, float | None]:
+        # Paper open_position is not given units or a broker fill price; V3 owns
+        # that accounting. We can still prove absence/presence without inventing
+        # quantitative broker units.
+        return {
+            str(position_id): (
+                None if str(position_id) in self.positions else 0.0
+            )
+            for position_id in position_ids
+        }
 
     def get_close_execution(
         self,
