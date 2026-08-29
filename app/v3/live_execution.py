@@ -27,8 +27,15 @@ CONFIRMATION_INITIAL_DELAY_SECONDS = 10.0
 CONFIRMATION_BACKOFF_BASE_SECONDS = 15.0
 CONFIRMATION_BACKOFF_MAX_SECONDS = 300.0
 CONFIRMATION_429_MIN_SECONDS = 60.0
+BROKER_RECONCILIATION_INTERVAL_SECONDS = 60.0
 BROKER_UNIT_ABS_TOLERANCE = 1e-8
 BROKER_UNIT_REL_TOLERANCE = 1e-6
+_RECONCILIATION_RECOVERABLE_HALT_REASONS = frozenset(
+    {
+        "broker_leg_reconciliation_failed",
+        "broker_reconciliation_unavailable",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -60,6 +67,20 @@ class _PendingCloseConfirmation:
     error_active: bool = False
     last_error_type: str | None = None
     last_http_status: int | None = None
+
+
+@dataclass(frozen=True)
+class _BrokerLegExpectation:
+    position_id: str
+    symbol: str
+    book_units: float
+    inventory_id: str
+    pending_requested_units: float
+
+
+@dataclass(frozen=True)
+class _BrokerReconciliationContext:
+    expectations: tuple[_BrokerLegExpectation, ...]
 
 
 class V3BrokerExecutor:
@@ -101,6 +122,16 @@ class V3BrokerExecutor:
         self._confirmation_recovered = 0
         self._broker_unit_reductions_observed = 0
         self._broker_units_unavailable = 0
+        self._observed_broker_reductions: set[tuple[object, ...]] = set()
+        self._broker_reconciliation_in_flight = False
+        self._last_broker_reconciliation_monotonic: float | None = None
+        self._broker_reconciliation_attempts = 0
+        self._broker_reconciliation_errors = 0
+        self._broker_reconciliation_mismatches = 0
+        self._broker_reconciliation_stale_results = 0
+        self._broker_reconciliation_recovered = 0
+        self._last_broker_reconciliation_status = "never"
+        self._last_broker_reconciliation_issues: tuple[str, ...] = ()
 
     @property
     def new_risk_allowed(self) -> bool:
@@ -270,6 +301,8 @@ class V3BrokerExecutor:
                 applied.extend(self._handle_close_submission(completion))
             elif completion.kind == "v3_close_execution_lookup":
                 applied.extend(self._handle_close_lookup(completion))
+            elif completion.kind == "v3_broker_reconciliation":
+                self._handle_broker_reconciliation(completion)
         return tuple(applied)
 
     def schedule_close_confirmation_checks(
@@ -278,29 +311,54 @@ class V3BrokerExecutor:
         monotonic_now: float | None = None,
     ) -> int:
         now = time.monotonic() if monotonic_now is None else float(monotonic_now)
-        # Exactly one read-only confirmation may be in flight globally. This keeps
-        # the shared eToro GET quota bounded even when many broker legs are pending.
-        if self._confirmation_tasks:
+        # Confirmation and quantitative reconciliation share one read-only lane.
+        # Confirmations always win when due; reconciliation only uses an idle gap.
+        if self._confirmation_tasks or self._broker_reconciliation_in_flight:
             return 0
         due = [
             (pending.next_attempt_monotonic, pending.accepted_at, action_id, pending)
             for action_id, pending in self._pending_close_confirmations.items()
             if pending.next_attempt_monotonic <= now
         ]
-        if not due:
+        if due:
+            _, _, action_id, pending = min(due, key=lambda item: item[:3])
+            pending.attempt_count += 1
+            self._confirmation_attempts += 1
+            self._confirmation_tasks.add(action_id)
+            self.task_runner.submit(
+                kind="v3_close_execution_lookup",
+                task_id=f"v3-close-confirm:{action_id}",
+                context=pending,
+                operation=lambda current=pending: self.broker.get_close_execution(
+                    current.close_order_id,
+                    current.context.position_id,
+                ),
+                lane=BrokerTaskLane.QUERY,
+            )
+            return 1
+        return self._schedule_broker_reconciliation(now)
+
+    def _schedule_broker_reconciliation(self, monotonic_now: float) -> int:
+        previous = self._last_broker_reconciliation_monotonic
+        if previous is None:
+            self._last_broker_reconciliation_monotonic = monotonic_now
             return 0
-        _, _, action_id, pending = min(due, key=lambda item: item[:3])
-        pending.attempt_count += 1
-        self._confirmation_attempts += 1
-        self._confirmation_tasks.add(action_id)
+        if monotonic_now - previous < BROKER_RECONCILIATION_INTERVAL_SECONDS:
+            return 0
+        context = self._broker_reconciliation_context()
+        self._last_broker_reconciliation_monotonic = monotonic_now
+        if not context.expectations:
+            return 0
+        position_ids = tuple(
+            item.position_id for item in context.expectations
+        )
+        self._broker_reconciliation_in_flight = True
+        self._broker_reconciliation_attempts += 1
         self.task_runner.submit(
-            kind="v3_close_execution_lookup",
-            task_id=f"v3-close-confirm:{action_id}",
-            context=pending,
-            operation=lambda current=pending: self.broker.get_close_execution(
-                current.close_order_id,
-                current.context.position_id,
-            ),
+            kind="v3_broker_reconciliation",
+            task_id="v3-broker-reconciliation",
+            context=context,
+            operation=lambda ids=position_ids: self.broker.get_open_position_units(ids),
             lane=BrokerTaskLane.QUERY,
         )
         return 1
@@ -354,77 +412,234 @@ class V3BrokerExecutor:
                     return float(leg.units)
         return 0.0
 
-    def verify_known_broker_legs(self) -> tuple[str, ...]:
-        legs: list[tuple[str, str, float, str]] = []
+    def _broker_reconciliation_context(
+        self,
+        *,
+        remember_positions: bool = False,
+    ) -> _BrokerReconciliationContext:
+        expectations: list[_BrokerLegExpectation] = []
         for inventory in self.book.inventories:
             for leg in inventory.broker_legs:
                 if leg.units <= 0:
                     continue
-                self.broker.remember_position_instrument(
-                    leg.position_id,
-                    inventory.symbol,
-                )
-                legs.append(
-                    (
+                if remember_positions:
+                    self.broker.remember_position_instrument(
                         leg.position_id,
                         inventory.symbol,
-                        float(leg.units),
-                        inventory.inventory_id,
+                    )
+                pending_units = sum(
+                    pending.context.requested_units
+                    for pending in self._pending_close_confirmations.values()
+                    if pending.context.position_id == leg.position_id
+                )
+                expectations.append(
+                    _BrokerLegExpectation(
+                        position_id=leg.position_id,
+                        symbol=inventory.symbol,
+                        book_units=float(leg.units),
+                        inventory_id=inventory.inventory_id,
+                        pending_requested_units=float(pending_units),
                     )
                 )
-        if not legs:
+        return _BrokerReconciliationContext(
+            expectations=tuple(
+                sorted(expectations, key=lambda item: item.position_id)
+            )
+        )
+
+    def verify_known_broker_legs(self) -> tuple[str, ...]:
+        context = self._broker_reconciliation_context(remember_positions=True)
+        if not context.expectations:
+            self._last_broker_reconciliation_monotonic = time.monotonic()
+            self._last_broker_reconciliation_status = "ok"
             return ()
 
-        units_by_position = self.broker.get_open_position_units(
-            position_id for position_id, _, _, _ in legs
+        self._broker_reconciliation_attempts += 1
+        try:
+            units_by_position = self.broker.get_open_position_units(
+                item.position_id for item in context.expectations
+            )
+        except Exception:
+            self._broker_reconciliation_errors += 1
+            self._last_broker_reconciliation_status = "unavailable"
+            raise
+        finally:
+            self._last_broker_reconciliation_monotonic = time.monotonic()
+
+        issues, expected_reductions_observed = self._compare_broker_units(
+            context,
+            units_by_position,
         )
+        if issues:
+            self._broker_reconciliation_mismatches += 1
+            self._last_broker_reconciliation_status = "mismatch"
+            self._last_broker_reconciliation_issues = issues
+            self.halted_reason = "broker_leg_reconciliation_failed"
+        elif expected_reductions_observed:
+            self._last_broker_reconciliation_status = "pending_economic_fill"
+            self._last_broker_reconciliation_issues = ()
+            if self.halted_reason is None:
+                self.halted_reason = "broker_quantity_reduction_pending_economic_fill"
+        else:
+            self._last_broker_reconciliation_status = "ok"
+            self._last_broker_reconciliation_issues = ()
+        return issues
+
+    def _handle_broker_reconciliation(
+        self,
+        completion: BrokerTaskCompletion,
+    ) -> None:
+        self._broker_reconciliation_in_flight = False
+        context = completion.context
+        if not isinstance(context, _BrokerReconciliationContext):
+            self._broker_reconciliation_errors += 1
+            self._last_broker_reconciliation_status = "invalid_context"
+            return
+
+        current_context = self._broker_reconciliation_context()
+        if current_context != context:
+            # A fill/close changed the book while the portfolio GET was in flight.
+            # Discard the stale observation rather than comparing different states.
+            self._broker_reconciliation_stale_results += 1
+            self._last_broker_reconciliation_status = "stale"
+            self._last_broker_reconciliation_issues = ()
+            self._last_broker_reconciliation_monotonic = (
+                time.monotonic() - BROKER_RECONCILIATION_INTERVAL_SECONDS
+            )
+            return
+
+        previous_status = self._last_broker_reconciliation_status
+        if completion.error is not None:
+            self._broker_reconciliation_errors += 1
+            self._last_broker_reconciliation_status = "unavailable"
+            self._last_broker_reconciliation_issues = (
+                f"{type(completion.error).__name__}:{completion.error}",
+            )
+            if (
+                self.halted_reason is None
+                or self.halted_reason in _RECONCILIATION_RECOVERABLE_HALT_REASONS
+            ):
+                self.halted_reason = "broker_reconciliation_unavailable"
+            return
+
+        units_by_position = completion.value
+        if not isinstance(units_by_position, dict):
+            self._broker_reconciliation_errors += 1
+            self._last_broker_reconciliation_status = "invalid_response"
+            self._last_broker_reconciliation_issues = (
+                "broker_units_response_not_mapping",
+            )
+            if (
+                self.halted_reason is None
+                or self.halted_reason in _RECONCILIATION_RECOVERABLE_HALT_REASONS
+            ):
+                self.halted_reason = "broker_reconciliation_unavailable"
+            return
+
+        issues, expected_reductions_observed = self._compare_broker_units(
+            context,
+            units_by_position,
+        )
+        if issues:
+            self._broker_reconciliation_mismatches += 1
+            self._last_broker_reconciliation_status = "mismatch"
+            self._last_broker_reconciliation_issues = issues
+            if (
+                self.halted_reason is None
+                or self.halted_reason in _RECONCILIATION_RECOVERABLE_HALT_REASONS
+            ):
+                self.halted_reason = "broker_leg_reconciliation_failed"
+            return
+
+        self._last_broker_reconciliation_issues = ()
+        if expected_reductions_observed:
+            self._last_broker_reconciliation_status = "pending_economic_fill"
+            if (
+                self.halted_reason is None
+                or self.halted_reason in _RECONCILIATION_RECOVERABLE_HALT_REASONS
+            ):
+                self.halted_reason = "broker_quantity_reduction_pending_economic_fill"
+            return
+
+        self._last_broker_reconciliation_status = "ok"
+        if previous_status in {"mismatch", "unavailable", "invalid_response"}:
+            self._broker_reconciliation_recovered += 1
+        if self.halted_reason in _RECONCILIATION_RECOVERABLE_HALT_REASONS:
+            self.halted_reason = None
+
+    def _compare_broker_units(
+        self,
+        context: _BrokerReconciliationContext,
+        units_by_position: dict[str, float | None],
+    ) -> tuple[tuple[str, ...], bool]:
         issues: list[str] = []
         expected_reductions_observed = False
-        for position_id, symbol, book_units, inventory_id in legs:
-            broker_units = units_by_position.get(position_id)
+        for expectation in context.expectations:
+            broker_units = units_by_position.get(expectation.position_id)
             if broker_units is None:
-                # Some non-eToro test/paper brokers can prove existence but not
-                # quantity. Keep that compatibility without pretending equality.
+                # Paper execution and compatibility brokers may prove existence
+                # without exposing units. eToro returns 0 for absence and a
+                # numeric quantity for an open position, so no second GET is needed.
                 self._broker_units_unavailable += 1
-                if not self.broker.is_position_open(position_id):
-                    issues.append(f"{position_id}:missing")
                 continue
 
             broker_units = float(broker_units)
-            pending_units = sum(
-                pending.context.requested_units
-                for pending in self._pending_close_confirmations.values()
-                if pending.context.position_id == position_id
+            expected_after_pending = max(
+                0.0,
+                expectation.book_units - expectation.pending_requested_units,
             )
-            expected_after_pending = max(0.0, book_units - pending_units)
-            if _units_close(broker_units, book_units):
+            if _units_close(broker_units, expectation.book_units):
                 continue
-            if pending_units > 0 and _units_close(broker_units, expected_after_pending):
+            if (
+                expectation.pending_requested_units > 0
+                and _units_close(broker_units, expected_after_pending)
+            ):
                 expected_reductions_observed = True
-                self._broker_unit_reductions_observed += 1
-                self._append(
-                    event_type="BROKER_QUANTITY_REDUCTION_OBSERVED",
-                    inventory_id=inventory_id,
-                    event_id=f"{position_id}:broker-quantity-reduction:{expected_after_pending:.12g}",
-                    payload={
-                        "position_id": position_id,
-                        "symbol": symbol,
-                        "book_units": book_units,
-                        "broker_units": broker_units,
-                        "pending_requested_units": pending_units,
-                        "economic_fill_pending": True,
-                    },
+                self._record_broker_quantity_reduction(
+                    expectation=expectation,
+                    broker_units=broker_units,
+                    expected_after_pending=expected_after_pending,
                 )
                 continue
             issues.append(
-                f"{position_id}:book={book_units:.12g}:broker={broker_units:.12g}"
+                f"{expectation.position_id}:book={expectation.book_units:.12g}:"
+                f"broker={broker_units:.12g}"
             )
+        return tuple(sorted(issues)), expected_reductions_observed
 
-        if issues:
-            self.halted_reason = "broker_leg_reconciliation_failed"
-        elif expected_reductions_observed and self.halted_reason is None:
-            self.halted_reason = "broker_quantity_reduction_pending_economic_fill"
-        return tuple(sorted(issues))
+    def _record_broker_quantity_reduction(
+        self,
+        *,
+        expectation: _BrokerLegExpectation,
+        broker_units: float,
+        expected_after_pending: float,
+    ) -> None:
+        signature = (
+            expectation.position_id,
+            round(expectation.book_units, 12),
+            round(float(broker_units), 12),
+            round(expectation.pending_requested_units, 12),
+        )
+        if signature in self._observed_broker_reductions:
+            return
+        self._observed_broker_reductions.add(signature)
+        self._broker_unit_reductions_observed += 1
+        self._append(
+            event_type="BROKER_QUANTITY_REDUCTION_OBSERVED",
+            inventory_id=expectation.inventory_id,
+            event_id=(
+                f"{expectation.position_id}:broker-quantity-reduction:"
+                f"{expected_after_pending:.12g}"
+            ),
+            payload={
+                "position_id": expectation.position_id,
+                "symbol": expectation.symbol,
+                "book_units": expectation.book_units,
+                "broker_units": broker_units,
+                "pending_requested_units": expectation.pending_requested_units,
+                "economic_fill_pending": True,
+            },
+        )
 
     def confirmation_metrics(self) -> dict[str, object]:
         now = _utc_now()
@@ -447,6 +662,17 @@ class V3BrokerExecutor:
             "oldest_pending_seconds": oldest_seconds,
             "broker_quantity_reductions_observed": self._broker_unit_reductions_observed,
             "broker_units_unavailable": self._broker_units_unavailable,
+            "broker_reconciliation": {
+                "interval_seconds": BROKER_RECONCILIATION_INTERVAL_SECONDS,
+                "in_flight": self._broker_reconciliation_in_flight,
+                "attempts": self._broker_reconciliation_attempts,
+                "errors": self._broker_reconciliation_errors,
+                "mismatches": self._broker_reconciliation_mismatches,
+                "stale_results": self._broker_reconciliation_stale_results,
+                "recovered": self._broker_reconciliation_recovered,
+                "last_status": self._last_broker_reconciliation_status,
+                "last_issues": list(self._last_broker_reconciliation_issues),
+            },
         }
 
     def pending_close_confirmation_snapshot(self) -> list[dict[str, object]]:
