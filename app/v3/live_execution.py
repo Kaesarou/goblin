@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import math
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable
+
+import requests
 
 from app.brokers.base import (
     BrokerCloseExecution,
@@ -16,6 +20,15 @@ from app.v3.book import InventoryBook
 from app.v3.execution import ProRataPartialCloseAllocator
 from app.v3.models import IntentPurpose, OrderIntent
 from app.v3.persistence import InventoryEvent, InventoryEventStore
+
+
+POINT_M_DUST_NOTIONAL_USD = 10.0
+CONFIRMATION_INITIAL_DELAY_SECONDS = 10.0
+CONFIRMATION_BACKOFF_BASE_SECONDS = 15.0
+CONFIRMATION_BACKOFF_MAX_SECONDS = 300.0
+CONFIRMATION_429_MIN_SECONDS = 60.0
+BROKER_UNIT_ABS_TOLERANCE = 1e-8
+BROKER_UNIT_REL_TOLERANCE = 1e-6
 
 
 @dataclass(frozen=True)
@@ -37,10 +50,16 @@ class _CloseContext:
     full_close: bool
 
 
-@dataclass(frozen=True)
+@dataclass
 class _PendingCloseConfirmation:
     context: _CloseContext
     close_order_id: str
+    accepted_at: datetime
+    attempt_count: int = 0
+    next_attempt_monotonic: float = 0.0
+    error_active: bool = False
+    last_error_type: str | None = None
+    last_http_status: int | None = None
 
 
 class V3BrokerExecutor:
@@ -74,6 +93,14 @@ class V3BrokerExecutor:
         self._confirmation_tasks: set[str] = set()
         self._pending_close_position_ids: set[str] = set()
         self.halted_reason: str | None = None
+        self._confirmation_attempts = 0
+        self._confirmation_errors = 0
+        self._confirmation_429 = 0
+        self._confirmation_timeouts = 0
+        self._confirmation_5xx = 0
+        self._confirmation_recovered = 0
+        self._broker_unit_reductions_observed = 0
+        self._broker_units_unavailable = 0
 
     @property
     def new_risk_allowed(self) -> bool:
@@ -151,15 +178,27 @@ class V3BrokerExecutor:
         if inventory is None:
             return False
         fraction = float(intent.metadata.get("close_fraction_of_units", 0.0))
-        target_units = (
+        strategy_target_units = (
             inventory.total_units * fraction
             if fraction > 0
             else intent.notional / max(float(snapshot.bid), 1e-12)
         )
+        strategy_target_units = min(inventory.total_units, strategy_target_units)
+        projected_remaining_notional = max(
+            0.0,
+            (inventory.total_units - strategy_target_units) * float(snapshot.bid),
+        )
+        dust_collapse = bool(
+            intent.purpose == IntentPurpose.PROFIT_EXIT
+            and strategy_target_units < inventory.total_units
+            and 0.0 < projected_remaining_notional < POINT_M_DUST_NOTIONAL_USD
+        )
+        target_units = inventory.total_units if dust_collapse else strategy_target_units
         plan = self.allocator.plan(inventory, target_units)
         if not plan.requests:
             return False
 
+        execution_fraction = plan.target_units / max(inventory.total_units, 1e-12)
         scheduled = False
         for request in plan.requests:
             if request.position_id in self._pending_close_position_ids:
@@ -183,6 +222,11 @@ class V3BrokerExecutor:
                     "requested_units": request.units,
                     "full_close": request.full_close,
                     "trigger_price": float(snapshot.bid),
+                    "strategy_close_fraction": fraction,
+                    "execution_close_fraction": execution_fraction,
+                    "projected_remaining_notional_usd": projected_remaining_notional,
+                    "dust_threshold_usd": POINT_M_DUST_NOTIONAL_USD,
+                    "dust_collapse": dust_collapse,
                 },
             )
             context = _CloseContext(
@@ -228,24 +272,38 @@ class V3BrokerExecutor:
                 applied.extend(self._handle_close_lookup(completion))
         return tuple(applied)
 
-    def schedule_close_confirmation_checks(self) -> int:
-        scheduled = 0
-        for action_id, pending in tuple(self._pending_close_confirmations.items()):
-            if action_id in self._confirmation_tasks:
-                continue
-            self._confirmation_tasks.add(action_id)
-            self.task_runner.submit(
-                kind="v3_close_execution_lookup",
-                task_id=f"v3-close-confirm:{action_id}",
-                context=pending,
-                operation=lambda current=pending: self.broker.get_close_execution(
-                    current.close_order_id,
-                    current.context.position_id,
-                ),
-                lane=BrokerTaskLane.CLOSE,
-            )
-            scheduled += 1
-        return scheduled
+    def schedule_close_confirmation_checks(
+        self,
+        *,
+        monotonic_now: float | None = None,
+    ) -> int:
+        now = time.monotonic() if monotonic_now is None else float(monotonic_now)
+        # Exactly one read-only confirmation may be in flight globally. This keeps
+        # the shared eToro GET quota bounded even when many broker legs are pending.
+        if self._confirmation_tasks:
+            return 0
+        due = [
+            (pending.next_attempt_monotonic, pending.accepted_at, action_id, pending)
+            for action_id, pending in self._pending_close_confirmations.items()
+            if pending.next_attempt_monotonic <= now
+        ]
+        if not due:
+            return 0
+        _, _, action_id, pending = min(due, key=lambda item: item[:3])
+        pending.attempt_count += 1
+        self._confirmation_attempts += 1
+        self._confirmation_tasks.add(action_id)
+        self.task_runner.submit(
+            kind="v3_close_execution_lookup",
+            task_id=f"v3-close-confirm:{action_id}",
+            context=pending,
+            operation=lambda current=pending: self.broker.get_close_execution(
+                current.close_order_id,
+                current.context.position_id,
+            ),
+            lane=BrokerTaskLane.QUERY,
+        )
+        return 1
 
     def restore_pending_close_confirmations(
         self,
@@ -274,6 +332,7 @@ class V3BrokerExecutor:
                 accepted[action_id] = _PendingCloseConfirmation(
                     context=context,
                     close_order_id=str(payload["close_order_id"]),
+                    accepted_at=event.occurred_at,
                 )
             elif event.event_type in {
                 "EXIT_FILLED",
@@ -296,18 +355,119 @@ class V3BrokerExecutor:
         return 0.0
 
     def verify_known_broker_legs(self) -> tuple[str, ...]:
-        missing: list[str] = []
+        legs: list[tuple[str, str, float, str]] = []
         for inventory in self.book.inventories:
             for leg in inventory.broker_legs:
+                if leg.units <= 0:
+                    continue
                 self.broker.remember_position_instrument(
                     leg.position_id,
                     inventory.symbol,
                 )
-                if not self.broker.is_position_open(leg.position_id):
-                    missing.append(leg.position_id)
-        if missing:
-            self.halted_reason = "known_broker_leg_missing"
-        return tuple(sorted(missing))
+                legs.append(
+                    (
+                        leg.position_id,
+                        inventory.symbol,
+                        float(leg.units),
+                        inventory.inventory_id,
+                    )
+                )
+        if not legs:
+            return ()
+
+        units_by_position = self.broker.get_open_position_units(
+            position_id for position_id, _, _, _ in legs
+        )
+        issues: list[str] = []
+        expected_reductions_observed = False
+        for position_id, symbol, book_units, inventory_id in legs:
+            broker_units = units_by_position.get(position_id)
+            if broker_units is None:
+                # Some non-eToro test/paper brokers can prove existence but not
+                # quantity. Keep that compatibility without pretending equality.
+                self._broker_units_unavailable += 1
+                if not self.broker.is_position_open(position_id):
+                    issues.append(f"{position_id}:missing")
+                continue
+
+            broker_units = float(broker_units)
+            pending_units = sum(
+                pending.context.requested_units
+                for pending in self._pending_close_confirmations.values()
+                if pending.context.position_id == position_id
+            )
+            expected_after_pending = max(0.0, book_units - pending_units)
+            if _units_close(broker_units, book_units):
+                continue
+            if pending_units > 0 and _units_close(broker_units, expected_after_pending):
+                expected_reductions_observed = True
+                self._broker_unit_reductions_observed += 1
+                self._append(
+                    event_type="BROKER_QUANTITY_REDUCTION_OBSERVED",
+                    inventory_id=inventory_id,
+                    event_id=f"{position_id}:broker-quantity-reduction:{expected_after_pending:.12g}",
+                    payload={
+                        "position_id": position_id,
+                        "symbol": symbol,
+                        "book_units": book_units,
+                        "broker_units": broker_units,
+                        "pending_requested_units": pending_units,
+                        "economic_fill_pending": True,
+                    },
+                )
+                continue
+            issues.append(
+                f"{position_id}:book={book_units:.12g}:broker={broker_units:.12g}"
+            )
+
+        if issues:
+            self.halted_reason = "broker_leg_reconciliation_failed"
+        elif expected_reductions_observed and self.halted_reason is None:
+            self.halted_reason = "broker_quantity_reduction_pending_economic_fill"
+        return tuple(sorted(issues))
+
+    def confirmation_metrics(self) -> dict[str, object]:
+        now = _utc_now()
+        oldest_seconds = 0.0
+        if self._pending_close_confirmations:
+            oldest = min(
+                pending.accepted_at
+                for pending in self._pending_close_confirmations.values()
+            )
+            oldest_seconds = max(0.0, (now - oldest).total_seconds())
+        return {
+            "pending": len(self._pending_close_confirmations),
+            "in_flight": len(self._confirmation_tasks),
+            "attempts": self._confirmation_attempts,
+            "errors": self._confirmation_errors,
+            "http_429": self._confirmation_429,
+            "timeouts": self._confirmation_timeouts,
+            "http_5xx": self._confirmation_5xx,
+            "recovered": self._confirmation_recovered,
+            "oldest_pending_seconds": oldest_seconds,
+            "broker_quantity_reductions_observed": self._broker_unit_reductions_observed,
+            "broker_units_unavailable": self._broker_units_unavailable,
+        }
+
+    def pending_close_confirmation_snapshot(self) -> list[dict[str, object]]:
+        return [
+            {
+                "action_id": action_id,
+                "intent_id": pending.context.intent.intent_id,
+                "inventory_id": pending.context.inventory_id,
+                "symbol": pending.context.intent.symbol,
+                "position_id": pending.context.position_id,
+                "requested_units": pending.context.requested_units,
+                "full_close": pending.context.full_close,
+                "trigger_price": pending.context.trigger_price,
+                "close_order_id": pending.close_order_id,
+                "accepted_at": pending.accepted_at,
+                "attempt_count": pending.attempt_count,
+                "last_error_type": pending.last_error_type,
+                "last_http_status": pending.last_http_status,
+            }
+            for action_id, pending in sorted(self._pending_close_confirmations.items())
+        ]
 
     def _handle_open_completion(self, completion: BrokerTaskCompletion) -> list[str]:
         context = completion.context
@@ -431,7 +591,13 @@ class V3BrokerExecutor:
             )
             return []
 
-        pending = _PendingCloseConfirmation(context, str(close_order_id))
+        accepted_at = getattr(submission, "accepted_at", None) or _utc_now()
+        pending = _PendingCloseConfirmation(
+            context=context,
+            close_order_id=str(close_order_id),
+            accepted_at=accepted_at,
+            next_attempt_monotonic=time.monotonic() + CONFIRMATION_INITIAL_DELAY_SECONDS,
+        )
         self._pending_close_confirmations[context.action_id] = pending
         self._append(
             event_type="CLOSE_SUBMISSION_ACCEPTED",
@@ -458,15 +624,43 @@ class V3BrokerExecutor:
         action_id = pending.context.action_id
         self._confirmation_tasks.discard(action_id)
         if completion.error is not None:
-            self._append(
-                event_type="CLOSE_CONFIRMATION_ERROR",
-                inventory_id=pending.context.inventory_id,
-                event_id=f"{action_id}:confirm-error:{_utc_now().isoformat()}",
-                payload={"action_id": action_id, "error": str(completion.error)},
+            self._confirmation_errors += 1
+            status = _http_status(completion.error)
+            pending.last_error_type = type(completion.error).__name__
+            pending.last_http_status = status
+            if status == 429:
+                self._confirmation_429 += 1
+            if isinstance(completion.error, requests.Timeout):
+                self._confirmation_timeouts += 1
+            if status is not None and 500 <= status < 600:
+                self._confirmation_5xx += 1
+            pending.next_attempt_monotonic = time.monotonic() + _confirmation_backoff_seconds(
+                pending.attempt_count,
+                status=status,
+                error=completion.error,
             )
+            if not pending.error_active:
+                pending.error_active = True
+                self._append(
+                    event_type="CLOSE_CONFIRMATION_ERROR",
+                    inventory_id=pending.context.inventory_id,
+                    event_id=f"{action_id}:close-confirmation-error",
+                    payload={
+                        "action_id": action_id,
+                        "position_id": pending.context.position_id,
+                        "close_order_id": pending.close_order_id,
+                        "error": str(completion.error),
+                        "error_type": pending.last_error_type,
+                        "http_status": status,
+                        "attempt_count": pending.attempt_count,
+                    },
+                )
             return []
         execution = completion.value
         if execution is None:
+            pending.next_attempt_monotonic = (
+                time.monotonic() + CONFIRMATION_BACKOFF_BASE_SECONDS
+            )
             return []
         if not isinstance(execution, BrokerCloseExecution):
             self.halted_reason = "invalid_close_execution"
@@ -489,6 +683,19 @@ class V3BrokerExecutor:
             if execution.units is not None
             else self._current_leg_units(pending.context.position_id)
         )
+        if pending.error_active:
+            self._confirmation_recovered += 1
+            self._append(
+                event_type="CLOSE_CONFIRMATION_RECOVERED",
+                inventory_id=pending.context.inventory_id,
+                event_id=f"{action_id}:close-confirmation-recovered",
+                payload={
+                    "action_id": action_id,
+                    "position_id": pending.context.position_id,
+                    "close_order_id": pending.close_order_id,
+                    "attempt_count": pending.attempt_count,
+                },
+            )
         self._confirm_close(
             context=pending.context,
             exit_price=float(execution.executed_exit_price),
@@ -570,6 +777,11 @@ class V3BrokerExecutor:
         self._pending_close_confirmations.pop(context.action_id, None)
         self._pending_actions.discard(context.action_id)
         self._pending_close_position_ids.discard(context.position_id)
+        if (
+            self.halted_reason == "broker_quantity_reduction_pending_economic_fill"
+            and not self._pending_close_confirmations
+        ):
+            self.halted_reason = None
 
     def _append(
         self,
@@ -591,6 +803,44 @@ class V3BrokerExecutor:
                 model_version=self.model_version,
             )
         )
+
+
+def _units_close(left: float, right: float) -> bool:
+    return math.isclose(
+        float(left),
+        float(right),
+        rel_tol=BROKER_UNIT_REL_TOLERANCE,
+        abs_tol=BROKER_UNIT_ABS_TOLERANCE,
+    )
+
+
+def _http_status(error: Exception) -> int | None:
+    response = getattr(error, "response", None)
+    status = getattr(response, "status_code", None)
+    return None if status is None else int(status)
+
+
+def _confirmation_backoff_seconds(
+    attempt_count: int,
+    *,
+    status: int | None,
+    error: Exception,
+) -> float:
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", {}) or {}
+    retry_after = headers.get("Retry-After") if hasattr(headers, "get") else None
+    try:
+        retry_after_seconds = float(retry_after) if retry_after not in (None, "") else 0.0
+    except (TypeError, ValueError):
+        retry_after_seconds = 0.0
+    exponent = max(0, min(int(attempt_count) - 1, 5))
+    calculated = min(
+        CONFIRMATION_BACKOFF_MAX_SECONDS,
+        CONFIRMATION_BACKOFF_BASE_SECONDS * (2**exponent),
+    )
+    if status == 429:
+        calculated = max(calculated, CONFIRMATION_429_MIN_SECONDS)
+    return max(calculated, retry_after_seconds)
 
 
 def _utc_now() -> datetime:
