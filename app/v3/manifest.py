@@ -9,6 +9,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from app.brokers.etoro.get_rate_governor import (
+    ETORO_GET_429_FALLBACK_SECONDS,
+    ETORO_GET_MAX_REQUESTS_PER_WINDOW,
+    ETORO_GET_RATE_WINDOW_SECONDS,
+)
 from app.journal.raw_data_journal import (
     MARKET_RAW_MAX_BYTES,
     MARKET_RAW_MIN_FREE_BYTES,
@@ -35,6 +40,7 @@ from app.research.summary import (
 )
 from app.v3.live_execution import (
     BROKER_RECONCILIATION_INTERVAL_SECONDS,
+    CONFIRMATION_STALE_HALT_SECONDS,
     POINT_M_DUST_NOTIONAL_USD,
 )
 from app.v3.run_artifacts import (
@@ -149,6 +155,7 @@ def build_v3_run_manifest(
                 "executable_prices": EXECUTABLE_PRICE_CONTRACT_VERSION,
                 "quote_quality": QUOTE_QUALITY_CONTRACT_VERSION,
                 "broker_exit_translation": "pro_rata_partial_close_point_m_dust_v2",
+                "broker_open_accounting": "broker_confirmed_opening_units_v1",
                 "replay_checkpoint": V3_REPLAY_CHECKPOINT_SCHEMA_VERSION,
                 "run_qc": V3_RUN_QC_SCHEMA_VERSION,
             },
@@ -172,6 +179,9 @@ def build_v3_run_manifest(
                 "allocation": "same_fraction_of_every_active_broker_leg",
                 "point_m_dust_notional_usd": POINT_M_DUST_NOTIONAL_USD,
                 "dust_policy": "full_close_when_projected_residual_below_threshold",
+                "confirmed_open_units_required": True,
+                "open_units_authority": "etoro_order_openingData.units",
+                "paper_open_units_policy": "requested_notional_divided_by_trigger_price",
                 "confirmed_units_required_for_partial_accounting": True,
                 "broker_units_reconciled_at_startup": True,
                 "broker_units_reconciliation": {
@@ -190,6 +200,20 @@ def build_v3_run_manifest(
                 },
                 "confirmation_retry_authority": "v3_scheduler_single_http_attempt",
                 "confirmation_query_lane": "isolated_from_close_mutations",
+                "close_confirmation_stale_halt_seconds": (
+                    CONFIRMATION_STALE_HALT_SECONDS
+                ),
+                "stale_confirmation_policy": (
+                    "halt_new_risk_keep_reduce_only_and_reconciliation"
+                ),
+                "etoro_get_rate_governor": {
+                    "max_requests_per_window": ETORO_GET_MAX_REQUESTS_PER_WINDOW,
+                    "window_seconds": ETORO_GET_RATE_WINDOW_SECONDS,
+                    "global_429_cooldown": True,
+                    "honor_retry_after": True,
+                    "fallback_429_cooldown_seconds": ETORO_GET_429_FALLBACK_SECONDS,
+                    "post_close_mutations_governed": False,
+                },
             },
             "quote_quality_policy": quote_quality_contract_metadata(),
             "watchlist": symbols,
@@ -211,6 +235,9 @@ def build_v3_run_manifest(
                     "silent_decisions": "heartbeat_aggregates_only",
                     "decision_details": "material_state_changes_only",
                     "market_quality": "transition_only",
+                    "trade_budget_activation": (
+                        "unique_in_stream_marker_plus_heartbeat_metrics"
+                    ),
                     "causal_restart_state": (
                         "sqlite_restart_cache_plus_start_end_run_checkpoints"
                     ),
