@@ -24,12 +24,17 @@ class InventoryBook:
         for event in events:
             if event.event_type == "ENTRY_FILLED":
                 payload = event.payload
+                units = float(payload["units"])
+                price = float(payload["price"])
                 book.apply_entry_fill(
                     inventory_id=event.inventory_id,
                     symbol=str(payload["symbol"]),
                     position_id=str(payload["position_id"]),
-                    units=float(payload["units"]),
-                    price=float(payload["price"]),
+                    units=units,
+                    price=price,
+                    account_notional=float(
+                        payload.get("notional", units * price)
+                    ),
                     fee=float(payload.get("fee", 0.0)),
                     filled_at=event.occurred_at,
                 )
@@ -72,18 +77,32 @@ class InventoryBook:
         price: float,
         fee: float,
         filled_at: datetime,
+        account_notional: float | None = None,
     ) -> InventoryState:
         if position_id in self._inventory_by_position_id:
             raise ValueError(f"Broker position already applied: {position_id}")
         if units <= 0 or price <= 0:
             raise ValueError("Entry fill requires positive units and price")
+        actual_account_notional = (
+            units * price
+            if account_notional is None
+            else float(account_notional)
+        )
+        if actual_account_notional <= 0:
+            raise ValueError("Entry fill requires positive account notional")
         normalized = symbol.strip().upper()
         existing = self._inventories.get(inventory_id)
-        leg = BrokerLeg(position_id, units, price, filled_at, side="BUY")
+        leg = BrokerLeg(
+            position_id,
+            units,
+            price,
+            filled_at,
+            side="BUY",
+            account_notional=actual_account_notional,
+        )
         if existing is None:
             if self.active_for_symbol(normalized) is not None:
                 raise ValueError(f"Multiple active inventories for {normalized}")
-            notional = units * price
             updated = InventoryState(
                 inventory_id=inventory_id,
                 symbol=normalized,
@@ -93,7 +112,7 @@ class InventoryBook:
                 entry_fill_count=1,
                 last_entry_at=filled_at,
                 last_entry_price=price,
-                total_notional=notional,
+                total_notional=actual_account_notional,
                 wallet_exposure_pct=0.0,
                 initial_entry_units=units,
                 fees_paid=fee,
@@ -117,7 +136,9 @@ class InventoryBook:
                 entry_fill_count=existing.entry_fill_count + 1,
                 last_entry_at=filled_at,
                 last_entry_price=price,
-                total_notional=total_cost,
+                total_notional=(
+                    existing.total_notional + actual_account_notional
+                ),
                 fees_paid=existing.fees_paid + fee,
                 last_fill_at=filled_at,
                 trailing_min_since_open=None,
@@ -158,6 +179,7 @@ class InventoryBook:
         close_units = min(close_units, leg.units)
         remaining_units = max(0.0, leg.units - close_units)
         realized = close_units * (exit_price - leg.entry_price)
+        leg_account_notional = _leg_account_notional(leg)
 
         if remaining_units <= _CLOSE_TOLERANCE:
             self._inventory_by_position_id.pop(position_id, None)
@@ -165,7 +187,13 @@ class InventoryBook:
                 item for item in inventory.broker_legs if item.position_id != position_id
             )
         else:
-            remaining_leg = replace(leg, units=remaining_units)
+            remaining_leg = replace(
+                leg,
+                units=remaining_units,
+                account_notional=(
+                    leg_account_notional * remaining_units / leg.units
+                ),
+            )
             remaining_legs = tuple(
                 remaining_leg if item.position_id == position_id else item
                 for item in inventory.broker_legs
@@ -186,11 +214,14 @@ class InventoryBook:
         else:
             total_units = sum(item.units for item in remaining_legs)
             cost = sum(item.units * item.entry_price for item in remaining_legs)
+            account_notional = sum(
+                _leg_account_notional(item) for item in remaining_legs
+            )
             updated = replace(
                 inventory,
                 total_units=total_units,
                 average_entry_price=cost / total_units,
-                total_notional=cost,
+                total_notional=account_notional,
                 realized_pnl=inventory.realized_pnl + realized,
                 fees_paid=inventory.fees_paid + fee,
                 last_fill_at=filled_at,
@@ -268,3 +299,8 @@ class InventoryBook:
             inventories=active,
             symbol_betas=dict(symbol_betas or {}),
         )
+
+
+def _leg_account_notional(leg: BrokerLeg) -> float:
+    value = leg.account_notional
+    return leg.units * leg.entry_price if value is None else float(value)
