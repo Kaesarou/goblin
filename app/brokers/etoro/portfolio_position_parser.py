@@ -67,7 +67,17 @@ def extract_open_position_units(
         if position.get('isOpen') is False:
             result[normalized] = 0.0
             continue
-        result[normalized] = extract_position_units(position)
+        units = extract_position_units(position)
+        if units is None:
+            # This parser is the eToro quantitative reconciliation boundary. An
+            # open position whose units cannot be proven must never be treated as
+            # a successful equality check; let startup/periodic reconciliation
+            # fail closed instead of silently degrading to existence-only mode.
+            raise ValueError(
+                'Unable to extract units for open eToro position '
+                f'{normalized}'
+            )
+        result[normalized] = units
 
     if requested is not None:
         for position_id in requested:
