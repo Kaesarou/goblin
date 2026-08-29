@@ -71,6 +71,12 @@ class TradingSessionDecision(NamedTuple):
             return NotImplemented
         return self.state_signature() == other.state_signature()
 
+    def __ne__(self, other: object) -> bool:
+        equal = self.__eq__(other)
+        if equal is NotImplemented:
+            return NotImplemented
+        return not equal
+
     def __hash__(self) -> int:
         return hash(self.state_signature())
 
