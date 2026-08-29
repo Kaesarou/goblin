@@ -29,6 +29,10 @@ from app.brokers.etoro.endpoint_paths import (
     pnl_path,
     real_portfolio_path,
 )
+from app.brokers.etoro.get_rate_governor import (
+    ETORO_GET_429_FALLBACK_SECONDS,
+    EtoroGetRateGovernor,
+)
 from app.brokers.etoro.http_failure import raise_for_failed_response
 from app.brokers.etoro.http_headers_builder import build_headers
 from app.brokers.etoro.http_response_payload import response_payload
@@ -84,8 +88,9 @@ class EtoroClient(BrokerClient):
         self.settings = settings
         self.env = broker_environment_from_name(settings.broker)
         self.position_instruments: dict[str, int] = {}
-        self.instrument_ids_by_symbol: dict[str, int] = {}
+        self.instrument_ids_by_symbol: dict[int | str, int] = {}
         self.symbol_by_instrument_id: dict[int, str] = {}
+        self._get_rate_governor = EtoroGetRateGovernor()
 
     def get_account_equity(self) -> float:
         equity = extract_account_equity(self.get_pnl())
@@ -152,6 +157,7 @@ class EtoroClient(BrokerClient):
         return OpenPositionResult(
             position_id=executed_position.position_id,
             executed_entry_price=executed_position.executed_entry_price,
+            executed_units=executed_position.executed_units,
         )
 
     def close_position(
@@ -257,8 +263,8 @@ class EtoroClient(BrokerClient):
         close_order_id: str,
         position_id: str,
     ) -> BrokerCloseExecution | None:
-        # The V3 confirmation scheduler owns retry/backoff. One scheduler attempt
-        # must equal one HTTP GET so 429 handling is observable and bounded.
+        # The V3 confirmation scheduler owns per-action retry/backoff. The eToro
+        # client still applies one shared user-key GET budget before this request.
         payload = self._get_once(close_order_lookup_path(self.env, close_order_id))
         return extract_close_execution(
             payload,
@@ -305,6 +311,9 @@ class EtoroClient(BrokerClient):
             position_id=position_id,
         )
 
+    def get_rate_limit_metrics(self) -> dict[str, object]:
+        return self._get_governor().snapshot()
+
     @property
     def headers(self) -> dict[str, str]:
         return build_headers(
@@ -315,12 +324,14 @@ class EtoroClient(BrokerClient):
 
     def _get_once(self, path: str, params: dict | None = None) -> dict:
         url = build_http_url(self.etoro_api_base_url, path)
+        self._get_governor().acquire()
         response = requests.get(
             url,
             headers=self.headers,
             params=params,
             timeout=default_request_timeout_seconds(),
         )
+        self._apply_global_429_cooldown(response)
         if not response.ok:
             raise_for_failed_response(response)
         return response_payload(response)
@@ -329,6 +340,7 @@ class EtoroClient(BrokerClient):
         url = build_http_url(self.etoro_api_base_url, path)
         max_attempts = default_get_max_attempts()
         for attempt in range(1, max_attempts + 1):
+            self._get_governor().acquire()
             try:
                 response = requests.get(
                     url,
@@ -349,6 +361,8 @@ class EtoroClient(BrokerClient):
                     raise
                 time.sleep(delay_seconds_for_attempt(attempt))
                 continue
+
+            self._apply_global_429_cooldown(response)
             if (
                 is_retryable_http_status(response.status_code)
                 and attempt < max_attempts
@@ -372,6 +386,23 @@ class EtoroClient(BrokerClient):
                 raise_for_failed_response(response)
             return response_payload(response)
         raise RuntimeError(f'eToro GET failed after retries | url={url}')
+
+    def _get_governor(self) -> EtoroGetRateGovernor:
+        governor = getattr(self, '_get_rate_governor', None)
+        if governor is None:
+            governor = EtoroGetRateGovernor()
+            self._get_rate_governor = governor
+        return governor
+
+    def _apply_global_429_cooldown(self, response) -> None:
+        if getattr(response, 'status_code', None) != 429:
+            return
+        retry_after = _retry_after_seconds(response)
+        self._get_governor().defer(
+            retry_after
+            if retry_after is not None
+            else ETORO_GET_429_FALLBACK_SECONDS
+        )
 
     def _post(self, path: str, payload: dict) -> dict:
         url = build_http_url(self.etoro_api_base_url, path)
