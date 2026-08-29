@@ -53,17 +53,19 @@ def test_market_stream_is_sampled_per_symbol_every_ten_seconds(tmp_path):
     assert MARKET_RAW_SAMPLE_INTERVAL_SECONDS == 10.0
     assert journal.journal.written_count == 3
     assert journal.suppressed_count == 1
+    assert journal.sampled_out_count == 1
+    assert journal.budget_suppressed_count == 0
     assert _line_count(path) == 3
     assert len(observed) == 3
 
 
-def test_market_stream_has_physical_budget_defaults(tmp_path):
+def test_market_stream_has_week_safe_physical_budget_defaults(tmp_path):
     journal = RawDataJournal(
         JsonlJournal(str(tmp_path / "market.jsonl.gz"), stream_name="market"),
         lambda *_: None,
     )
 
-    assert journal.max_bytes == MARKET_RAW_MAX_BYTES == 512 * 1024 * 1024
+    assert journal.max_bytes == MARKET_RAW_MAX_BYTES == 1024 * 1024 * 1024
     assert journal.min_free_bytes == MARKET_RAW_MIN_FREE_BYTES == 1024 * 1024 * 1024
 
 
@@ -93,6 +95,8 @@ def test_budget_exhaustion_is_transition_only_and_not_a_write_failure(tmp_path):
 
     assert journal.journal.written_count == 1
     assert journal.suppressed_count == 2
+    assert journal.sampled_out_count == 0
+    assert journal.budget_suppressed_count == 2
     assert journal.budget_exhausted
     assert journal.budget_reason == "max_bytes"
     assert states == [("raw_journal_budget_exhausted", "max_bytes")]
@@ -114,4 +118,6 @@ def test_non_market_raw_stream_remains_exhaustive_by_default(tmp_path):
 
     assert journal.journal.written_count == 2
     assert journal.suppressed_count == 0
+    assert journal.sampled_out_count == 0
+    assert journal.budget_suppressed_count == 0
     assert _line_count(path) == 2
