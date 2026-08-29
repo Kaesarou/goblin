@@ -126,6 +126,7 @@ class V3BrokerExecutor:
         self._pending_close_confirmations: dict[str, _PendingCloseConfirmation] = {}
         self._confirmation_tasks: set[str] = set()
         self._pending_close_position_ids: set[str] = set()
+        self._pending_economic_fill_action_ids: set[str] = set()
         self.halted_reason: str | None = None
         self._confirmation_attempts = 0
         self._confirmation_errors = 0
@@ -648,6 +649,13 @@ class V3BrokerExecutor:
         broker_units: float,
         expected_after_pending: float,
     ) -> None:
+        matching_action_ids = {
+            action_id
+            for action_id, pending in self._pending_close_confirmations.items()
+            if pending.context.position_id == expectation.position_id
+        }
+        self._pending_economic_fill_action_ids.update(matching_action_ids)
+
         signature = (
             expectation.position_id,
             round(expectation.book_units, 12),
@@ -672,6 +680,7 @@ class V3BrokerExecutor:
                 "broker_units": broker_units,
                 "pending_requested_units": expectation.pending_requested_units,
                 "economic_fill_pending": True,
+                "action_ids": sorted(matching_action_ids),
             },
         )
 
@@ -712,7 +721,16 @@ class V3BrokerExecutor:
             return
 
         if self.halted_reason == "stale_close_confirmation":
-            self.halted_reason = None
+            self.halted_reason = (
+                "broker_quantity_reduction_pending_economic_fill"
+                if self._pending_economic_fill_action_ids
+                else None
+            )
+        elif (
+            self.halted_reason is None
+            and self._pending_economic_fill_action_ids
+        ):
+            self.halted_reason = "broker_quantity_reduction_pending_economic_fill"
 
     def confirmation_metrics(self) -> dict[str, object]:
         now = _utc_now()
@@ -749,6 +767,12 @@ class V3BrokerExecutor:
             "oldest_pending_seconds": oldest_seconds,
             "stale_halt_seconds": CONFIRMATION_STALE_HALT_SECONDS,
             "stale_pending_count": stale_count,
+            "pending_economic_fill_count": len(
+                self._pending_economic_fill_action_ids
+            ),
+            "pending_economic_fill_action_ids": sorted(
+                self._pending_economic_fill_action_ids
+            ),
             "broker_quantity_reductions_observed": self._broker_unit_reductions_observed,
             "broker_units_unavailable": self._broker_units_unavailable,
             "broker_get_rate_limit": broker_rate_limit,
@@ -781,6 +805,9 @@ class V3BrokerExecutor:
                 "attempt_count": pending.attempt_count,
                 "last_error_type": pending.last_error_type,
                 "last_http_status": pending.last_http_status,
+                "broker_quantity_reduction_observed": (
+                    action_id in self._pending_economic_fill_action_ids
+                ),
             }
             for action_id, pending in sorted(self._pending_close_confirmations.items())
         ]
@@ -1161,10 +1188,11 @@ class V3BrokerExecutor:
         self._pending_close_confirmations.pop(context.action_id, None)
         self._pending_actions.discard(context.action_id)
         self._pending_close_position_ids.discard(context.position_id)
-        if self.halted_reason in {
-            "broker_quantity_reduction_pending_economic_fill",
-            "stale_close_confirmation",
-        }:
+        self._pending_economic_fill_action_ids.discard(context.action_id)
+        if (
+            self.halted_reason == "broker_quantity_reduction_pending_economic_fill"
+            and not self._pending_economic_fill_action_ids
+        ):
             self.halted_reason = None
         self._refresh_stale_confirmation_halt(_utc_now())
 
