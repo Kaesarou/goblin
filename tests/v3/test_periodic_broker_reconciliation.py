@@ -9,7 +9,10 @@ from app.v3.live_execution import (
 )
 from app.v3.persistence import InventoryEvent, InventoryEventStore
 
-NOW = datetime(2026, 8, 29, 8, 0, tzinfo=timezone.utc)
+# These tests exercise non-stale reconciliation semantics. Use a fresh wall-clock
+# anchor so the separate 15-minute stale-confirmation policy cannot contaminate
+# them when CI happens to run long after a hard-coded timestamp.
+NOW = datetime.now(timezone.utc)
 
 
 class QueueRunner:
