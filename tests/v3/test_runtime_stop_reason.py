@@ -1,4 +1,4 @@
-from types import SimpleNamespace
+import pytest
 
 from app.v3.runtime import GoblinV3Runtime
 
@@ -39,3 +39,20 @@ def test_keyboard_interrupt_sets_explicit_interrupted_stop_reason():
     assert [event for event, _ in runtime.trade_journal.events] == [
         "v3_runtime_interrupted"
     ]
+
+
+@pytest.mark.parametrize("failure_stage", ["startup", "loop", "stop"])
+def test_unexpected_error_is_reraised_with_error_stop_reason(failure_stage):
+    runtime = object.__new__(GoblinV3Runtime)
+    runtime._started = failure_stage != "startup"
+    runtime._stop_requested = failure_stage == "stop"
+    runtime.stop_reason = None
+    runtime.loop_id = 0
+    def fail(*args, **kwargs):
+        raise RuntimeError("unexpected failure")
+    runtime.startup = fail
+    runtime._refresh_sessions = fail
+    runtime.stop = fail if failure_stage == "stop" else lambda: None
+    with pytest.raises(RuntimeError, match="unexpected failure"):
+        runtime.run()
+    assert runtime.stop_reason == "error"

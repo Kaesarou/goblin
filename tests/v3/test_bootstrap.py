@@ -67,7 +67,7 @@ def test_v3_manifest_declares_authority_and_replayable_log_budget(tmp_path):
         removed_runs=(),
     )
 
-    assert manifest["schema_version"] == 19
+    assert manifest["schema_version"] == 20
     assert manifest["strategy"]["name"] == "INVENTORY_RR5_V1"
     assert manifest["strategy"]["direction_model"] is None
     assert manifest["strategy"]["wait_confirmation"] is None
@@ -89,14 +89,15 @@ def test_v3_manifest_declares_authority_and_replayable_log_budget(tmp_path):
         "mismatch_policy": "halt_new_risk_reduce_only_allowed",
         "query_failure_policy": "halt_new_risk_reduce_only_allowed",
         "pending_reduction_policy": (
-            "halt_new_risk_until_economic_fill_confirmed"
+            "confident_quantity_releases_mutation_economics_pending_does_not_halt"
         ),
         "stale_snapshot_policy": "discard_and_retry",
     }
     assert broker_execution["etoro_get_rate_governor"] == {
         "max_requests_per_window": ETORO_GET_MAX_REQUESTS_PER_WINDOW,
         "window_seconds": ETORO_GET_RATE_WINDOW_SECONDS,
-        "global_429_cooldown": True,
+        "bucket_local_429_cooldown": True,
+        "buckets": ["account_read_and_rest_market_data", "order_lookup"],
         "honor_retry_after": True,
         "fallback_429_cooldown_seconds": ETORO_GET_429_FALLBACK_SECONDS,
         "post_close_mutations_governed": False,
