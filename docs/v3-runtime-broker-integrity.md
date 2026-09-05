@@ -66,6 +66,14 @@ Restart computes `max(0, next_attempt_at - utc_now)` and converts only that
 remaining delay to local monotonic time. No monotonic timestamp is persisted.
 Resolved or explicitly abandoned actions delete their scheduler rows.
 
+The single-worker QUERY lane dispatches due work in this order: active close
+mutation confirmation, periodic broker quantity reconciliation, then historical
+economics-only confirmation. Priorities are reconsidered after each completed
+query; an already running query is not interrupted. A due reconciliation therefore
+runs before the next economics-only lookup, even with a historical backlog.
+Backoff deadlines, rate budgets and the absence of an economics-only risk halt
+are unchanged. The manifest exposes this ordered `query_priority` list.
+
 The stale-close halt applies only to unresolved mutations. Metrics distinguish
 active mutations, quantity-resolved economic confirmations, unattributed
 reconciliations, stale categories, and mutation/economics-only attempts.

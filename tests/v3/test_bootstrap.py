@@ -85,7 +85,11 @@ def test_v3_manifest_declares_authority_and_replayable_log_budget(tmp_path):
         "startup": True,
         "periodic_interval_seconds": BROKER_RECONCILIATION_INTERVAL_SECONDS,
         "query_lane": "shared_serial_with_close_confirmation",
-        "close_confirmation_priority": True,
+        "query_priority": [
+            "active_close_mutation",
+            "periodic_broker_reconciliation",
+            "economics_only_close_confirmation",
+        ],
         "mismatch_policy": "halt_new_risk_reduce_only_allowed",
         "query_failure_policy": "halt_new_risk_reduce_only_allowed",
         "pending_reduction_policy": (
