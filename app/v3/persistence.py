@@ -55,9 +55,14 @@ class InventoryEventStore:
     ) -> None:
         self._event_sink = event_sink
 
-    def append(self, event: InventoryEvent) -> bool:
+    def append(self, event: InventoryEvent, *, expected_event_ids: set[str] | None = None) -> bool:
         actual_event = _deduplicate_high_frequency_event(event)
         with self._connect() as connection:
+            if expected_event_ids is not None:
+                connection.execute("BEGIN IMMEDIATE")
+                actual_ids = {row[0] for row in connection.execute("SELECT event_id FROM inventory_events")}
+                if actual_ids != expected_event_ids:
+                    raise RuntimeError("Inventory ledger changed during operator reconciliation")
             cursor = connection.execute(
                 """
                 INSERT OR IGNORE INTO inventory_events (

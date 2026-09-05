@@ -192,7 +192,7 @@ def test_periodic_broker_unit_increase_halts_then_exact_match_recovers(tmp_path)
     assert metrics["last_status"] == "ok"
 
 
-def test_pending_close_quantity_reduction_reconciles_book_and_halts_for_economics(tmp_path):
+def test_pending_close_quantity_reduction_reconciles_book_and_releases_mutation(tmp_path):
     executor, runner, _ = _executor(tmp_path, units={"p1": 0.16})
     executor.restore_pending_close_confirmations((_accepted_close_event(),))
     pending = next(iter(executor._pending_close_confirmations.values()))
@@ -205,7 +205,7 @@ def test_pending_close_quantity_reduction_reconciles_book_and_halts_for_economic
     runner.complete(task, value={"p1": 0.16})
     executor.drain()
 
-    assert executor.halted_reason == "broker_quantity_reduction_pending_economic_fill"
+    assert executor.halted_reason is None
     inventory = executor.book.active_for_symbol("AAPL")
     assert inventory is not None
     assert inventory.total_units == 0.16

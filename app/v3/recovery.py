@@ -28,8 +28,11 @@ def evaluate_restart_safety(events: Iterable[InventoryEvent]) -> RestartSafety:
     close_started: set[str] = set()
     close_submission_resolved: set[str] = set()
     explicit_unknown: set[str] = set()
+    acknowledged_closes: set[str] = set()
 
     for event in events:
+        if event.event_type == "BROKER_RECONCILIATION_ACKNOWLEDGED":
+            acknowledged_closes.update(str(value) for value in event.payload["abandoned_action_ids"])
         action_id = str(event.payload.get("action_id", "")).strip()
         if not action_id:
             continue
@@ -50,6 +53,10 @@ def evaluate_restart_safety(events: Iterable[InventoryEvent]) -> RestartSafety:
         elif event.event_type == "CLOSE_SUBMISSION_UNKNOWN":
             explicit_unknown.add(action_id)
 
+    # A close acknowledgment has no authority over an open submission.
+    acknowledged_closes &= close_started
+    explicit_unknown -= acknowledged_closes - open_started
+    close_submission_resolved.update(acknowledged_closes)
     if explicit_unknown:
         unresolved = tuple(sorted(explicit_unknown))
         return RestartSafety(False, unresolved, "broker_submission_outcome_unknown")

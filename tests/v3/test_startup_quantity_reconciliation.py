@@ -117,11 +117,8 @@ def test_startup_reconciles_historical_partial_close_without_crashing(tmp_path):
     assert inventory is not None
     assert inventory.total_units == pytest.approx(0.16)
     assert inventory.total_notional == pytest.approx(16.0)
-    assert executor.halted_reason in {
-        "broker_quantity_reduction_pending_economic_fill",
-        "stale_close_confirmation",
-    }
-    assert not executor.new_risk_allowed
+    assert executor.halted_reason is None
+    assert executor.new_risk_allowed
 
     reconciliations = [
         event
