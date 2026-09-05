@@ -281,10 +281,13 @@ class V3BrokerExecutor:
             return False
 
         execution_fraction = plan.target_units / max(inventory.total_units, 1e-12)
+        # A plan is pro-rata across its legs. Wait for an active mutation instead
+        # of silently submitting only the currently unlocked subset of the plan.
+        if any(request.position_id in self._active_close_mutations_by_position
+               for request in plan.requests):
+            return False
         scheduled = False
         for request in plan.requests:
-            if request.position_id in self._active_close_mutations_by_position:
-                continue
             action_id = f"{intent.intent_id}:{request.position_id}"
             if (action_id in self._pending_actions
                     or action_id in self._pending_close_confirmations
@@ -1345,7 +1348,7 @@ class V3BrokerExecutor:
         inventory = self.book.active_for_symbol(context.intent.symbol)
         if inventory is None:
             self.halted_reason = "close_fill_without_inventory"
-            return
+            return False
         leg = next(
             (
                 item
@@ -1356,7 +1359,7 @@ class V3BrokerExecutor:
         )
         if leg is None:
             self.halted_reason = "close_fill_without_broker_leg"
-            return
+            return False
         if executed_units <= 0 or executed_units > leg.units + 1e-9:
             self.halted_reason = "close_execution_units_invalid"
             self._append(
@@ -1372,7 +1375,7 @@ class V3BrokerExecutor:
                     "leg_units": leg.units,
                 },
             )
-            return
+            return False
 
         confirmed_at = _utc_now()
         inserted = self._append(

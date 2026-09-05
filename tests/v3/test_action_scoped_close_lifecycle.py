@@ -215,3 +215,44 @@ def test_interrupted_submission_keeps_leg_locked_after_restart(tmp_path):
     restarted = make_executor(tmp_path, seed=False)
     assert restarted._active_close_mutations_by_position == {"p1": "A:p1"}
     assert not evaluate_restart_safety(restarted.event_store.events()).safe
+
+
+def test_pro_rata_close_waits_for_all_legs_to_be_unlocked(tmp_path):
+    executor = make_executor(tmp_path)
+    submit_close(executor, "A")
+    inventory = executor.book.active_for_symbol("AAPL")
+    executor.book.apply_entry_fill(
+        inventory_id=inventory.inventory_id, symbol="AAPL", position_id="p2",
+        units=1, price=1000, fee=0, filled_at=NOW,
+    )
+    inventory = executor.book.active_for_symbol("AAPL")
+    before = len(executor.task_runner.submissions)
+    assert not executor.schedule(_close_intent(inventory, "B"),
+                                 snapshot=MarketSnapshot("AAPL", 1100, 1101, 1100, NOW))
+    assert len(executor.task_runner.submissions) == before
+    assert "p2" not in executor._active_close_mutations_by_position
+
+
+def test_full_close_without_confirmed_units_never_infers_a_fill(tmp_path):
+    executor = make_executor(tmp_path)
+    inventory = executor.book.active_for_symbol("AAPL")
+    intent = replace(_close_intent(inventory, "full"), metadata={"close_fraction_of_units": 1.0})
+    assert executor.schedule(intent, snapshot=MarketSnapshot("AAPL", 1100, 1101, 1100, NOW))
+    kind, operation, context, task_id, lane = executor.task_runner.submissions[-1]
+    executor._handle_close_submission(BrokerTaskCompletion(task_id, kind, lane, context, operation()))
+    pending = executor._pending_close_confirmations[context.action_id]
+    assert pending.context.full_close
+    before = executor.book.inventories
+    assert not confirm(executor, pending, None, 1100)
+    assert executor.book.inventories == before
+    assert pending.mutation_active
+    assert pending.last_result_state == "close_execution_units_missing"
+
+
+def test_reconciliation_snapshot_identity_includes_active_action(tmp_path):
+    executor = make_executor(tmp_path)
+    before = executor._broker_reconciliation_context()
+    submit_close(executor, "A")
+    after = executor._broker_reconciliation_context()
+    assert before != after
+    assert after.expectations[0].active_action_id == "A:p1"
