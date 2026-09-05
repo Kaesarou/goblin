@@ -12,23 +12,12 @@ def build_client() -> EtoroClient:
     )
 
 
-def test_etoro_client_get_account_equity_uses_pnl_payload(monkeypatch):
+def test_etoro_client_get_account_equity_uses_aggregate_portfolio(monkeypatch):
     client = build_client()
-    monkeypatch.setattr(
-        client,
-        'get_pnl',
-        lambda: {
-            'credit': 43000.0,
-            'positions': [
-                {
-                    'amount': 200.0,
-                    'unrealizedPnL': {'pnL': 10.0},
-                }
-            ],
-            'mirrors': [],
-            'ordersForOpen': [],
-            'orders': [],
-        },
-    )
-
+    paths = []
+    def get(path):
+        paths.append(path)
+        return {"accountTotals": {"accountTotalValue": 43210.0}}
+    monkeypatch.setattr(client, "_get", get)
     assert client.get_account_equity() == 43210.0
+    assert paths == ["/api/v1/trading/info/aggregate-portfolio"]

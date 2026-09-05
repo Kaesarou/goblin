@@ -21,7 +21,7 @@ def service(raw_sessions: str) -> TradingSessionService:
 
 
 def at(hour: int, minute: int = 0) -> datetime:
-    return datetime(2026, 7, 5, hour, minute, tzinfo=timezone.utc)
+    return datetime(2026, 7, 6, hour, minute, tzinfo=timezone.utc)
 
 
 def test_empty_session_means_24_7():
@@ -93,7 +93,7 @@ def test_force_close_is_required_during_last_twenty_minutes():
 
 
 def test_session_crossing_midnight_is_active_after_midnight():
-    decision = service('23:00-09:00').evaluate(asset_class=AssetClass.EQUITY_US, now=at(1))
+    decision = service('23:00-09:00').evaluate(asset_class=AssetClass.EQUITY_US, now=datetime(2026, 7, 7, 1, tzinfo=timezone.utc))
 
     assert decision.session_active
     assert decision.collect_snapshots

@@ -28,9 +28,8 @@ def build_runtime_clients(
     *,
     websocket_payload_observer: WebSocketPayloadObserver | None = None,
 ) -> RuntimeClients:
-    # eToro's read ceiling is per user key, not per client object. Market-data
-    # fallback/search, portfolio/PnL and close-confirmation GETs therefore share
-    # one rolling-window governor even though they run on independent worker lanes.
+    # Account reads and REST market data share a conservative user-key budget.
+    # Documented order lookups have a distinct 45/60s bucket and 429 cooldown.
     get_rate_governor = EtoroGetRateGovernor()
     market_data = EtoroRestMarketDataClient(
         api_key=settings.etoro_api_key,
@@ -50,8 +49,8 @@ def build_runtime_clients(
     if settings.broker == 'paper':
         execution: BrokerClient = PaperBrokerClient()
     else:
-        etoro = ResilientEtoroClient(settings=settings)
-        etoro._get_rate_governor = get_rate_governor
+        etoro = ResilientEtoroClient(settings=settings, get_rate_governor=get_rate_governor,
+                                     order_lookup_get_rate_governor=EtoroGetRateGovernor())
         etoro.instrument_ids_by_symbol = market_data.instrument_ids_by_symbol
         etoro.symbol_by_instrument_id = market_data.symbol_by_instrument_id
         execution = etoro

@@ -115,6 +115,9 @@ class TradingSessionService:
     def evaluate(self, *, asset_class: AssetClass, now: datetime) -> TradingSessionDecision:
         config = self.configs[asset_class]
         local_now = self._to_local_time(now)
+        equity = asset_class in {AssetClass.EQUITY_EU, AssetClass.EQUITY_US}
+        if equity and local_now.weekday() >= 5:
+            return self._decision_closed(asset_class)
         if config.is_24_7:
             return self._decision_24_7(asset_class)
 
@@ -122,6 +125,8 @@ class TradingSessionService:
         if active_session is None:
             return self._decision_closed(asset_class)
 
+        if equity and active_session[0].weekday() >= 5:
+            return self._decision_closed(asset_class)
         return self._decision_active(asset_class, local_now, active_session)
 
     def _decision_24_7(self, asset_class: AssetClass) -> TradingSessionDecision:

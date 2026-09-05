@@ -156,9 +156,10 @@ def test_additional_unexplained_reduction_supersedes_pending_fill_and_survives_f
     first = _last_reconciliation(runner)
     runner.complete(first, value={"p1": 0.16})
     executor.drain()
-    assert executor.halted_reason == "broker_quantity_reduction_pending_economic_fill"
+    assert executor.halted_reason is None
 
     runner.tasks.clear()
+    pending.next_attempt_monotonic = base + 10_000
     last_scheduled = executor._last_broker_reconciliation_monotonic
     assert last_scheduled is not None
     executor.schedule_close_confirmation_checks(
@@ -186,7 +187,7 @@ def test_additional_unexplained_reduction_supersedes_pending_fill_and_survives_f
     assert not executor.new_risk_allowed
 
 
-def test_multi_leg_pending_economic_halt_clears_only_after_every_observed_fill(tmp_path):
+def test_multi_leg_economics_pending_never_halts_known_exposure(tmp_path):
     executor, runner = _multi_executor(tmp_path)
     base = time.monotonic()
     for pending in executor._pending_close_confirmations.values():
@@ -200,8 +201,8 @@ def test_multi_leg_pending_economic_halt_clears_only_after_every_observed_fill(t
     runner.complete(reconciliation, value={"p1": 0.16, "p2": 0.16})
     executor.drain()
 
-    assert executor.halted_reason == "broker_quantity_reduction_pending_economic_fill"
-    assert not executor.new_risk_allowed
+    assert executor.halted_reason is None
+    assert executor.new_risk_allowed
     assert executor.confirmation_metrics()["pending_economic_fill_action_ids"] == [
         "close:p1",
         "close:p2",
@@ -216,8 +217,8 @@ def test_multi_leg_pending_economic_halt_clears_only_after_every_observed_fill(t
         executed_units=0.84,
     )
 
-    assert executor.halted_reason == "broker_quantity_reduction_pending_economic_fill"
-    assert not executor.new_risk_allowed
+    assert executor.halted_reason is None
+    assert executor.new_risk_allowed
     assert executor.confirmation_metrics()["pending_economic_fill_action_ids"] == [
         "close:p2"
     ]

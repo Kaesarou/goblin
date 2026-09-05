@@ -73,7 +73,7 @@ def test_get_portfolio_uses_execution_environment(
     client = EtoroClient(settings=build_settings(broker))
     captured = {}
 
-    def fake_get(path, params=None):
+    def fake_get(path, params=None, **kwargs):
         captured['path'] = path
         captured['params'] = params
         return {'clientPortfolio': {'positions': []}}
@@ -99,7 +99,7 @@ def test_get_order_details_uses_execution_environment(
     client = EtoroClient(settings=build_settings(broker))
     captured = {}
 
-    def fake_get(path, params=None):
+    def fake_get(path, params=None, **kwargs):
         captured['path'] = path
         captured['params'] = params
         return {'orderId': 123}

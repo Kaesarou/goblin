@@ -122,7 +122,7 @@ def test_restore_legacy_full_close_recovers_units_from_persisted_leg(tmp_path):
     pending = executor._pending_close_confirmations["legacy-close:p1"]
     assert pending.context.full_close is True
     assert pending.context.requested_units == pytest.approx(1.0)
-    assert "p1" in executor._pending_close_position_ids
+    assert "p1" in executor._active_close_mutations_by_position
 
 
 def test_pending_broker_leg_cannot_be_scheduled_twice(tmp_path):
@@ -141,4 +141,4 @@ def test_pending_broker_leg_cannot_be_scheduled_twice(tmp_path):
     assert executor.schedule(_close_intent(inventory, "first"), snapshot=snapshot)
     assert not executor.schedule(_close_intent(inventory, "second"), snapshot=snapshot)
     assert len(executor.task_runner.submissions) == 1
-    assert "p1" in executor._pending_close_position_ids
+    assert "p1" in executor._active_close_mutations_by_position

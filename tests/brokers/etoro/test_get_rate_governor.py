@@ -37,7 +37,7 @@ def test_rate_governor_holds_requests_below_rolling_window_limit():
     assert snapshot['max_requests'] == 3
 
 
-def test_global_cooldown_blocks_all_following_gets_until_due():
+def test_bucket_cooldown_blocks_following_gets_until_due():
     clock = FakeClock()
     governor = EtoroGetRateGovernor(
         max_requests=10,
@@ -53,3 +53,21 @@ def test_global_cooldown_blocks_all_following_gets_until_due():
     assert clock.value == 17.0
     assert clock.sleeps == [17.0]
     assert governor.snapshot()['cooldown_remaining_seconds'] == 0.0
+
+
+def test_saturated_bucket_does_not_consume_or_cool_down_other_bucket():
+    clock = FakeClock()
+    account = EtoroGetRateGovernor(clock=clock.now, sleeper=clock.sleep)
+    lookup = EtoroGetRateGovernor(clock=clock.now, sleeper=clock.sleep)
+    for _ in range(45):
+        account.acquire()
+    account.defer(120)
+    for _ in range(45):
+        lookup.acquire()
+    assert clock.sleeps == []
+    assert account.snapshot()["cooldown_remaining_seconds"] == 120
+    lookup.defer(240)
+    clock.value = 120
+    account.acquire()
+    assert clock.sleeps == []
+    assert lookup.snapshot()["cooldown_remaining_seconds"] == 120

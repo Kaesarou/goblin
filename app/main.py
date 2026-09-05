@@ -432,6 +432,7 @@ def main() -> None:
         )
     except Exception as exc:
         run_status = "failed"
+        runtime.stop_reason = "error"
         logger.exception("Goblin V3 runtime failed: %s", exc)
         trade_journal.write(
             "error",

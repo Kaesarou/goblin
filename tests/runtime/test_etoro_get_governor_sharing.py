@@ -4,7 +4,7 @@ from app.config.settings import Settings
 from app.runtime.factories import build_runtime_clients
 
 
-def test_execution_and_rest_market_data_share_one_user_key_get_governor(tmp_path):
+def test_account_and_rest_market_data_share_budget_with_distinct_order_lookup(tmp_path):
     settings = Settings(
         BROKER="etoro_demo",
         ETORO_API_KEY="api-key",
@@ -18,3 +18,7 @@ def test_execution_and_rest_market_data_share_one_user_key_get_governor(tmp_path
     execution = clients.execution_broker.delegate
     assert isinstance(execution, ResilientEtoroClient)
     assert execution._get_rate_governor is clients.rest_market_data._get_rate_governor
+    assert execution._order_lookup_get_rate_governor is not execution._get_rate_governor
+    metrics = execution.get_rate_limit_metrics()
+    assert metrics["account_read"]["max_requests"] == 45
+    assert metrics["order_lookup"]["max_requests"] == 45

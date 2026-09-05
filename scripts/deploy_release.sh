@@ -88,8 +88,8 @@ capture_failed_release_diagnostics() {
       --env-file "$image_env" \
       -f "$compose_file" \
       ps -a || true
-    printf '\n=== docker inspect goblin-bot ===\n'
-    docker inspect goblin-bot || true
+    printf '\n=== container operational state ===\n'
+    docker inspect --format '{{json .State}}' goblin-bot || true
     printf '\n=== docker logs --tail 500 goblin-bot ===\n'
     docker logs --timestamps --tail 500 goblin-bot || true
   } 2>&1 | tee "$deployment_diagnostics" >&2 || true

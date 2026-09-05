@@ -20,11 +20,16 @@ class InventoryPlanner:
         if not market.quality_ok:return self._decision(market,DecisionReason.MARKET_DATA_INVALID)
         inv=portfolio.inventory_for(market.symbol)
         if inv is None:return self._initial(market,portfolio)
+        return self.plan_existing_inventory(market=market,portfolio=portfolio,allow_new_risk=True)
+    def plan_existing_inventory(self,*,market,portfolio,allow_new_risk=False):
+        if not market.quality_ok:return self._decision(market,DecisionReason.MARKET_DATA_INVALID)
+        inv=portfolio.inventory_for(market.symbol)
+        if inv is None:return DecisionBatch()
         # Normal close and re-entry may coexist as resting intents in the reference
         # strategy. They point in opposite economic directions and are reconciled
         # independently by the execution environment.
         close=self._exit(market,portfolio,inv)
-        reentry=self._reentry(market,portfolio,inv)
+        reentry=self._reentry(market,portfolio,inv) if allow_new_risk else DecisionBatch()
         return close.extend(reentry)
     def _exp_ratio(self,i,p):
         # Point-M/Passivbot dynamic spacing uses its effective wallet-exposure

@@ -1,22 +1,28 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
-from app.brokers.etoro.pnl_mapper import (
-    extract_account_equity as _extract_account_equity_from_pnl,
-)
+ACCOUNT_EQUITY_SOURCE = "aggregate-portfolio.accountTotals.accountTotalValue"
 
 
 def extract_account_equity(payload: dict[str, Any]) -> float:
-    """Return account equity from an eToro P&L payload only.
-
-    Historical Goblin code accepted fields such as ``credit``, ``cash`` and
-    ``availableBalance`` as if they were equity. Those values are liquidity
-    components, not total account value. The P&L contract is now the sole source
-    of account equity and follows eToro's documented calculation formula.
-    """
-
-    return _extract_account_equity_from_pnl(payload)
+    """Read the documented total; liquidity and component sums are not equity proof."""
+    current = payload
+    for _ in range(4):
+        if not isinstance(current, dict):
+            break
+        if "accountTotals" in current:
+            totals = current["accountTotals"]
+            value = totals.get("accountTotalValue") if isinstance(totals, dict) else None
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError("Invalid numeric accountTotals.accountTotalValue")
+            equity = float(value)
+            if not math.isfinite(equity) or equity <= 0:
+                raise ValueError("accountTotals.accountTotalValue must be finite and positive")
+            return equity
+        current = current.get("data")
+    raise ValueError("Missing accountTotals.accountTotalValue")
 
 
 def extract_optional_account_equity(payload: dict[str, Any]) -> float | None:

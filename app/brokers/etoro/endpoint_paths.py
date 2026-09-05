@@ -26,11 +26,8 @@ def close_order_lookup_path(env: str, close_order_id: str) -> str:
     return f'/api/v1/trading/info/close-orders/{close_order_id}'
 
 
-def pnl_path(env: str) -> str:
-    if env == 'demo':
-        return '/api/v1/trading/info/demo/pnl'
-
-    return '/api/v1/trading/info/real/pnl'
+def aggregate_portfolio_path() -> str:
+    return '/api/v1/trading/info/aggregate-portfolio'
 
 
 def demo_portfolio_path() -> str:

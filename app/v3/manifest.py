@@ -41,6 +41,8 @@ from app.research.summary import (
 from app.v3.live_execution import (
     BROKER_RECONCILIATION_INTERVAL_SECONDS,
     CONFIRMATION_STALE_HALT_SECONDS,
+    CONFIRMATION_BACKOFF_MAX_SECONDS,
+    ECONOMICS_CONFIRMATION_BACKOFF_MAX_SECONDS,
     POINT_M_DUST_NOTIONAL_USD,
 )
 from app.v3.run_artifacts import (
@@ -48,9 +50,11 @@ from app.v3.run_artifacts import (
     V3_RUN_QC_SCHEMA_VERSION,
 )
 from app.v3.runtime import V3_RUNTIME_CONTRACT_VERSION
-from app.v3.state_store import V3_RUNTIME_STATE_VERSION
+from app.v3.state_store import (
+    V3_RUNTIME_STATE_VERSION, V3_BROKER_EQUITY_STATE_VERSION, V3_CLOSE_RETRY_STATE_VERSION,
+)
 
-V3_RUN_MANIFEST_SCHEMA_VERSION = 19
+V3_RUN_MANIFEST_SCHEMA_VERSION = 20
 _SENSITIVE_SETTINGS = {"ETORO_API_KEY", "ETORO_USER_KEY"}
 
 
@@ -152,14 +156,26 @@ def build_v3_run_manifest(
             "contracts": {
                 "v3_runtime": V3_RUNTIME_CONTRACT_VERSION,
                 "v3_runtime_state": V3_RUNTIME_STATE_VERSION,
+                "broker_equity_reference": V3_BROKER_EQUITY_STATE_VERSION,
+                "close_retry_scheduler": V3_CLOSE_RETRY_STATE_VERSION,
                 "executable_prices": EXECUTABLE_PRICE_CONTRACT_VERSION,
                 "quote_quality": QUOTE_QUALITY_CONTRACT_VERSION,
-                "broker_exit_translation": "pro_rata_partial_close_point_m_dust_v2",
+                "broker_exit_translation": "pro_rata_partial_close_point_m_dust_v3",
                 "broker_open_accounting": "broker_confirmed_opening_units_v1",
                 "replay_checkpoint": V3_REPLAY_CHECKPOINT_SCHEMA_VERSION,
                 "run_qc": V3_RUN_QC_SCHEMA_VERSION,
             },
+            "account_equity": {
+                "endpoint": "/api/v1/trading/info/aggregate-portfolio",
+                "field": "accountTotals.accountTotalValue",
+                "fallback": None,
+                "restored_reference_authority": "exit_planning_only",
+                "new_risk_requires_current_run_equity": True,
+            },
             "market_data": {
+                "equity_candle_policy": "exhaustive_within_snapshot_session_only",
+                "equity_weekends": "closed",
+                "session_transition": "reset_market_components_preserve_history_and_inventory_trailing",
                 "mode": "websocket",
                 "position_fallback": "reduce_only",
                 "raw_market_policy": "sampled_per_symbol",
@@ -190,11 +206,15 @@ def build_v3_run_manifest(
                         BROKER_RECONCILIATION_INTERVAL_SECONDS
                     ),
                     "query_lane": "shared_serial_with_close_confirmation",
-                    "close_confirmation_priority": True,
+                    "query_priority": [
+                        "active_close_mutation",
+                        "periodic_broker_reconciliation",
+                        "economics_only_close_confirmation",
+                    ],
                     "mismatch_policy": "halt_new_risk_reduce_only_allowed",
                     "query_failure_policy": "halt_new_risk_reduce_only_allowed",
                     "pending_reduction_policy": (
-                        "halt_new_risk_until_economic_fill_confirmed"
+                        "confident_quantity_releases_mutation_economics_pending_does_not_halt"
                     ),
                     "stale_snapshot_policy": "discard_and_retry",
                 },
@@ -204,12 +224,20 @@ def build_v3_run_manifest(
                     CONFIRMATION_STALE_HALT_SECONDS
                 ),
                 "stale_confirmation_policy": (
-                    "halt_new_risk_keep_reduce_only_and_reconciliation"
+                    "halt_only_unknown_mutation_keep_reduce_only_and_reconciliation"
                 ),
+                "confirmation_retry_policy": {
+                    "mutation_backoff_max_seconds": CONFIRMATION_BACKOFF_MAX_SECONDS,
+                    "economics_only_backoff_max_seconds": ECONOMICS_CONFIRMATION_BACKOFF_MAX_SECONDS,
+                    "purpose": "internal_load_shedding_no_retention_assumption",
+                    "persisted_deadline": "UTC_next_attempt_at",
+                    "none_result": "exponential_backoff",
+                },
                 "etoro_get_rate_governor": {
                     "max_requests_per_window": ETORO_GET_MAX_REQUESTS_PER_WINDOW,
                     "window_seconds": ETORO_GET_RATE_WINDOW_SECONDS,
-                    "global_429_cooldown": True,
+                    "bucket_local_429_cooldown": True,
+                    "buckets": ["account_read_and_rest_market_data", "order_lookup"],
                     "honor_retry_after": True,
                     "fallback_429_cooldown_seconds": ETORO_GET_429_FALLBACK_SECONDS,
                     "post_close_mutations_governed": False,

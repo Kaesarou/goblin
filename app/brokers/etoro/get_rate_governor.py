@@ -16,8 +16,9 @@ class EtoroGetRateGovernor:
 
     eToro applies GET limits over a rolling one-minute window for a user key.
     Goblin has independent execution, maintenance and REST market-data callers,
-    so endpoint-local retry/backoff is not sufficient: every eToro REST GET using
-    that user key shares one budget and one global 429 cooldown.
+    so endpoint-local retry/backoff is not sufficient. Callers in the same
+    documented group share a governor and its bucket-local 429 cooldown.
+    Account/market-data and order-lookup groups use separate instances.
 
     The default 45/minute budget intentionally leaves headroom below the broker's
     published 60/minute read ceiling for incidental calls and timing jitter. POST

@@ -9,8 +9,8 @@ from typing import Any
 
 from app.journal.serialization import serialize_value
 
-V3_REPLAY_CHECKPOINT_SCHEMA_VERSION = 1
-V3_RUN_QC_SCHEMA_VERSION = 1
+V3_REPLAY_CHECKPOINT_SCHEMA_VERSION = 2
+V3_RUN_QC_SCHEMA_VERSION = 2
 
 
 def write_runtime_checkpoint(
@@ -35,7 +35,8 @@ def write_runtime_checkpoint(
         "strategy": runtime.config.strategy.name,
         "config_sha256": hashlib.sha256(canonical_config).hexdigest(),
         "config": config_payload,
-        "account_equity": runtime._equity,
+        "account_equity": runtime._current_run_equity,
+        "exit_equity_reference": runtime.runtime_state_store.export_broker_equity(),
         "inventories": list(runtime.book.inventories),
         "inventory_runtime_state": (
             runtime.runtime_state_store.export_inventory_runtime_state(runtime.book)
@@ -82,7 +83,8 @@ def write_run_qc(
         "runtime": runtime._heartbeat_metrics(),
         "broker_confirmation": runtime.executor.confirmation_metrics(),
         "replay_contract": {
-            "m1_candles_exhaustive": True,
+            "m1_candles_exhaustive_during_market_sessions": True,
+            "overnight_carried_candles": False,
             "market_quotes_sampled_seconds": 10.0,
             "inventory_ledger_retained": True,
             "causal_state_checkpointed": True,
