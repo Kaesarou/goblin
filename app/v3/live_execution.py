@@ -379,6 +379,13 @@ class V3BrokerExecutor:
             for action_id, pending in self._pending_close_confirmations.items()
             if pending.next_attempt_monotonic <= now
         ]
+        # The single QUERY lane serves current exposure truth before historical
+        # economics: active mutation lookup, due reconciliation, then economics.
+        active_due = [item for item in due if item[3].mutation_active]
+        if active_due:
+            due = active_due
+        elif self._schedule_broker_reconciliation(now):
+            return 1
         if due:
             _, _, action_id, pending = min(due, key=lambda item: item[:3])
             pending.attempt_count += 1
@@ -402,7 +409,7 @@ class V3BrokerExecutor:
                 lane=BrokerTaskLane.QUERY,
             )
             return 1
-        return self._schedule_broker_reconciliation(now)
+        return 0
 
     def _schedule_broker_reconciliation(self, monotonic_now: float) -> int:
         previous = self._last_broker_reconciliation_monotonic
