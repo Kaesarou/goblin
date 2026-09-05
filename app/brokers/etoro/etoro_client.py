@@ -14,7 +14,7 @@ from app.brokers.base import (
     ClosePositionSubmissionUnknownError,
     OpenPositionResult,
 )
-from app.brokers.etoro.account_equity_mapper import extract_account_equity
+from app.brokers.etoro.account_equity_mapper import ACCOUNT_EQUITY_SOURCE, extract_account_equity
 from app.brokers.etoro.attempt_delay import delay_seconds_for_attempt
 from app.brokers.etoro.broker_environment import broker_environment_from_name
 from app.brokers.etoro.close_order_details_parser import extract_close_execution
@@ -26,7 +26,7 @@ from app.brokers.etoro.endpoint_paths import (
     instrument_search_path,
     open_order_path,
     order_lookup_path,
-    pnl_path,
+    aggregate_portfolio_path,
     real_portfolio_path,
 )
 from app.brokers.etoro.get_rate_governor import (
@@ -89,6 +89,7 @@ class EtoroClient(BrokerClient):
         settings: Settings,
         *,
         get_rate_governor: EtoroGetRateGovernor | None = None,
+        order_lookup_get_rate_governor: EtoroGetRateGovernor | None = None,
     ):
         self.settings = settings
         self.env = broker_environment_from_name(settings.broker)
@@ -96,10 +97,12 @@ class EtoroClient(BrokerClient):
         self.instrument_ids_by_symbol: dict[str, int] = {}
         self.symbol_by_instrument_id: dict[int, str] = {}
         self._get_rate_governor = get_rate_governor or EtoroGetRateGovernor()
+        self._order_lookup_get_rate_governor = order_lookup_get_rate_governor or EtoroGetRateGovernor()
 
     def get_account_equity(self) -> float:
-        equity = extract_account_equity(self.get_pnl())
-        logger.info('Account equity resolved | env=%s | equity=%s', self.env, equity)
+        equity = extract_account_equity(self.get_aggregate_portfolio())
+        logger.info('Account equity resolved | env=%s | equity=%s | source=%s',
+                    self.env, equity, ACCOUNT_EQUITY_SOURCE)
         return equity
 
     def open_position(
@@ -262,7 +265,8 @@ class EtoroClient(BrokerClient):
         )
 
     def get_order_details(self, order_id: str) -> dict:
-        return self._get(self._order_lookup_path(), params={'orderId': order_id})
+        return self._get(self._order_lookup_path(), params={'orderId': order_id},
+                         governor=self._order_lookup_governor())
 
     def get_close_execution(
         self,
@@ -270,16 +274,17 @@ class EtoroClient(BrokerClient):
         position_id: str,
     ) -> BrokerCloseExecution | None:
         # The V3 confirmation scheduler owns per-action retry/backoff. The eToro
-        # client still applies one shared user-key GET budget before this request.
-        payload = self._get_once(close_order_lookup_path(self.env, close_order_id))
+        # client applies the separate order-lookup user-key budget.
+        payload = self._get_once(close_order_lookup_path(self.env, close_order_id),
+                                 governor=self._order_lookup_governor())
         return extract_close_execution(
             payload,
             close_order_id=close_order_id,
             position_id=position_id,
         )
 
-    def get_pnl(self) -> dict:
-        return self._get(pnl_path(self.env))
+    def get_aggregate_portfolio(self) -> dict:
+        return self._get(aggregate_portfolio_path())
 
     def get_portfolio(self) -> dict:
         path = demo_portfolio_path() if self.env == 'demo' else real_portfolio_path()
@@ -318,7 +323,8 @@ class EtoroClient(BrokerClient):
         )
 
     def get_rate_limit_metrics(self) -> dict[str, object]:
-        return self._get_governor().snapshot()
+        return {'account_read': self._get_governor().snapshot(),
+                'order_lookup': self._order_lookup_governor().snapshot()}
 
     @property
     def headers(self) -> dict[str, str]:
@@ -328,25 +334,29 @@ class EtoroClient(BrokerClient):
             user_key=self.settings.etoro_user_key,
         )
 
-    def _get_once(self, path: str, params: dict | None = None) -> dict:
+    def _get_once(self, path: str, params: dict | None = None, *,
+             governor: EtoroGetRateGovernor | None = None) -> dict:
+        governor = governor or self._get_governor()
         url = build_http_url(self.etoro_api_base_url, path)
-        self._get_governor().acquire()
+        governor.acquire()
         response = requests.get(
             url,
             headers=self.headers,
             params=params,
             timeout=default_request_timeout_seconds(),
         )
-        self._apply_global_429_cooldown(response)
+        self._apply_429_cooldown(response, governor)
         if not response.ok:
             raise_for_failed_response(response)
         return response_payload(response)
 
-    def _get(self, path: str, params: dict | None = None) -> dict:
+    def _get(self, path: str, params: dict | None = None, *,
+             governor: EtoroGetRateGovernor | None = None) -> dict:
+        governor = governor or self._get_governor()
         url = build_http_url(self.etoro_api_base_url, path)
         max_attempts = default_get_max_attempts()
         for attempt in range(1, max_attempts + 1):
-            self._get_governor().acquire()
+            governor.acquire()
             try:
                 response = requests.get(
                     url,
@@ -368,7 +378,7 @@ class EtoroClient(BrokerClient):
                 time.sleep(delay_seconds_for_attempt(attempt))
                 continue
 
-            self._apply_global_429_cooldown(response)
+            self._apply_429_cooldown(response, governor)
             if (
                 is_retryable_http_status(response.status_code)
                 and attempt < max_attempts
@@ -400,11 +410,18 @@ class EtoroClient(BrokerClient):
             self._get_rate_governor = governor
         return governor
 
-    def _apply_global_429_cooldown(self, response) -> None:
+    def _order_lookup_governor(self) -> EtoroGetRateGovernor:
+        governor = getattr(self, '_order_lookup_get_rate_governor', None)
+        if governor is None:
+            governor = EtoroGetRateGovernor()
+            self._order_lookup_get_rate_governor = governor
+        return governor
+
+    def _apply_429_cooldown(self, response, governor: EtoroGetRateGovernor) -> None:
         if getattr(response, 'status_code', None) != 429:
             return
         retry_after = _retry_after_seconds(response)
-        self._get_governor().defer(
+        governor.defer(
             retry_after
             if retry_after is not None
             else ETORO_GET_429_FALLBACK_SECONDS

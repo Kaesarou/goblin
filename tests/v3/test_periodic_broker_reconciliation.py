@@ -1,6 +1,8 @@
 import time
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 
+from app.brokers.base import BrokerCloseExecution
 from app.runtime.broker_task_runner import BrokerTaskCompletion, BrokerTaskLane
 from app.v3.book import InventoryBook
 from app.v3.live_execution import (
@@ -192,7 +194,7 @@ def test_periodic_broker_unit_increase_halts_then_exact_match_recovers(tmp_path)
     assert metrics["last_status"] == "ok"
 
 
-def test_pending_close_quantity_reduction_reconciles_book_and_halts_for_economics(tmp_path):
+def test_pending_close_quantity_reduction_reconciles_book_and_releases_mutation(tmp_path):
     executor, runner, _ = _executor(tmp_path, units={"p1": 0.16})
     executor.restore_pending_close_confirmations((_accepted_close_event(),))
     pending = next(iter(executor._pending_close_confirmations.values()))
@@ -205,7 +207,7 @@ def test_pending_close_quantity_reduction_reconciles_book_and_halts_for_economic
     runner.complete(task, value={"p1": 0.16})
     executor.drain()
 
-    assert executor.halted_reason == "broker_quantity_reduction_pending_economic_fill"
+    assert executor.halted_reason is None
     inventory = executor.book.active_for_symbol("AAPL")
     assert inventory is not None
     assert inventory.total_units == 0.16
@@ -218,7 +220,7 @@ def test_pending_close_quantity_reduction_reconciles_book_and_halts_for_economic
     assert "BROKER_QUANTITY_RECONCILED" in event_types
 
 
-def test_confirmation_due_has_priority_over_periodic_reconciliation(tmp_path):
+def test_active_mutation_confirmation_due_has_priority_over_periodic_reconciliation(tmp_path):
     executor, runner, _ = _executor(tmp_path, units={"p1": 1.0})
     executor.restore_pending_close_confirmations((_accepted_close_event(),))
     pending = next(iter(executor._pending_close_confirmations.values()))
@@ -234,6 +236,142 @@ def test_confirmation_due_has_priority_over_periodic_reconciliation(tmp_path):
     assert not any(
         task["kind"] == "v3_broker_reconciliation" for task in runner.tasks
     )
+    assert pending.mutation_active
+    metrics = executor.confirmation_metrics()
+    assert metrics["mutation_confirmation_attempts"] == 1
+    assert metrics["economics_only_confirmation_attempts"] == 0
+    assert metrics["broker_reconciliation"]["attempts"] == 0
+
+
+def _economics_executor(tmp_path, monkeypatch, *, count=1):
+    clock = [100.0]
+    monkeypatch.setattr("app.v3.live_execution.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("app.v3.live_execution._utc_now", lambda: NOW + timedelta(seconds=clock[0] - 100))
+    positions = [f"p{index}" for index in range(1, count + 1)]
+    executor, runner, broker = _executor(tmp_path, units={position: 0.16 for position in positions})
+    for position in positions[1:]:
+        executor.book.apply_entry_fill(
+            inventory_id="inv", symbol="AAPL", position_id=position,
+            units=1, price=100, fee=0, filled_at=NOW,
+        )
+    accepted = _accepted_close_event()
+    executor.restore_pending_close_confirmations(tuple(
+        replace(accepted, event_id=f"accepted:{position}", payload={
+            **accepted.payload, "action_id": f"close:{position}",
+            "position_id": position, "close_order_id": f"order:{position}",
+            "pre_close_units": 1.0,
+        }) for position in positions
+    ))
+    assert executor.verify_known_broker_legs() == ()
+    for pending in executor._pending_close_confirmations.values():
+        assert pending.quantity_resolved and pending.attribution_confident
+        assert pending.economics_pending and not pending.mutation_active
+        pending.next_attempt_monotonic = clock[0]
+        pending.next_attempt_at = NOW
+        pending.attempt_count = 12
+    assert executor.new_risk_allowed
+    return executor, runner, broker, clock
+
+
+def test_economics_only_confirmation_does_not_preempt_due_broker_reconciliation(tmp_path, monkeypatch):
+    executor, runner, broker, clock = _economics_executor(tmp_path, monkeypatch)
+    clock[0] = _after_interval(clock[0])
+    pending = executor._pending_close_confirmations["close:p1"]
+
+    assert executor.schedule_close_confirmation_checks(monotonic_now=clock[0]) == 1
+    reconciliation = runner.tasks[-1]
+    assert reconciliation["kind"] == "v3_broker_reconciliation"
+    assert reconciliation["lane"] is BrokerTaskLane.QUERY
+    assert pending.attempt_count == 12
+    metrics = executor.confirmation_metrics()
+    assert metrics["mutation_confirmation_attempts"] == 0
+    assert metrics["economics_only_confirmation_attempts"] == 0
+    assert metrics["broker_reconciliation"]["attempts"] == 2  # Startup plus periodic.
+    runner.complete(reconciliation, value=broker.units)
+    executor.drain()
+
+    assert executor.schedule_close_confirmation_checks(monotonic_now=clock[0]) == 1
+    lookup = runner.tasks[-1]
+    assert lookup["kind"] == "v3_close_execution_lookup"
+    assert lookup["context"] is pending
+    runner.complete(lookup, value=BrokerCloseExecution(
+        "p1", pending.close_order_id, 105.0, NOW, 0.84, None, None, {},
+    ))
+    assert executor.drain() == ("close",)
+    assert not executor._pending_close_confirmations
+    assert not executor.runtime_state_store.load_close_retries()
+    assert executor.book.active_for_symbol("AAPL").total_units == 0.16
+    assert executor.new_risk_allowed
+    metrics = executor.confirmation_metrics()
+    assert metrics["economics_only_confirmation_attempts"] == 1
+    assert metrics["mutation_confirmation_attempts"] == 0
+    assert metrics["broker_reconciliation"]["attempts"] == 2
+
+
+def test_due_reconciliation_interrupts_economics_backlog_without_starvation(tmp_path, monkeypatch):
+    executor, runner, broker, clock = _economics_executor(tmp_path, monkeypatch, count=4)
+    action_ids = set(executor._pending_close_confirmations)
+    assert executor.schedule_close_confirmation_checks(monotonic_now=clock[0]) == 1
+    first = runner.tasks[-1]
+    assert first["kind"] == "v3_close_execution_lookup"
+    # Reconciliation becomes due during this GET. Do not queue more QUERY work.
+    clock[0] = _after_interval(clock[0])
+    assert executor.schedule_close_confirmation_checks(monotonic_now=clock[0]) == 0
+    assert len(runner.tasks) == 1
+    runner.complete(first, value=None)
+    executor.drain()
+
+    assert executor.schedule_close_confirmation_checks(monotonic_now=clock[0]) == 1
+    reconciliation = runner.tasks[-1]
+    assert reconciliation["kind"] == "v3_broker_reconciliation"
+    assert executor.schedule_close_confirmation_checks(monotonic_now=clock[0]) == 0
+    runner.complete(reconciliation, value=broker.units)
+    executor.drain()
+
+    for _ in range(3):
+        assert executor.schedule_close_confirmation_checks(monotonic_now=clock[0]) == 1
+        task = runner.tasks[-1]
+        assert task["kind"] == "v3_close_execution_lookup"
+        runner.complete(task, value=None)
+        executor.drain()
+    assert [task["kind"] for task in runner.tasks] == [
+        "v3_close_execution_lookup", "v3_broker_reconciliation",
+        "v3_close_execution_lookup", "v3_close_execution_lookup", "v3_close_execution_lookup",
+    ]
+    served = {task["context"].context.action_id for task in runner.tasks
+              if task["kind"] == "v3_close_execution_lookup"}
+    assert served == action_ids == set(executor._pending_close_confirmations)
+    assert all(task["lane"] is BrokerTaskLane.QUERY for task in runner.tasks)
+    for pending in executor._pending_close_confirmations.values():
+        assert pending.next_attempt_monotonic == clock[0] + 3600
+        assert pending.attempt_count == 13
+    assert executor.schedule_close_confirmation_checks(monotonic_now=clock[0]) == 0
+    metrics = executor.confirmation_metrics()
+    assert metrics["attempts"] == metrics["economics_only_confirmation_attempts"] == 4
+    assert metrics["mutation_confirmation_attempts"] == 0
+    assert metrics["broker_reconciliation"]["attempts"] == 2
+    assert executor.new_risk_allowed
+
+
+def test_due_active_mutation_preempts_older_economics_and_due_reconciliation(tmp_path, monkeypatch):
+    executor, runner, _, clock = _economics_executor(tmp_path, monkeypatch)
+    executor.book.apply_entry_fill(
+        inventory_id="inv", symbol="AAPL", position_id="p2",
+        units=1, price=100, fee=0, filled_at=NOW,
+    )
+    accepted = _accepted_close_event()
+    executor.restore_pending_close_confirmations((replace(accepted, payload={
+        **accepted.payload, "action_id": "active:p2", "position_id": "p2",
+    }),))
+    clock[0] = _after_interval(clock[0])
+    executor._pending_close_confirmations["active:p2"].next_attempt_monotonic = clock[0]
+    assert executor.schedule_close_confirmation_checks(monotonic_now=clock[0]) == 1
+    assert runner.tasks[-1]["kind"] == "v3_close_execution_lookup"
+    assert runner.tasks[-1]["context"].context.action_id == "active:p2"
+    metrics = executor.confirmation_metrics()
+    assert metrics["mutation_confirmation_attempts"] == 1
+    assert metrics["economics_only_confirmation_attempts"] == 0
+    assert metrics["broker_reconciliation"]["attempts"] == 1
 
 
 def test_inflight_book_change_discards_stale_reconciliation_result(tmp_path):

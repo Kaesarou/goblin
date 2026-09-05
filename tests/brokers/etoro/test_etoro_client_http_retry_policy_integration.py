@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import requests
+import pytest
 
 from app.brokers.etoro.attempt_delay import delay_seconds_for_attempt
 from app.brokers.etoro.etoro_client import EtoroClient
@@ -88,7 +89,7 @@ def test_etoro_client_get_retries_retryable_status_before_success(monkeypatch):
     assert calls[1][1] >= ETORO_GET_429_FALLBACK_SECONDS
 
 
-def test_etoro_client_get_honors_retry_after_globally(monkeypatch):
+def test_etoro_client_get_honors_retry_after_within_bucket(monkeypatch):
     client, clock = build_uninitialized_client()
     sleeps = []
     calls = []
@@ -125,12 +126,12 @@ def test_one_429_blocks_other_gets_during_shared_retry_after(monkeypatch):
     monkeypatch.setattr(requests, 'get', fake_get)
 
     try:
-        client._get_once('/close-confirmation')
+        client._get_once('/portfolio')
     except requests.HTTPError:
         pass
 
     assert len(calls) == 1
-    assert client._get_once('/pnl') == {'ok': True}
+    assert client._get_once('/aggregate-portfolio') == {'ok': True}
     assert calls == [0.0, 12.0]
     assert clock.governor_sleeps == [12.0]
 
@@ -153,3 +154,19 @@ def test_etoro_client_get_does_not_retry_non_retryable_status(monkeypatch):
         pass
 
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("limited_bucket", ["account", "lookup"])
+def test_429_cooldown_is_applied_only_to_the_bucket_receiving_it(monkeypatch, limited_bucket):
+    client, clock = build_uninitialized_client()
+    client._order_lookup_get_rate_governor = EtoroGetRateGovernor(clock=clock.now, sleeper=clock.sleep)
+    account, lookup = client._get_rate_governor, client._order_lookup_get_rate_governor
+    limited, other = (account, lookup) if limited_bucket == "account" else (lookup, account)
+    responses = [FakeResponse(429, headers={"Retry-After": "90"}), FakeResponse(200, {"ok": True})]
+    monkeypatch.setattr(requests, "get", lambda *args, **kwargs: responses.pop(0))
+    with pytest.raises(requests.HTTPError):
+        client._get_once("/limited", governor=limited)
+    assert client._get_once("/other", governor=other) == {"ok": True}
+    assert clock.governor_sleeps == []
+    assert limited.snapshot()["cooldown_remaining_seconds"] == 90
+    assert other.snapshot()["cooldown_remaining_seconds"] == 0

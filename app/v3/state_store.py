@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from collections.abc import Iterable
-from dataclasses import replace
-from datetime import datetime
+from dataclasses import asdict, dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,27 @@ from app.v3.book import InventoryBook
 from app.v3.features import OnlineFeatureEngine
 
 V3_RUNTIME_STATE_VERSION = "v3_runtime_state_v1"
+V3_BROKER_EQUITY_STATE_VERSION = "v3_broker_equity_reference_v1"
+V3_CLOSE_RETRY_STATE_VERSION = "v3_close_retry_scheduler_v1"
+
+
+@dataclass(frozen=True)
+class BrokerEquityReference:
+    value: float
+    observed_at: datetime
+    source: str
+    version: str = V3_BROKER_EQUITY_STATE_VERSION
+
+
+@dataclass(frozen=True)
+class CloseRetryState:
+    action_id: str
+    attempt_count: int
+    next_attempt_at: datetime
+    last_error_type: str | None = None
+    last_http_status: int | None = None
+    last_result_state: str = "pending"
+    version: str = V3_CLOSE_RETRY_STATE_VERSION
 
 
 class V3RuntimeStateStore:
@@ -27,6 +49,67 @@ class V3RuntimeStateStore:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
+
+    def save_broker_equity(self, *, value: float, observed_at: datetime,
+                           source: str) -> BrokerEquityReference:
+        if isinstance(value, bool) or not math.isfinite(value) or value <= 0 or not source:
+            raise ValueError("Broker equity reference must be finite, positive and sourced")
+        reference = BrokerEquityReference(float(value), _required_utc(observed_at), source)
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO v3_broker_equity VALUES (1, ?, ?, ?, ?)",
+                (reference.value, reference.observed_at.isoformat(), source, reference.version),
+            )
+        return reference
+
+    def load_broker_equity(self) -> BrokerEquityReference | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT value, observed_at, source, version FROM v3_broker_equity WHERE id=1"
+            ).fetchone()
+        if row is None:
+            return None
+        value, observed_at, source, version = row
+        if version != V3_BROKER_EQUITY_STATE_VERSION:
+            raise RuntimeError(f"Unsupported broker equity reference: {version}")
+        if not math.isfinite(value) or value <= 0 or not source:
+            raise ValueError("Invalid persisted broker equity reference")
+        return BrokerEquityReference(value, _required_utc(datetime.fromisoformat(observed_at)),
+                                     source, version)
+
+    def export_broker_equity(self) -> dict[str, Any] | None:
+        reference = self.load_broker_equity()
+        return None if reference is None else asdict(reference)
+
+    def save_close_retry(self, state: CloseRetryState) -> None:
+        if not state.action_id or state.attempt_count < 0:
+            raise ValueError("Invalid close retry state")
+        if state.version != V3_CLOSE_RETRY_STATE_VERSION:
+            raise ValueError("Unsupported close retry state version")
+        payload = asdict(state)
+        payload["next_attempt_at"] = _required_utc(state.next_attempt_at).isoformat()
+        with self._connect() as connection:
+            connection.execute("INSERT OR REPLACE INTO v3_close_retry VALUES (?, ?)",
+                               (state.action_id, json.dumps(payload, sort_keys=True)))
+
+    def load_close_retries(self) -> dict[str, CloseRetryState]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT action_id, state_json FROM v3_close_retry").fetchall()
+        result = {}
+        for action_id, raw in rows:
+            payload = json.loads(raw)
+            if payload.get("version") != V3_CLOSE_RETRY_STATE_VERSION:
+                raise RuntimeError("Unsupported close retry state version")
+            payload["next_attempt_at"] = _required_utc(datetime.fromisoformat(payload["next_attempt_at"]))
+            state = CloseRetryState(**payload)
+            if state.action_id != action_id or state.attempt_count < 0:
+                raise ValueError("Invalid persisted close retry state")
+            result[action_id] = state
+        return result
+
+    def delete_close_retry(self, action_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute("DELETE FROM v3_close_retry WHERE action_id=?", (action_id,))
 
     def save_feature_engine(
         self,
@@ -218,6 +301,13 @@ class V3RuntimeStateStore:
             connection.executescript(
                 """
                 PRAGMA journal_mode=WAL;
+                CREATE TABLE IF NOT EXISTS v3_broker_equity(
+                    id INTEGER PRIMARY KEY CHECK(id=1), value REAL NOT NULL,
+                    observed_at TEXT NOT NULL, source TEXT NOT NULL, version TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS v3_close_retry(
+                    action_id TEXT PRIMARY KEY, state_json TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS v3_feature_state(
                     symbol TEXT PRIMARY KEY,
                     state_version TEXT NOT NULL,
@@ -235,6 +325,12 @@ class V3RuntimeStateStore:
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.path)
+
+
+def _required_utc(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("Persisted authority timestamps must be timezone-aware")
+    return value.astimezone(timezone.utc)
 
 
 def _feature_state_payload(state: Any) -> dict[str, Any]:
