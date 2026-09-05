@@ -1,4 +1,5 @@
 from app.brokers.etoro.endpoint_paths import (
+    aggregate_portfolio_path,
     close_order_lookup_path,
     close_position_path,
     demo_portfolio_path,
@@ -70,3 +71,7 @@ def test_instrument_rates_path_joins_instrument_ids():
 
 def test_instrument_rates_path_accepts_empty_list():
     assert instrument_rates_path([]) == '/api/v1/market-data/instruments/rates?instrumentIds='
+
+
+def test_aggregate_portfolio_path():
+    assert aggregate_portfolio_path() == "/api/v1/trading/info/aggregate-portfolio"

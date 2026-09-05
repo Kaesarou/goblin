@@ -48,7 +48,7 @@ def test_filter_symbols_by_trading_session_keeps_only_active_symbols():
         instrument_registry=registry,
         trading_session_service=service,
         trading_session_state=TradingSessionState(),
-        now=datetime(2026, 7, 5, 14, 0, tzinfo=UTC),
+        now=datetime(2026, 7, 6, 14, 0, tzinfo=UTC),
     )
 
     assert symbols_to_fetch == ['AAPL']
