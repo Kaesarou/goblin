@@ -158,3 +158,23 @@ edge search, broker order, VPS deployment or merge is part of this PR.
 The supplied incident findings and API contract underpin these regressions.
 Incomplete uploaded archives cannot establish fresh end-to-end broker behavior;
 tests use mocks, and no assumption is made about old close-order retention.
+
+## PR #75 review validation
+
+The scheduler review adds coverage for active-mutation precedence, due
+reconciliation before economics-only recovery, a multi-action historical backlog,
+resumption of economic confirmation and separate attempt counters. Existing tests
+continue to verify sequential partial closes, late fills and exact event replay.
+
+Failure diagnostics now format only container `.State`; the full inspect payload
+is never printed or persisted. Regression tests reject raw inspect invocations and
+sensitive diagnostic selectors, and execute the diagnostic function with a fake
+Docker for both successful and failed diagnostic commands. Existing image identity
+verification, logs, rollback and deployment conditions are unchanged.
+
+Validation after the review corrections: 926 repository tests passed;
+`git diff --check` and `bash -n scripts/deploy_release.sh` passed. The full PR diff
+against develop was reviewed. Frozen config is byte-identical and `_exit` /
+`_reentry` ASTs are unchanged. No additional broker concurrency, retry threshold,
+rate budget or strategy change was introduced by this review. Docker diagnostics
+were tested with mocks; no production deployment or live broker order was run.
