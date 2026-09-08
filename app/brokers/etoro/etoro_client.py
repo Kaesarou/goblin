@@ -284,7 +284,7 @@ class EtoroClient(BrokerClient):
         )
 
     def get_aggregate_portfolio(self) -> dict:
-        return self._get(aggregate_portfolio_path())
+        return self._get(aggregate_portfolio_path(self.env))
 
     def get_portfolio(self) -> dict:
         path = demo_portfolio_path() if self.env == 'demo' else real_portfolio_path()
