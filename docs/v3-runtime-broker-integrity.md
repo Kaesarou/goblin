@@ -171,8 +171,9 @@ mandatory for new risk, and `no_reference_reduce_only=equity_independent_proof_o
 
 Tests cover strict aggregate equity; exact DEMO/REAL aggregate routes; restored
 exit-only authority; blocked BUY/reentry with unchanged exact exit math; stale
-new-risk intent purge across equity outage/recovery; the no-equity conservative
-proof against multiple positive account-equity values; HTTP-status equity
+new-risk intent purge across equity outage/recovery; the ETORO5 no-equity
+conservative proof against multiple positive account-equity values; explicit
+fail-closed behavior if the monotonicity invariant is broken; HTTP-status equity
 diagnostics; sequential partial closes and late economics; strict mismatch and
 legacy attribution; operator dry-run/apply, restart and concurrent-ledger
 rejection; persisted UTC retry/backoff; independent GET buckets; timezone-aware
@@ -199,12 +200,12 @@ remain local/mocked until the corrected build is explicitly promoted and observe
 
 ## PR #77 validation
 
-On PR #77 head `6ff23855ef78b2cd0e150a82334e67b5f1ecdc01`, GitHub Actions completed the
-full Python suite with **932 passed**. The planner diff against `develop` contains
-17 additions and zero deletions; inspection confirms `_exit` and `_reentry` are
-unchanged. `app/v3/config.py` is absent from the PR diff. This validates the local
-contract and regression coverage only; it is not live-broker validation and does
-not authorize merge or deployment.
+GitHub Actions on the latest code-validation head completed the full Python suite
+with **933 passed**. The planner diff against `develop` contains 17 additions and
+zero deletions; inspection confirms `_exit` and `_reentry` are unchanged.
+`app/v3/config.py` is absent from the PR diff. This validates the local contract
+and regression coverage only; it is not live-broker validation and does not
+authorize merge or deployment.
 
 ## Historical PR #75 validation
 
