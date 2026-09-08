@@ -834,8 +834,12 @@ class GoblinV3Runtime:
         market_states: Mapping[str, MarketState],
     ) -> None:
         self.metrics["equity_independent_exit_windows"] += 1
+        # Losing the equity reference must revoke all pre-existing BUY/reentry
+        # authority immediately. Otherwise a stale new-risk intent could survive
+        # the outage and become executable on the first quote after equity
+        # recovers, before the next completed decision window has recomputed it.
+        self._retain_reduce_only(self.symbols)
         if not self.planner.equity_independent_exit_supported():
-            self._retain_reduce_only(self.symbols)
             return
 
         existing_reduce_symbols = {
