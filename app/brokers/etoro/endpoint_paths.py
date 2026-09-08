@@ -38,7 +38,7 @@ def demo_portfolio_path() -> str:
 
 
 def real_portfolio_path() -> str:
-    return '/api/v1/trading/info/portfolio'
+    return '/api/v1/trading/info/real/portfolio'
 
 
 def instrument_search_path() -> str:
