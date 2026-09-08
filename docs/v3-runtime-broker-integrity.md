@@ -16,6 +16,12 @@ There is no `/pnl`, credit, cash, portfolio or component-sum fallback. The broke
 provides the total; the runtime does not reconstruct equity itself. This is the
 explicit Option-A contract selected after the prospective incident review.
 
+Portfolio/reconciliation reads are also environment-specific and follow the
+documented routes:
+
+- DEMO: `GET /api/v1/trading/info/demo/portfolio`
+- REAL: `GET /api/v1/trading/info/real/portfolio`
+
 The last valid broker reference persists value, UTC observation time, source
 and version. On restart it can plan only existing inventory exits. Initial BUY
 and reentry require an equity validated during the current run, the session's
@@ -23,21 +29,27 @@ new-entry permission, coordinator permission and executor authority. A failed
 refresh does not erase a previously validated reference.
 
 If neither current-run nor restored equity exists, new risk remains fail-closed.
-Existing exact reduce-only intents are preserved. The frozen ETORO5 close formula
-also admits an equity-independent **proof mode** because its exposure coefficient
-is non-positive. With exposure ratio bounded below by zero, evaluating the close
-threshold at `ratio=0` gives the maximum possible close threshold for any positive
-account equity, while the close retracement threshold is unchanged because its
-exposure weight is zero. Therefore a trailing exit that is true at this bound is
-a conservative subset of the exact frozen exits. The runtime may create only such
-proved reduce-only intents; it does not persist or report a synthetic equity and
-does not alter any strategy threshold. If a future strategy/configuration does not
-satisfy this monotonicity invariant, no-reference planning fails closed instead.
+The frozen ETORO5 close formula admits an equity-independent **proof mode** because
+its exposure coefficient is non-positive. With exposure ratio bounded below by
+zero, evaluating the close threshold at `ratio=0` gives the maximum possible close
+threshold for any positive account equity, while the close retracement threshold
+is unchanged because its exposure weight is zero. Therefore a trailing exit that
+is true at this bound is a conservative subset of the exact frozen exits. The
+runtime may create only such proved reduce-only intents; it does not persist or
+report a synthetic equity and does not alter any strategy threshold. If a future
+strategy/configuration does not satisfy this monotonicity invariant, no-reference
+planning creates no new proof intent and remains fail-closed.
 
-While equity is unavailable, stale BUY/reentry authority must not survive: the
-runtime removes non-reduce-only resting intents before proof planning. Recovering
-equity alone cannot resurrect them; a subsequent decision window must recompute
-fresh new-risk intent. Runtime diagnostics expose `reduce_only_planning_mode` as
+Resting intents retain the Point-M one-candle lifecycle during an equity outage.
+Before proof planning the runtime removes every non-reduce-only resting intent. If
+the current strategy candle has no authoritative/quality-valid market state, the
+last known reduce-only protection is preserved rather than recomputed from bad
+data. If the candle is authoritative, the no-equity proof is recomputed and
+**replaces** the previous reduce-only intent even when the new proof returns no
+exit. A stale SELL therefore cannot survive a later valid candle that no longer
+proves an exit under the frozen geometry. Recovering equity alone cannot resurrect
+stale BUY/reentry authority; a subsequent decision window must recompute fresh
+new-risk intent. Runtime diagnostics expose `reduce_only_planning_mode` as
 `equity_reference`, `equity_independent_proof`, or `blocked`.
 
 Account reads and REST market data share a conservative 45-request/60-second
@@ -169,16 +181,18 @@ mandatory for new risk, and `no_reference_reduce_only=equity_independent_proof_o
 
 ## Tests and frozen non-goals
 
-Tests cover strict aggregate equity; exact DEMO/REAL aggregate routes; restored
-exit-only authority; blocked BUY/reentry with unchanged exact exit math; stale
-new-risk intent purge across equity outage/recovery; the ETORO5 no-equity
-conservative proof against multiple positive account-equity values; explicit
-fail-closed behavior if the monotonicity invariant is broken; HTTP-status equity
-diagnostics; sequential partial closes and late economics; strict mismatch and
-legacy attribution; operator dry-run/apply, restart and concurrent-ledger
-rejection; persisted UTC retry/backoff; independent GET buckets; timezone-aware
-weekends; Friday → Monday and 06:59 → 07:00; cutoff, inventory preservation, and
-coherent error/QC artifacts.
+Tests cover strict aggregate equity; exact DEMO/REAL aggregate routes; exact
+DEMO/REAL portfolio routes; restored exit-only authority; blocked BUY/reentry
+with unchanged exact exit math; stale new-risk intent purge across equity
+outage/recovery; the ETORO5 no-equity conservative proof against multiple
+positive account-equity values; one-candle proof replacement and stale-exit
+removal on authoritative candles; preservation of the previous reduce-only on
+invalid/degraded market state; explicit fail-closed behavior if the monotonicity
+invariant is broken; HTTP-status equity diagnostics; sequential partial closes
+and late economics; strict mismatch and legacy attribution; operator dry-run/apply,
+restart and concurrent-ledger rejection; persisted UTC retry/backoff; independent
+GET buckets; timezone-aware weekends; Friday → Monday and 06:59 → 07:00; cutoff,
+inventory preservation, and coherent error/QC artifacts.
 
 No threshold, retracement, EMA, reentry or close parameter in `app/v3/config.py`
 is changed. Long-only, 5 inventories, 5 fills, 4% per symbol, 15% gross,
@@ -201,7 +215,7 @@ remain local/mocked until the corrected build is explicitly promoted and observe
 ## PR #77 validation
 
 GitHub Actions on the latest code-validation head completed the full Python suite
-with **933 passed**. The planner diff against `develop` contains 17 additions and
+with **935 passed**. The planner diff against `develop` contains 17 additions and
 zero deletions; inspection confirms `_exit` and `_reentry` are unchanged.
 `app/v3/config.py` is absent from the PR diff. This validates the local contract
 and regression coverage only; it is not live-broker validation and does not
