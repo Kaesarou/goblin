@@ -56,7 +56,7 @@ def test_demo_portfolio_path():
 
 
 def test_real_portfolio_path():
-    assert real_portfolio_path() == '/api/v1/trading/info/portfolio'
+    assert real_portfolio_path() == '/api/v1/trading/info/real/portfolio'
 
 
 def test_instrument_search_path():
