@@ -62,7 +62,7 @@ def test_etoro_headers_include_required_keys():
     ('broker', 'expected_path'),
     [
         ('etoro_demo', '/api/v1/trading/info/demo/portfolio'),
-        ('etoro_live', '/api/v1/trading/info/portfolio'),
+        ('etoro_live', '/api/v1/trading/info/real/portfolio'),
     ],
 )
 def test_get_portfolio_uses_execution_environment(

@@ -34,7 +34,7 @@ from app.v3.state_store import V3RuntimeStateStore
 
 logger = logging.getLogger(__name__)
 
-V3_RUNTIME_CONTRACT_VERSION = "inventory_runtime_v3_6"
+V3_RUNTIME_CONTRACT_VERSION = "inventory_runtime_v3_7"
 
 _MATERIAL_DECISION_REASONS = frozenset(
     {
@@ -279,6 +279,9 @@ class GoblinV3Runtime:
             "equity_consecutive_failures": 0,
             "equity_refresh_recoveries": 0,
             "equity_last_success_at": None,
+            "equity_last_error_type": None,
+            "equity_last_error_http_status": None,
+            "equity_independent_exit_windows": 0,
             "candle_session_rejections": 0,
             "session_transitions": 0,
         }
@@ -704,31 +707,7 @@ class GoblinV3Runtime:
             asof=batch.closed_at,
         )
 
-        equity_reference = self._current_run_equity or self._exit_planning_equity
-        if equity_reference is None:
-            self._retain_reduce_only(self.symbols)
-            self._record_maintenance_error(
-                "equity_unavailable",
-                "v3_decision_window_blocked",
-                {
-                    "reason": "reduce_only_planning_blocked_no_equity_reference",
-                    "closed_at": batch.closed_at,
-                },
-            )
-            return
-        self._clear_maintenance_error(
-            "equity_unavailable",
-            "v3_account_equity_recovered",
-            {},
-        )
-
         self.metrics["decision_windows"] += 1
-        portfolio = self.book.portfolio(equity=equity_reference)
-        free_slots = max(
-            0,
-            self.config.risk.max_inventories - portfolio.active_inventory_count,
-        )
-
         market_states: dict[str, MarketState] = {}
         for symbol, feature in batch.features.items():
             snapshot = batch.snapshots.get(symbol)
@@ -743,6 +722,36 @@ class GoblinV3Runtime:
                 ),
                 quality_ok=quality_ok,
             )
+
+        equity_reference = self._current_run_equity or self._exit_planning_equity
+        if equity_reference is None:
+            self._process_equity_independent_reduce_only(market_states)
+            self._record_maintenance_error(
+                "equity_unavailable",
+                "v3_equity_reference_unavailable",
+                {
+                    "reason": "new_risk_blocked_reduce_only_equity_independent_proof",
+                    "closed_at": batch.closed_at,
+                    "reduce_only_planning_mode": (
+                        "equity_independent_proof"
+                        if self.planner.equity_independent_exit_supported()
+                        else "blocked"
+                    ),
+                },
+            )
+            self._record_incomplete_decision_window(batch)
+            return
+        self._clear_maintenance_error(
+            "equity_unavailable",
+            "v3_account_equity_recovered",
+            {},
+        )
+
+        portfolio = self.book.portfolio(equity=equity_reference)
+        free_slots = max(
+            0,
+            self.config.risk.max_inventories - portfolio.active_inventory_count,
+        )
 
         for inventory in portfolio.inventories:
             market = market_states.get(inventory.symbol)
@@ -818,18 +827,74 @@ class GoblinV3Runtime:
                 self.intent_book.replace_symbol(symbol, ())
                 self._clear_logged_decision(symbol)
 
-        if batch.missing_symbols or batch.finalization_reason != "all_symbols_completed":
-            self.metrics["decision_windows_incomplete"] += 1
-            self.trade_journal.write(
-                "v3_decision_window_incomplete",
-                {
-                    "closed_at": batch.closed_at,
-                    "expected_count": len(batch.expected_symbols),
-                    "completed_count": len(batch.completed_symbols),
-                    "missing_symbols": list(batch.missing_symbols),
-                    "finalization_reason": batch.finalization_reason,
+        self._record_incomplete_decision_window(batch)
+
+    def _process_equity_independent_reduce_only(
+        self,
+        market_states: Mapping[str, MarketState],
+    ) -> None:
+        self.metrics["equity_independent_exit_windows"] += 1
+        # Losing the equity reference must revoke all pre-existing BUY/reentry
+        # authority immediately. Otherwise a stale new-risk intent could survive
+        # the outage and become executable on the first quote after equity
+        # recovers, before the next completed decision window has recomputed it.
+        self._retain_reduce_only(self.symbols)
+        if not self.planner.equity_independent_exit_supported():
+            return
+
+        for inventory in self._active_inventories():
+            market = market_states.get(inventory.symbol)
+            if market is None or not market.quality_ok:
+                # Without an authoritative strategy state, preserve the last
+                # known reduce-only protection rather than replacing it from
+                # degraded or missing data.
+                self._retain_reduce_only({inventory.symbol})
+                self._decision_reason_counts[
+                    DecisionReason.MARKET_DATA_INVALID.value
+                ] += 1
+                continue
+            decision = self.planner.plan_existing_inventory_without_equity(
+                market=market,
+                inventory=inventory,
+            )
+            intents = tuple(intent for intent in decision.intents if intent.reduce_only)
+            # Resting intents are one-candle strategy objects. A fresh,
+            # authoritative no-equity proof therefore replaces the prior exact
+            # or proof intent even when the new result is empty. This prevents a
+            # stale SELL from surviving a later candle that no longer proves an
+            # exit under the frozen geometry.
+            self.intent_book.replace_symbol(inventory.symbol, intents)
+            self.metrics["intents_planned"] += len(intents)
+            self._journal_decision(
+                inventory.symbol,
+                decision,
+                intents,
+                extra={
+                    "role": "active_inventory",
+                    "planning_mode": "equity_independent_proof",
                 },
             )
+
+    def _record_incomplete_decision_window(
+        self,
+        batch: V3DecisionWindowBatch,
+    ) -> None:
+        if not (
+            batch.missing_symbols
+            or batch.finalization_reason != "all_symbols_completed"
+        ):
+            return
+        self.metrics["decision_windows_incomplete"] += 1
+        self.trade_journal.write(
+            "v3_decision_window_incomplete",
+            {
+                "closed_at": batch.closed_at,
+                "expected_count": len(batch.expected_symbols),
+                "completed_count": len(batch.completed_symbols),
+                "missing_symbols": list(batch.missing_symbols),
+                "finalization_reason": batch.finalization_reason,
+            },
+        )
 
     def _maybe_schedule_equity_refresh(
         self,
@@ -924,13 +989,28 @@ class GoblinV3Runtime:
                         "equity_refresh", "v3_account_equity_recovered", {"equity": equity},
                     )
                 else:
+                    error = completion.error
+                    error_type = (
+                        type(error).__name__
+                        if error is not None
+                        else "InvalidEquityValue"
+                    )
+                    http_status = getattr(
+                        getattr(error, "response", None),
+                        "status_code",
+                        None,
+                    )
                     self.metrics["equity_refresh_failures"] += 1
                     self.metrics["equity_consecutive_failures"] += 1
+                    self.metrics["equity_last_error_type"] = error_type
+                    self.metrics["equity_last_error_http_status"] = http_status
                     self._record_maintenance_error(
                         "equity_refresh", "v3_account_equity_error",
-                        {"reason": "broker_equity_refresh_failed",
-                         "error_type": (type(completion.error).__name__ if completion.error
-                                        else "InvalidEquityValue")},
+                        {
+                            "reason": "broker_equity_refresh_failed",
+                            "error_type": error_type,
+                            "http_status": http_status,
+                        },
                     )
             elif completion.kind == "v3_position_fallback":
                 self._handle_position_fallback_completion(completion)
@@ -1087,6 +1167,17 @@ class GoblinV3Runtime:
     def _risk_authority_snapshot(self) -> dict[str, object]:
         by_symbol = {symbol: self._symbol_risk_authority(symbol) for symbol in self.symbols}
         combined = any(value["v3_new_risk_allowed"] for value in by_symbol.values())
+        equity_reference_available = (
+            self._current_run_equity is not None
+            or self._exit_planning_equity is not None
+        )
+        proof_supported = self.planner.equity_independent_exit_supported()
+        if equity_reference_available:
+            reduce_only_mode = "equity_reference"
+        elif proof_supported:
+            reduce_only_mode = "equity_independent_proof"
+        else:
+            reduce_only_mode = "blocked"
         return {
             "session_active": any(value["session_active"] for value in by_symbol.values()),
             "session_new_entries_allowed": any(value["session_new_entries_allowed"] for value in by_symbol.values()),
@@ -1099,9 +1190,10 @@ class GoblinV3Runtime:
             "exit_planning_equity": self._exit_planning_equity,
             "equity_reference_source": self._equity_source,
             "equity_reference_observed_at": self._equity_observed_at,
+            "reduce_only_planning_mode": reduce_only_mode,
             "reduce_only_planning_blocker": (
                 "reduce_only_planning_blocked_no_equity_reference"
-                if self._exit_planning_equity is None else None
+                if reduce_only_mode == "blocked" else None
             ),
         }
 

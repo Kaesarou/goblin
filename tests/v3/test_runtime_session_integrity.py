@@ -28,7 +28,18 @@ def candles(runtime):
 
 def test_friday_to_monday_keeps_last_session_candle_and_no_ghosts(tmp_path):
     runtime = runtime_for_test(tmp_path)
-    trailing_inventory(runtime)
+    # This test is about session/candle continuity, not exit authority. Keep an
+    # active inventory that is deliberately not in a trailing-exit state so the
+    # no-ghost assertion is not coupled to the equity-independent reduce-only path.
+    runtime.book.apply_entry_fill(
+        inventory_id="inventory",
+        symbol="AAPL",
+        position_id="p1",
+        units=10,
+        price=105,
+        fee=0,
+        filled_at=FRIDAY-timedelta(days=1),
+    )
     feed(runtime, FRIDAY)
     runtime._refresh_sessions(FRIDAY.replace(hour=17, minute=0, second=0))
     assert [c.opened_at.minute for c in candles(runtime)] == [58, 59]

@@ -9,6 +9,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from app.brokers.etoro.broker_environment import broker_environment_from_name
+from app.brokers.etoro.endpoint_paths import aggregate_portfolio_path
 from app.brokers.etoro.get_rate_governor import (
     ETORO_GET_429_FALLBACK_SECONDS,
     ETORO_GET_MAX_REQUESTS_PER_WINDOW,
@@ -86,6 +88,12 @@ def build_v3_run_manifest(
         for asset_class, configured
         in settings.benchmark_symbols_by_asset_class().items()
     }
+    broker_name = str(settings.broker)
+    equity_endpoint = (
+        aggregate_portfolio_path(broker_environment_from_name(broker_name))
+        if broker_name.startswith("etoro_")
+        else None
+    )
     return {
         "schema_version": V3_RUN_MANIFEST_SCHEMA_VERSION,
         "run_id": run_id,
@@ -166,11 +174,12 @@ def build_v3_run_manifest(
                 "run_qc": V3_RUN_QC_SCHEMA_VERSION,
             },
             "account_equity": {
-                "endpoint": "/api/v1/trading/info/aggregate-portfolio",
+                "endpoint": equity_endpoint,
                 "field": "accountTotals.accountTotalValue",
                 "fallback": None,
                 "restored_reference_authority": "exit_planning_only",
                 "new_risk_requires_current_run_equity": True,
+                "no_reference_reduce_only": "equity_independent_proof_only",
             },
             "market_data": {
                 "equity_candle_policy": "exhaustive_within_snapshot_session_only",

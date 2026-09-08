@@ -26,7 +26,10 @@ def close_order_lookup_path(env: str, close_order_id: str) -> str:
     return f'/api/v1/trading/info/close-orders/{close_order_id}'
 
 
-def aggregate_portfolio_path() -> str:
+def aggregate_portfolio_path(env: str) -> str:
+    if env == 'demo':
+        return '/api/v1/trading/info/demo/aggregate-portfolio'
+
     return '/api/v1/trading/info/aggregate-portfolio'
 
 
@@ -35,7 +38,7 @@ def demo_portfolio_path() -> str:
 
 
 def real_portfolio_path() -> str:
-    return '/api/v1/trading/info/portfolio'
+    return '/api/v1/trading/info/real/portfolio'
 
 
 def instrument_search_path() -> str:

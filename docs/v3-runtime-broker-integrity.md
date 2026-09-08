@@ -1,30 +1,66 @@
 # V3 runtime / broker integrity
 
-This change implements the supplied post-hotfix execution findings for
-`INVENTORY_RR5_ETORO5_V1`. It is not a strategy experiment or a deployment.
+This document tracks the execution-integrity contract for
+`INVENTORY_RR5_ETORO5_V1`. It is not a strategy experiment or a tuning surface.
 
 ## Account equity contract
 
-eToro equity is read only from
-`GET /api/v1/trading/info/aggregate-portfolio`,
-`accountTotals.accountTotalValue`. Values must be numeric (not booleans or
-numeric strings), finite and positive. There is no `/pnl`, credit, cash,
-portfolio or component-sum fallback. The documented formula describes the
-broker total; the runtime does not calculate it itself.
+eToro equity is read only from the documented aggregate-portfolio endpoint and
+`accountTotals.accountTotalValue`:
+
+- DEMO: `GET /api/v1/trading/info/demo/aggregate-portfolio`
+- REAL: `GET /api/v1/trading/info/aggregate-portfolio`
+
+Values must be numeric (not booleans or numeric strings), finite and positive.
+There is no `/pnl`, credit, cash, portfolio or component-sum fallback. The broker
+provides the total; the runtime does not reconstruct equity itself. This is the
+explicit Option-A contract selected after the prospective incident review.
+
+Portfolio/reconciliation reads are also environment-specific and follow the
+documented routes:
+
+- DEMO: `GET /api/v1/trading/info/demo/portfolio`
+- REAL: `GET /api/v1/trading/info/real/portfolio`
 
 The last valid broker reference persists value, UTC observation time, source
-and version. On restart it can plan only existing inventory exits. Initial
-BUY and reentry require an equity validated during the current run, the
-session's new-entry permission, coordinator permission and executor authority.
-A failed refresh does not erase a previously validated reference. Without
-any reliable reference, existing reduce-only intents remain and the runtime
-reports `reduce_only_planning_blocked_no_equity_reference`. It does not invent
-the exposure-dependent trailing thresholds.
+and version. On restart it can plan only existing inventory exits. Initial BUY
+and reentry require an equity validated during the current run, the session's
+new-entry permission, coordinator permission and executor authority. A failed
+refresh does not erase a previously validated reference.
+
+If neither current-run nor restored equity exists, new risk remains fail-closed.
+The frozen ETORO5 close formula admits an equity-independent **proof mode** because
+its exposure coefficient is non-positive. With exposure ratio bounded below by
+zero, evaluating the close threshold at `ratio=0` gives the maximum possible close
+threshold for any positive account equity, while the close retracement threshold
+is unchanged because its exposure weight is zero. Therefore a trailing exit that
+is true at this bound is a conservative subset of the exact frozen exits. The
+runtime may create only such proved reduce-only intents; it does not persist or
+report a synthetic equity and does not alter any strategy threshold. If a future
+strategy/configuration does not satisfy this monotonicity invariant, no-reference
+planning creates no new proof intent and remains fail-closed.
+
+Resting intents retain the Point-M one-candle lifecycle during an equity outage.
+Before proof planning the runtime removes every non-reduce-only resting intent. If
+the current strategy candle has no authoritative/quality-valid market state, the
+last known reduce-only protection is preserved rather than recomputed from bad
+data. If the candle is authoritative, the no-equity proof is recomputed and
+**replaces** the previous reduce-only intent even when the new proof returns no
+exit. A stale SELL therefore cannot survive a later valid candle that no longer
+proves an exit under the frozen geometry. Recovering equity alone cannot resurrect
+stale BUY/reentry authority; a subsequent decision window must recompute fresh
+new-risk intent. Runtime diagnostics expose `reduce_only_planning_mode` as
+`equity_reference`, `equity_independent_proof`, or `blocked`.
 
 Account reads and REST market data share a conservative 45-request/60-second
-rolling budget. Order lookups and close confirmations have a distinct
-45/60 budget. A 429 cools down only its bucket; Retry-After is honored when
-present. Market-data classification remains deliberately conservative.
+rolling budget. Order lookups and close confirmations have a distinct 45/60
+budget. A 429 cools down only its bucket; Retry-After is honored when present.
+Market-data classification remains deliberately conservative.
+
+Equity incidents retain the safe HTTP status code and exception type in runtime
+metrics/journal diagnostics, without persisting response bodies or credentials.
+This makes DEMO/REAL routing failures distinguishable from timeouts and rate-limit
+incidents.
 
 ## Broker close state machine
 
@@ -129,52 +165,73 @@ State-start/end, heartbeats, QC and final manifest expose combined risk
 authority and its per-symbol inputs/blockers, equity reference provenance,
 pending confirmation categories and retry deadlines. Repeated equity failures
 increment dedicated refresh metrics, not the generic error counter or repeated
-incident events. Unexpected runtime exceptions set `stop_reason=error` and
-are re-raised; the run is failed consistently.
+incident events. The last equity HTTP status and exception type are retained as
+safe diagnostics. Unexpected runtime exceptions set `stop_reason=error` and are
+re-raised; the run is failed consistently.
 
-The runtime contract is `inventory_runtime_v3_6`, broker exit translation is
+The runtime contract is `inventory_runtime_v3_7`, broker exit translation is
 `pro_rata_partial_close_point_m_dust_v3`, checkpoint/QC schemas are 2 and manifest
-schema is 20. These declare changed authority/lifecycle semantics. Existing
-feature/inventory restart schema `v3_runtime_state_v1` is unchanged; equity and
-retry state have separate v1 contracts and reject unknown versions.
+schema is 20. Existing feature/inventory restart schema `v3_runtime_state_v1` is
+unchanged; equity and retry state have separate v1 contracts and reject unknown
+versions.
+
+The run manifest records the environment-specific aggregate endpoint, the
+`accountTotals.accountTotalValue` field, `fallback=null`, current-run equity as
+mandatory for new risk, and `no_reference_reduce_only=equity_independent_proof_only`.
 
 ## Tests and frozen non-goals
 
-Tests cover strict aggregate equity; restored exit-only authority; blocked BUY
-and reentry with unchanged exit math; sequential partial closes and late
-economics; strict mismatch and legacy attribution; operator dry-run/apply,
+Tests cover strict aggregate equity; exact DEMO/REAL aggregate routes; exact
+DEMO/REAL portfolio routes; restored exit-only authority; blocked BUY/reentry
+with unchanged exact exit math; stale new-risk intent purge across equity
+outage/recovery; the ETORO5 no-equity conservative proof against multiple
+positive account-equity values; one-candle proof replacement and stale-exit
+removal on authoritative candles; preservation of the previous reduce-only on
+invalid/degraded market state; explicit fail-closed behavior if the monotonicity
+invariant is broken; HTTP-status equity diagnostics; sequential partial closes
+and late economics; strict mismatch and legacy attribution; operator dry-run/apply,
 restart and concurrent-ledger rejection; persisted UTC retry/backoff; independent
-GET buckets; timezone-aware weekends; Friday → Monday and 06:59 → 07:00;
-cutoff, inventory preservation, and coherent error/QC artifacts.
+GET buckets; timezone-aware weekends; Friday → Monday and 06:59 → 07:00; cutoff,
+inventory preservation, and coherent error/QC artifacts.
 
 No threshold, retracement, EMA, reentry or close parameter in `app/v3/config.py`
 is changed. Long-only, 5 inventories, 5 fills, 4% per symbol, 15% gross,
 Recoverability authority OFF, hedge OFF, leverage 1, 84% normal exit,
 pro-rata legs, native `UnitsToDeduct`, same partial-close position ID,
 Point-M residual below $10 → full close, strict unit reconciliation and
-10-second raw sampling all remain frozen. No strategy analysis, retuning,
-edge search, broker order, VPS deployment or merge is part of this PR.
+10-second raw sampling all remain frozen. The frozen `_exit` and `_reentry`
+implementations are unchanged from `develop`; the no-equity proof path calls the
+same `_exit` implementation at the conservative zero-exposure-ratio bound. No
+strategy analysis, retuning, edge search, broker order, VPS deployment or merge
+is part of this PR.
 
-The supplied incident findings and API contract underpin these regressions.
-Incomplete uploaded archives cannot establish fresh end-to-end broker behavior;
-tests use mocks, and no assumption is made about old close-order retention.
+The prospective incident findings and documented eToro contract underpin these
+regressions. The incident established that the production DEMO runtime called the
+REAL aggregate path and obtained zero successful equity refreshes. The historical
+HTTP status was not retained, so no specific status is retroactively asserted.
+Incomplete uploaded archives cannot establish fresh end-to-end behavior; tests
+remain local/mocked until the corrected build is explicitly promoted and observed.
 
-## PR #75 review validation
+## PR #77 validation
 
-The scheduler review adds coverage for active-mutation precedence, due
+GitHub Actions on the latest code-validation head completed the full Python suite
+with **935 passed**. The planner diff against `develop` contains 17 additions and
+zero deletions; inspection confirms `_exit` and `_reentry` are unchanged.
+`app/v3/config.py` is absent from the PR diff. This validates the local contract
+and regression coverage only; it is not live-broker validation and does not
+authorize merge or deployment.
+
+## Historical PR #75 validation
+
+The prior scheduler review added coverage for active-mutation precedence, due
 reconciliation before economics-only recovery, a multi-action historical backlog,
 resumption of economic confirmation and separate attempt counters. Existing tests
 continue to verify sequential partial closes, late fills and exact event replay.
 
-Failure diagnostics now format only container `.State`; the full inspect payload
-is never printed or persisted. Regression tests reject raw inspect invocations and
-sensitive diagnostic selectors, and execute the diagnostic function with a fake
-Docker for both successful and failed diagnostic commands. Existing image identity
-verification, logs, rollback and deployment conditions are unchanged.
+Failure diagnostics format only container `.State`; the full inspect payload is
+never printed or persisted. Existing image identity verification, logs, rollback
+and deployment conditions remain unchanged.
 
-Validation after the review corrections: 926 repository tests passed;
-`git diff --check` and `bash -n scripts/deploy_release.sh` passed. The full PR diff
-against develop was reviewed. Frozen config is byte-identical and `_exit` /
-`_reentry` ASTs are unchanged. No additional broker concurrency, retry threshold,
-rate budget or strategy change was introduced by this review. Docker diagnostics
-were tested with mocks; no production deployment or live broker order was run.
+PR #75's final local validation was 926 repository tests plus `git diff --check`
+and `bash -n scripts/deploy_release.sh`. That historical result is separate from
+PR #77's CI validation above.
