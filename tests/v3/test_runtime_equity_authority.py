@@ -59,10 +59,10 @@ def trailing_inventory(runtime):
     return inv
 
 
-def decision_batch():
-    feature = replace(_feature("AAPL"), ema_readiness=1.0)
+def decision_batch(*, feature=None, bid=105, quality=True):
+    feature = replace(feature or _feature("AAPL"), ema_readiness=1.0)
     return V3DecisionWindowBatch(feature.asof, ("AAPL",), ("AAPL",), (), "all_symbols_completed",
-                                {"AAPL": feature}, {"AAPL": _snapshot("AAPL", 105)}, {"AAPL": True})
+                                {"AAPL": feature}, {"AAPL": _snapshot("AAPL", bid)}, {"AAPL": quality})
 
 
 def test_restored_equity_is_exit_only_with_identical_exit_math(tmp_path, monkeypatch):
@@ -169,26 +169,56 @@ def test_no_equity_reference_can_create_proven_reduce_only_exit(tmp_path):
     )
 
 
-def test_no_equity_reference_retains_existing_exact_reduce_only_intent(tmp_path):
+def test_no_equity_reference_recomputes_existing_reduce_only_on_authoritative_window(tmp_path):
+    runtime = runtime_for_test(tmp_path)
+    runtime._exit_planning_equity = 100_000
+    trailing_inventory(runtime)
+    runtime._process_decision_window(decision_batch())
+    exact = runtime.intent_book.snapshot()
+    assert len(exact) == 1
+    assert "equity_independent_reduce_only" not in exact[0].metadata
+
+    runtime._exit_planning_equity = None
+    runtime._process_decision_window(decision_batch(feature=_feature("AAPL", minute=1)))
+
+    proof = runtime.intent_book.snapshot()
+    assert len(proof) == 1
+    assert proof[0].reduce_only
+    assert proof[0].metadata["equity_independent_reduce_only"] is True
+    assert proof[0].created_at > exact[0].created_at
+
+
+def test_no_equity_reference_clears_stale_reduce_only_when_new_proof_is_false(tmp_path):
+    runtime = runtime_for_test(tmp_path)
+    runtime._exit_planning_equity = 100_000
+    trailing_inventory(runtime)
+    runtime._process_decision_window(decision_batch())
+    assert runtime.intent_book.snapshot()
+
+    runtime._exit_planning_equity = None
+    high_volatility = replace(
+        _feature("AAPL", minute=1),
+        volatility_1m=0.20,
+    )
+    runtime._process_decision_window(decision_batch(feature=high_volatility))
+
+    assert not runtime.intent_book.snapshot()
+
+
+def test_no_equity_reference_retains_existing_reduce_only_when_market_invalid(tmp_path):
     runtime = runtime_for_test(tmp_path)
     runtime._exit_planning_equity = 100_000
     trailing_inventory(runtime)
     runtime._process_decision_window(decision_batch())
     before = runtime.intent_book.snapshot()
     assert before
-    assert "equity_independent_reduce_only" not in before[0].metadata
 
     runtime._exit_planning_equity = None
-    for _ in range(3):
-        runtime._process_decision_window(decision_batch())
+    runtime._process_decision_window(
+        decision_batch(feature=_feature("AAPL", minute=1), quality=False)
+    )
 
     assert runtime.intent_book.snapshot() == before
-    unavailable = [
-        payload
-        for name, payload in runtime.trade_journal.events
-        if name == "v3_equity_reference_unavailable"
-    ]
-    assert len(unavailable) == 1
 
 
 def test_equity_failure_records_http_status_without_response_body(tmp_path):
