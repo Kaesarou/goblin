@@ -31,6 +31,17 @@ class InventoryPlanner:
         close=self._exit(market,portfolio,inv)
         reentry=self._reentry(market,portfolio,inv) if allow_new_risk else DecisionBatch()
         return close.extend(reentry)
+    def equity_independent_exit_supported(self):
+        # With a non-positive exposure coefficient, ratio=0 is the maximum close
+        # threshold over every positive-equity portfolio. An exit proven at that
+        # bound is therefore also an exit under the frozen exact geometry; its
+        # limit is never looser than the exact limit. This is a fail-safe subset,
+        # not a retuned threshold or an invented equity value.
+        return self.config.strategy.close_threshold_exposure_weight<=0
+    def plan_existing_inventory_without_equity(self,*,market,inventory):
+        if not market.quality_ok:return self._decision(market,DecisionReason.MARKET_DATA_INVALID)
+        if inventory is None or not self.equity_independent_exit_supported():return DecisionBatch()
+        return self._exit_for_ratio(market,inventory,0.0,equity_independent_proof=True)
     def _exp_ratio(self,i,p):
         # Point-M/Passivbot dynamic spacing uses its effective wallet-exposure
         # limit. Goblin hard safety caps are deliberately independent so tightening
@@ -95,7 +106,9 @@ class InventoryPlanner:
         it=OrderIntent(_id(i.inventory_id,'reentry',i.entry_fill_count+1,m.asof,rp),IntentPurpose.REENTRY,m.symbol,'BUY',n,m.asof,ExecutionStyle.PASSIVE_LIMIT,limit_price=rp,inventory_id=i.inventory_id,cost_estimate=e.costs,metadata={'requested_exposure_pct':req,'requested_units':requested_units,'recoverability_rank':rec.rank_quantile,'reentry_threshold':threshold,'retracement_pct':rt_pct})
         return DecisionBatch((it,),(DecisionRecord(m.symbol,DecisionReason.RECOVERABILITY_ACCEPTED,m.asof,{'rank':rec.rank_quantile}),))
     def _exit(self,m,p,i):
-        c=self.config.strategy; ratio=self._exp_ratio(i,p); cap=self._close_threshold(m,ratio)
+        return self._exit_for_ratio(m,i,self._exp_ratio(i,p))
+    def _exit_for_ratio(self,m,i,ratio,*,equity_independent_proof=False):
+        c=self.config.strategy; cap=self._close_threshold(m,ratio)
         rm=_mult(m,ratio,c.close_retracement_volatility_1m_weight,c.close_retracement_volatility_1h_weight,0); rt_pct=c.close_retracement_base_pct*rm
         peak=i.trailing_max_since_open; retrough=i.trailing_min_since_max
         cp=0.0
@@ -109,5 +122,8 @@ class InventoryPlanner:
         # is collapsed by the fill environment, not by speculative planner rules.
         fraction=c.close_qty_pct
         n=i.total_units*fraction*cp
-        it=OrderIntent(_id(i.inventory_id,'close',m.asof,cp),IntentPurpose.PROFIT_EXIT,m.symbol,'SELL',n,m.asof,ExecutionStyle.LIMIT,limit_price=cp,inventory_id=i.inventory_id,reduce_only=True,metadata={'close_fraction_of_units':fraction,'close_threshold_pct':cap,'retracement_pct':rt_pct})
+        metadata={'close_fraction_of_units':fraction,'close_threshold_pct':cap,'retracement_pct':rt_pct}
+        if equity_independent_proof:
+            metadata.update({'equity_independent_reduce_only':True,'equity_reference_used':False,'exposure_ratio_bound':0.0})
+        it=OrderIntent(_id(i.inventory_id,'close',m.asof,cp),IntentPurpose.PROFIT_EXIT,m.symbol,'SELL',n,m.asof,ExecutionStyle.LIMIT,limit_price=cp,inventory_id=i.inventory_id,reduce_only=True,metadata=metadata)
         return DecisionBatch((it,),(DecisionRecord(m.symbol,DecisionReason.TRAILING_EXIT,m.asof,{}),))
