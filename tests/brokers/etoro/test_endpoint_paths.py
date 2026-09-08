@@ -73,5 +73,13 @@ def test_instrument_rates_path_accepts_empty_list():
     assert instrument_rates_path([]) == '/api/v1/market-data/instruments/rates?instrumentIds='
 
 
-def test_aggregate_portfolio_path():
-    assert aggregate_portfolio_path() == "/api/v1/trading/info/aggregate-portfolio"
+def test_aggregate_portfolio_path_uses_demo_endpoint_when_env_is_demo():
+    assert aggregate_portfolio_path('demo') == (
+        '/api/v1/trading/info/demo/aggregate-portfolio'
+    )
+
+
+def test_aggregate_portfolio_path_uses_real_endpoint_when_env_is_real():
+    assert aggregate_portfolio_path('live') == (
+        '/api/v1/trading/info/aggregate-portfolio'
+    )
