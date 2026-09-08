@@ -98,6 +98,26 @@ def test_flat_buy_needs_current_run_equity(tmp_path):
     assert runtime._operational_entry_allowed("AAPL")
 
 
+def test_losing_equity_reference_purges_stale_new_risk_before_recovery(tmp_path):
+    runtime = runtime_for_test(tmp_path)
+    runtime._current_run_equity = runtime._exit_planning_equity = 100_000
+    runtime._process_decision_window(decision_batch())
+    before = runtime.intent_book.snapshot()
+    assert len(before) == 1
+    assert before[0].side == "BUY"
+    assert not before[0].reduce_only
+
+    runtime._current_run_equity = None
+    runtime._exit_planning_equity = None
+    runtime._process_decision_window(decision_batch())
+    assert not runtime.intent_book.snapshot()
+
+    # Equity recovery itself must not resurrect the stale BUY. New risk may only
+    # return after a subsequent decision window recomputes a fresh intent.
+    runtime._current_run_equity = runtime._exit_planning_equity = 100_000
+    assert not runtime.intent_book.snapshot()
+
+
 @pytest.mark.parametrize("blocker", ["executor", "cutoff", "equity"])
 def test_new_risk_blockers_do_not_suppress_trailing_reduce_only(tmp_path, blocker, monkeypatch):
     runtime = runtime_for_test(tmp_path)
