@@ -30,14 +30,15 @@ threshold at `ratio=0` gives the maximum possible close threshold for any positi
 account equity, while the close retracement threshold is unchanged because its
 exposure weight is zero. Therefore a trailing exit that is true at this bound is
 a conservative subset of the exact frozen exits. The runtime may create only such
-proved reduce-only intents; it does not invent an equity value and does not alter
-any strategy threshold. If a future strategy/configuration does not satisfy this
-monotonicity invariant, no-reference planning fails closed instead.
+proved reduce-only intents; it does not persist or report a synthetic equity and
+does not alter any strategy threshold. If a future strategy/configuration does not
+satisfy this monotonicity invariant, no-reference planning fails closed instead.
 
-While equity is unavailable, stale BUY/reentry authority must not survive: new
-risk is blocked independently of reduce-only planning. Runtime diagnostics expose
-`reduce_only_planning_mode` as `equity_reference`, `equity_independent_proof`, or
-`blocked`.
+While equity is unavailable, stale BUY/reentry authority must not survive: the
+runtime removes non-reduce-only resting intents before proof planning. Recovering
+equity alone cannot resurrect them; a subsequent decision window must recompute
+fresh new-risk intent. Runtime diagnostics expose `reduce_only_planning_mode` as
+`equity_reference`, `equity_independent_proof`, or `blocked`.
 
 Account reads and REST market data share a conservative 45-request/60-second
 rolling budget. Order lookups and close confirmations have a distinct 45/60
@@ -169,21 +170,25 @@ mandatory for new risk, and `no_reference_reduce_only=equity_independent_proof_o
 ## Tests and frozen non-goals
 
 Tests cover strict aggregate equity; exact DEMO/REAL aggregate routes; restored
-exit-only authority; blocked BUY/reentry with unchanged exact exit math; the
-no-equity conservative proof against multiple positive account-equity values;
-HTTP-status equity diagnostics; sequential partial closes and late economics;
-strict mismatch and legacy attribution; operator dry-run/apply, restart and
-concurrent-ledger rejection; persisted UTC retry/backoff; independent GET
-buckets; timezone-aware weekends; Friday → Monday and 06:59 → 07:00; cutoff,
-inventory preservation, and coherent error/QC artifacts.
+exit-only authority; blocked BUY/reentry with unchanged exact exit math; stale
+new-risk intent purge across equity outage/recovery; the no-equity conservative
+proof against multiple positive account-equity values; HTTP-status equity
+diagnostics; sequential partial closes and late economics; strict mismatch and
+legacy attribution; operator dry-run/apply, restart and concurrent-ledger
+rejection; persisted UTC retry/backoff; independent GET buckets; timezone-aware
+weekends; Friday → Monday and 06:59 → 07:00; cutoff, inventory preservation, and
+coherent error/QC artifacts.
 
 No threshold, retracement, EMA, reentry or close parameter in `app/v3/config.py`
 is changed. Long-only, 5 inventories, 5 fills, 4% per symbol, 15% gross,
 Recoverability authority OFF, hedge OFF, leverage 1, 84% normal exit,
 pro-rata legs, native `UnitsToDeduct`, same partial-close position ID,
 Point-M residual below $10 → full close, strict unit reconciliation and
-10-second raw sampling all remain frozen. No strategy analysis, retuning,
-edge search, broker order, VPS deployment or merge is part of this PR.
+10-second raw sampling all remain frozen. The frozen `_exit` and `_reentry`
+implementations are unchanged from `develop`; the no-equity proof path calls the
+same `_exit` implementation at the conservative zero-exposure-ratio bound. No
+strategy analysis, retuning, edge search, broker order, VPS deployment or merge
+is part of this PR.
 
 The prospective incident findings and documented eToro contract underpin these
 regressions. The incident established that the production DEMO runtime called the
@@ -191,6 +196,15 @@ REAL aggregate path and obtained zero successful equity refreshes. The historica
 HTTP status was not retained, so no specific status is retroactively asserted.
 Incomplete uploaded archives cannot establish fresh end-to-end behavior; tests
 remain local/mocked until the corrected build is explicitly promoted and observed.
+
+## PR #77 validation
+
+On PR #77 head `6ff23855ef78b2cd0e150a82334e67b5f1ecdc01`, GitHub Actions completed the
+full Python suite with **932 passed**. The planner diff against `develop` contains
+17 additions and zero deletions; inspection confirms `_exit` and `_reentry` are
+unchanged. `app/v3/config.py` is absent from the PR diff. This validates the local
+contract and regression coverage only; it is not live-broker validation and does
+not authorize merge or deployment.
 
 ## Historical PR #75 validation
 
@@ -204,5 +218,5 @@ never printed or persisted. Existing image identity verification, logs, rollback
 and deployment conditions remain unchanged.
 
 PR #75's final local validation was 926 repository tests plus `git diff --check`
-and `bash -n scripts/deploy_release.sh`. That historical result does not constitute
-validation of this PR #77; PR #77 must pass its own CI before review or promotion.
+and `bash -n scripts/deploy_release.sh`. That historical result is separate from
+PR #77's CI validation above.
