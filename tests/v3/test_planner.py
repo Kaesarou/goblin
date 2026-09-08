@@ -1,7 +1,7 @@
 from dataclasses import replace
 from datetime import datetime, timezone
 
-from app.v3.config import RecoverabilityConfig, rr5_research_config
+from app.v3.config import RecoverabilityConfig, etoro5_research_config, rr5_research_config
 from app.v3.economics import BrokerCostSchedule, EconomicsModel
 from app.v3.models import InventoryState, MarketState, PortfolioState
 from app.v3.planner import InventoryPlanner
@@ -79,8 +79,8 @@ def test_recoverability_cannot_grant_reentry_after_max_fill_cap():
     assert any(decision.reason.value == "max_entry_fills" for decision in batch.decisions)
 
 
-def test_equity_independent_exit_is_a_conservative_subset_of_exact_frozen_exit():
-    config = rr5_research_config()
+def test_etoro5_equity_independent_exit_is_conservative_subset_of_exact_frozen_exit():
+    config = etoro5_research_config()
     planner = _planner(config)
     inventory = replace(
         _inventory(),
@@ -108,7 +108,7 @@ def test_equity_independent_exit_is_a_conservative_subset_of_exact_frozen_exit()
         )
         assert len(exact.intents) == 1
         exact_intent = exact.intents[0]
-        # Exposure has a non-positive coefficient in the frozen policy. The
+        # Exposure has a non-positive coefficient in frozen ETORO5. The
         # ratio=0 proof threshold is therefore the maximum possible threshold,
         # and its SELL limit can only be equal or more conservative.
         assert proof_intent.limit_price >= exact_intent.limit_price
@@ -117,3 +117,24 @@ def test_equity_independent_exit_is_a_conservative_subset_of_exact_frozen_exit()
             == exact_intent.metadata["close_fraction_of_units"]
             == config.strategy.close_qty_pct
         )
+
+
+def test_equity_independent_exit_fails_closed_if_monotonicity_invariant_breaks():
+    config = etoro5_research_config()
+    config = replace(
+        config,
+        strategy=replace(config.strategy, close_threshold_exposure_weight=0.0001),
+    )
+    planner = _planner(config)
+    inventory = replace(
+        _inventory(),
+        trailing_max_since_open=110.0,
+        trailing_min_since_max=100.0,
+    )
+
+    assert not planner.equity_independent_exit_supported()
+    decision = planner.plan_existing_inventory_without_equity(
+        market=_market(),
+        inventory=inventory,
+    )
+    assert not decision.intents
