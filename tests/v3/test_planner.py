@@ -77,3 +77,43 @@ def test_recoverability_cannot_grant_reentry_after_max_fill_cap():
     )
     assert not batch.intents
     assert any(decision.reason.value == "max_entry_fills" for decision in batch.decisions)
+
+
+def test_equity_independent_exit_is_a_conservative_subset_of_exact_frozen_exit():
+    config = rr5_research_config()
+    planner = _planner(config)
+    inventory = replace(
+        _inventory(),
+        trailing_max_since_open=110.0,
+        trailing_min_since_max=100.0,
+    )
+    market = _market()
+
+    proof = planner.plan_existing_inventory_without_equity(
+        market=market,
+        inventory=inventory,
+    )
+    assert len(proof.intents) == 1
+    proof_intent = proof.intents[0]
+    assert proof_intent.reduce_only
+    assert proof_intent.metadata["equity_independent_reduce_only"] is True
+    assert proof_intent.metadata["equity_reference_used"] is False
+    assert proof_intent.metadata["exposure_ratio_bound"] == 0.0
+
+    for equity in (1_000.0, 10_000.0, 100_000.0, 1_000_000_000.0):
+        exact = planner._exit(
+            market,
+            PortfolioState(equity=equity, inventories=(inventory,)),
+            inventory,
+        )
+        assert len(exact.intents) == 1
+        exact_intent = exact.intents[0]
+        # Exposure has a non-positive coefficient in the frozen policy. The
+        # ratio=0 proof threshold is therefore the maximum possible threshold,
+        # and its SELL limit can only be equal or more conservative.
+        assert proof_intent.limit_price >= exact_intent.limit_price
+        assert (
+            proof_intent.metadata["close_fraction_of_units"]
+            == exact_intent.metadata["close_fraction_of_units"]
+            == config.strategy.close_qty_pct
+        )
