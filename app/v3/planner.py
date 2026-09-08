@@ -1,5 +1,6 @@
 from __future__ import annotations
 import hashlib
+from dataclasses import replace
 from datetime import timedelta
 from app.v3.models import *
 
@@ -31,6 +32,22 @@ class InventoryPlanner:
         close=self._exit(market,portfolio,inv)
         reentry=self._reentry(market,portfolio,inv) if allow_new_risk else DecisionBatch()
         return close.extend(reentry)
+    def equity_independent_exit_supported(self):
+        # With a non-positive exposure coefficient, ratio=0 is the maximum close
+        # threshold over every positive-equity portfolio. An exit proven at that
+        # bound is therefore also an exit under the frozen exact geometry; its
+        # limit is never looser than the exact limit.
+        return self.config.strategy.close_threshold_exposure_weight<=0
+    def plan_existing_inventory_without_equity(self,*,market,inventory):
+        if not market.quality_ok:return self._decision(market,DecisionReason.MARKET_DATA_INVALID)
+        if inventory is None or not self.equity_independent_exit_supported():return DecisionBatch()
+        # Reuse the frozen _exit implementation unchanged. Infinite equity is only
+        # a mathematical device for exposure/equity -> 0; it is never persisted,
+        # reported as broker equity or allowed to authorize BUY/reentry.
+        bound_portfolio=PortfolioState(equity=float('inf'),inventories=(inventory,))
+        decision=self._exit(market,bound_portfolio,inventory)
+        intents=tuple(replace(intent,metadata={**intent.metadata,'equity_independent_reduce_only':True,'equity_reference_used':False,'exposure_ratio_bound':0.0}) for intent in decision.intents)
+        return DecisionBatch(intents,decision.decisions)
     def _exp_ratio(self,i,p):
         # Point-M/Passivbot dynamic spacing uses its effective wallet-exposure
         # limit. Goblin hard safety caps are deliberately independent so tightening

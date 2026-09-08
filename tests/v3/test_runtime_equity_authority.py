@@ -3,6 +3,7 @@ from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
+import requests
 
 from app.brokers.etoro.account_equity_mapper import ACCOUNT_EQUITY_SOURCE
 from app.config.settings import Settings
@@ -58,10 +59,10 @@ def trailing_inventory(runtime):
     return inv
 
 
-def decision_batch():
-    feature = replace(_feature("AAPL"), ema_readiness=1.0)
+def decision_batch(*, feature=None, bid=105, quality=True):
+    feature = replace(feature or _feature("AAPL"), ema_readiness=1.0)
     return V3DecisionWindowBatch(feature.asof, ("AAPL",), ("AAPL",), (), "all_symbols_completed",
-                                {"AAPL": feature}, {"AAPL": _snapshot("AAPL", 105)}, {"AAPL": True})
+                                {"AAPL": feature}, {"AAPL": _snapshot("AAPL", bid)}, {"AAPL": quality})
 
 
 def test_restored_equity_is_exit_only_with_identical_exit_math(tmp_path, monkeypatch):
@@ -82,6 +83,7 @@ def test_restored_equity_is_exit_only_with_identical_exit_math(tmp_path, monkeyp
     assert expected.intents[0].metadata["close_fraction_of_units"] == 0.84
     authority = runtime._heartbeat_metrics()
     assert not authority["v3_new_risk_allowed"]
+    assert authority["reduce_only_planning_mode"] == "equity_reference"
     assert "current_run_equity_available" in authority["new_risk_blockers"]["AAPL"]
 
 
@@ -94,6 +96,26 @@ def test_flat_buy_needs_current_run_equity(tmp_path):
     runtime._process_decision_window(decision_batch())
     assert runtime.intent_book.snapshot()[0].side == "BUY"
     assert runtime._operational_entry_allowed("AAPL")
+
+
+def test_losing_equity_reference_purges_stale_new_risk_before_recovery(tmp_path):
+    runtime = runtime_for_test(tmp_path)
+    runtime._current_run_equity = runtime._exit_planning_equity = 100_000
+    runtime._process_decision_window(decision_batch())
+    before = runtime.intent_book.snapshot()
+    assert len(before) == 1
+    assert before[0].side == "BUY"
+    assert not before[0].reduce_only
+
+    runtime._current_run_equity = None
+    runtime._exit_planning_equity = None
+    runtime._process_decision_window(decision_batch())
+    assert not runtime.intent_book.snapshot()
+
+    # Equity recovery itself must not resurrect the stale BUY. New risk may only
+    # return after a subsequent decision window recomputes a fresh intent.
+    runtime._current_run_equity = runtime._exit_planning_equity = 100_000
+    assert not runtime.intent_book.snapshot()
 
 
 @pytest.mark.parametrize("blocker", ["executor", "cutoff", "equity"])
@@ -116,19 +138,118 @@ def test_new_risk_blockers_do_not_suppress_trailing_reduce_only(tmp_path, blocke
     assert all(intent.reduce_only for intent in runtime.intent_book.snapshot())
 
 
-def test_no_equity_reference_retains_protection_and_logs_blocker_once(tmp_path):
+def test_no_equity_reference_can_create_proven_reduce_only_exit(tmp_path):
+    runtime = runtime_for_test(tmp_path)
+    trailing_inventory(runtime)
+
+    runtime._process_decision_window(decision_batch())
+
+    intents = runtime.intent_book.snapshot()
+    assert len(intents) == 1
+    assert intents[0].reduce_only
+    assert intents[0].side == "SELL"
+    assert intents[0].metadata["equity_independent_reduce_only"] is True
+    assert intents[0].metadata["equity_reference_used"] is False
+    assert runtime.metrics["decision_windows"] == 1
+    assert runtime.metrics["equity_independent_exit_windows"] == 1
+
+    authority = runtime._heartbeat_metrics()
+    assert not authority["v3_new_risk_allowed"]
+    assert authority["reduce_only_planning_mode"] == "equity_independent_proof"
+    assert authority["reduce_only_planning_blocker"] is None
+
+    unavailable = [
+        payload
+        for name, payload in runtime.trade_journal.events
+        if name == "v3_equity_reference_unavailable"
+    ]
+    assert len(unavailable) == 1
+    assert unavailable[0]["reason"] == (
+        "new_risk_blocked_reduce_only_equity_independent_proof"
+    )
+
+
+def test_no_equity_reference_recomputes_existing_reduce_only_on_authoritative_window(tmp_path):
+    runtime = runtime_for_test(tmp_path)
+    runtime._exit_planning_equity = 100_000
+    trailing_inventory(runtime)
+    runtime._process_decision_window(decision_batch())
+    exact = runtime.intent_book.snapshot()
+    assert len(exact) == 1
+    assert "equity_independent_reduce_only" not in exact[0].metadata
+
+    runtime._exit_planning_equity = None
+    runtime._process_decision_window(decision_batch(feature=_feature("AAPL", minute=1)))
+
+    proof = runtime.intent_book.snapshot()
+    assert len(proof) == 1
+    assert proof[0].reduce_only
+    assert proof[0].metadata["equity_independent_reduce_only"] is True
+    assert proof[0].created_at > exact[0].created_at
+
+
+def test_no_equity_reference_clears_stale_reduce_only_when_new_proof_is_false(tmp_path):
+    runtime = runtime_for_test(tmp_path)
+    runtime._exit_planning_equity = 100_000
+    trailing_inventory(runtime)
+    runtime._process_decision_window(decision_batch())
+    assert runtime.intent_book.snapshot()
+
+    runtime._exit_planning_equity = None
+    high_volatility = replace(
+        _feature("AAPL", minute=1),
+        volatility_1m=0.20,
+    )
+    runtime._process_decision_window(decision_batch(feature=high_volatility))
+
+    assert not runtime.intent_book.snapshot()
+
+
+def test_no_equity_reference_retains_existing_reduce_only_when_market_invalid(tmp_path):
     runtime = runtime_for_test(tmp_path)
     runtime._exit_planning_equity = 100_000
     trailing_inventory(runtime)
     runtime._process_decision_window(decision_batch())
     before = runtime.intent_book.snapshot()
+    assert before
+
     runtime._exit_planning_equity = None
-    for _ in range(3):
-        runtime._process_decision_window(decision_batch())
+    runtime._process_decision_window(
+        decision_batch(feature=_feature("AAPL", minute=1), quality=False)
+    )
+
     assert runtime.intent_book.snapshot() == before
-    blocked = [payload for name, payload in runtime.trade_journal.events if name == "v3_decision_window_blocked"]
-    assert len(blocked) == 1
-    assert blocked[0]["reason"] == "reduce_only_planning_blocked_no_equity_reference"
+
+
+def test_equity_failure_records_http_status_without_response_body(tmp_path):
+    runtime = runtime_for_test(tmp_path)
+    response = requests.Response()
+    response.status_code = 404
+    error = requests.HTTPError("not found", response=response)
+    completions = [
+        BrokerTaskCompletion(
+            "equity",
+            "v3_account_equity",
+            BrokerTaskLane.STANDARD,
+            None,
+            None,
+            error,
+        )
+    ]
+    runtime.maintenance_runner = SimpleNamespace(drain=lambda: list(completions))
+
+    runtime._drain_broker_tasks()
+
+    assert runtime.metrics["equity_last_error_type"] == "HTTPError"
+    assert runtime.metrics["equity_last_error_http_status"] == 404
+    events = [
+        payload
+        for name, payload in runtime.trade_journal.events
+        if name == "v3_account_equity_error"
+    ]
+    assert len(events) == 1
+    assert events[0]["http_status"] == 404
+    assert "not found" not in str(events[0])
 
 
 def test_equity_failure_metrics_are_incident_scoped_and_recovery_persists(tmp_path):
