@@ -842,16 +842,12 @@ class GoblinV3Runtime:
         if not self.planner.equity_independent_exit_supported():
             return
 
-        existing_reduce_symbols = {
-            intent.symbol
-            for intent in self.intent_book.snapshot()
-            if intent.reduce_only
-        }
         for inventory in self._active_inventories():
-            if inventory.symbol in existing_reduce_symbols:
-                continue
             market = market_states.get(inventory.symbol)
             if market is None or not market.quality_ok:
+                # Without an authoritative strategy state, preserve the last
+                # known reduce-only protection rather than replacing it from
+                # degraded or missing data.
                 self._retain_reduce_only({inventory.symbol})
                 self._decision_reason_counts[
                     DecisionReason.MARKET_DATA_INVALID.value
@@ -862,8 +858,11 @@ class GoblinV3Runtime:
                 inventory=inventory,
             )
             intents = tuple(intent for intent in decision.intents if intent.reduce_only)
-            if not intents:
-                continue
+            # Resting intents are one-candle strategy objects. A fresh,
+            # authoritative no-equity proof therefore replaces the prior exact
+            # or proof intent even when the new result is empty. This prevents a
+            # stale SELL from surviving a later candle that no longer proves an
+            # exit under the frozen geometry.
             self.intent_book.replace_symbol(inventory.symbol, intents)
             self.metrics["intents_planned"] += len(intents)
             self._journal_decision(
