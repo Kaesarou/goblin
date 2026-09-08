@@ -18,7 +18,7 @@ def build_client(broker: str) -> EtoroClient:
     ("broker", "expected_path"),
     [
         ("etoro_demo", "/api/v1/trading/info/demo/aggregate-portfolio"),
-        ("etoro_real", "/api/v1/trading/info/aggregate-portfolio"),
+        ("etoro_live", "/api/v1/trading/info/aggregate-portfolio"),
     ],
 )
 def test_etoro_client_get_account_equity_uses_environment_aggregate_portfolio(
