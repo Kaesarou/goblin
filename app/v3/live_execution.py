@@ -1598,6 +1598,13 @@ class V3BrokerExecutor:
                 "stale_close_confirmation",
             }:
                 self.halted_reason = "broker_quantity_reduction_unattributed"
+        elif self.halted_reason == "broker_quantity_reduction_unattributed":
+            # A modern quantity reduction can be re-attributed later from a
+            # definitive close execution (for example after correcting broker
+            # precision or fill-identity handling). Once the authoritative set is
+            # empty, clear only this obsolete halt; the stale-refresh below will
+            # immediately reinstate any independent unresolved mutation halt.
+            self.halted_reason = None
         elif (
             self.halted_reason == "broker_quantity_reduction_pending_economic_fill"
             and not self._pending_economic_fill_action_ids
