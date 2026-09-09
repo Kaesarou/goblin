@@ -10,6 +10,7 @@ import requests
 
 from app.brokers.base import (
     BrokerCloseExecution,
+    ClosePositionRejectedError,
     ClosePositionSubmissionUnknownError,
     OpenPositionResult,
 )
@@ -32,7 +33,10 @@ ECONOMICS_CONFIRMATION_BACKOFF_MAX_SECONDS = 3600.0
 CONFIRMATION_429_MIN_SECONDS = 60.0
 CONFIRMATION_STALE_HALT_SECONDS = 15.0 * 60.0
 BROKER_RECONCILIATION_INTERVAL_SECONDS = 60.0
-BROKER_UNIT_ABS_TOLERANCE = 1e-8
+# eToro position/close quantities are observed at six decimal places. One broker
+# quantum is strict enough to reject economically meaningful mismatches while not
+# turning harmless broker rounding into an unattributed-reconciliation halt.
+BROKER_UNIT_ABS_TOLERANCE = 1e-6
 BROKER_UNIT_REL_TOLERANCE = 1e-6
 BROKER_RECONCILIATION_ATTRIBUTION_REL_TOLERANCE = 0.01
 BROKER_RECONCILIATION_ATTRIBUTION_ABS_TOLERANCE = 1e-4
@@ -162,6 +166,7 @@ class V3BrokerExecutor:
         self._mutation_confirmation_attempts = 0
         self._economics_confirmation_attempts = 0
         self._confirmation_errors = 0
+        self._confirmation_rejections = 0
         self._confirmation_429 = 0
         self._confirmation_timeouts = 0
         self._confirmation_5xx = 0
@@ -261,22 +266,75 @@ class V3BrokerExecutor:
             else intent.notional / max(float(snapshot.bid), 1e-12)
         )
         strategy_target_units = min(inventory.total_units, strategy_target_units)
-        remaining_fraction = max(
-            0.0,
-            (inventory.total_units - strategy_target_units)
-            / max(inventory.total_units, 1e-12),
-        )
-        projected_remaining_notional = max(
-            0.0,
-            inventory.total_notional * remaining_fraction,
-        )
-        dust_collapse = bool(
+        strategy_plan = self.allocator.plan(inventory, strategy_target_units)
+        if not strategy_plan.requests:
+            return False
+
+        leg_by_position = {
+            leg.position_id: leg
+            for leg in inventory.broker_legs
+            if leg.units > 0
+        }
+        projected_leg_remaining: dict[str, float] = {}
+        for request in strategy_plan.requests:
+            leg = leg_by_position[request.position_id]
+            remaining_units = max(0.0, float(leg.units) - float(request.units))
+            if remaining_units <= BROKER_UNIT_ABS_TOLERANCE:
+                projected_leg_remaining[request.position_id] = 0.0
+                continue
+            entry_account_per_unit = (
+                float(leg.account_notional) / max(float(leg.units), 1e-12)
+                if leg.account_notional is not None
+                else float(leg.entry_price)
+            )
+            current_account_per_unit = entry_account_per_unit
+            if float(leg.entry_price) > 0:
+                current_account_per_unit *= (
+                    float(snapshot.bid) / float(leg.entry_price)
+                )
+            projected_leg_remaining[request.position_id] = max(
+                0.0,
+                remaining_units * current_account_per_unit,
+            )
+
+        projected_remaining_notional = sum(projected_leg_remaining.values())
+        aggregate_dust = bool(
             intent.purpose == IntentPurpose.PROFIT_EXIT
             and strategy_target_units < inventory.total_units
             and 0.0 < projected_remaining_notional < POINT_M_DUST_NOTIONAL_USD
         )
-        target_units = inventory.total_units if dust_collapse else strategy_target_units
-        plan = self.allocator.plan(inventory, target_units)
+        broker_leg_dust_positions = sorted(
+            request.position_id
+            for request in strategy_plan.requests
+            if not request.full_close
+            and 0.0 < projected_leg_remaining[request.position_id]
+            < POINT_M_DUST_NOTIONAL_USD
+        )
+        broker_leg_dust = bool(
+            intent.purpose == IntentPurpose.PROFIT_EXIT
+            and strategy_target_units < inventory.total_units
+            and broker_leg_dust_positions
+        )
+        dust_collapse = aggregate_dust or broker_leg_dust
+        if aggregate_dust and broker_leg_dust:
+            dust_collapse_reason = "inventory_and_broker_leg_below_minimum"
+        elif broker_leg_dust:
+            dust_collapse_reason = "broker_leg_below_minimum"
+        elif aggregate_dust:
+            dust_collapse_reason = "inventory_below_minimum"
+        else:
+            dust_collapse_reason = None
+
+        # eToro enforces minimum remaining position equity per physical broker leg,
+        # while Point-M reasons over the aggregate inventory. If an 84% pro-rata
+        # close would leave even one broker leg below the 10 USD safety floor, do
+        # not redistribute the residual and break pro-rata geometry: collapse the
+        # whole inventory to a deterministic 100% close instead.
+        plan = (
+            self.allocator.plan(inventory, inventory.total_units)
+            if dust_collapse
+            else strategy_plan
+        )
         if not plan.requests:
             return False
 
@@ -313,8 +371,13 @@ class V3BrokerExecutor:
                     "strategy_close_fraction": fraction,
                     "execution_close_fraction": execution_fraction,
                     "projected_remaining_notional_usd": projected_remaining_notional,
+                    "projected_broker_leg_remaining_notional_usd": (
+                        projected_leg_remaining.get(request.position_id)
+                    ),
+                    "broker_leg_dust_positions": broker_leg_dust_positions,
                     "dust_threshold_usd": POINT_M_DUST_NOTIONAL_USD,
                     "dust_collapse": dust_collapse,
+                    "dust_collapse_reason": dust_collapse_reason,
                 },
             )
             context = _CloseContext(
@@ -482,7 +545,12 @@ class V3BrokerExecutor:
             elif event.event_type == "BROKER_RECONCILIATION_ACKNOWLEDGED":
                 self._unattributed_reconciled_position_ids.discard(str(payload["position_id"]))
                 resolved.update(str(value) for value in payload["abandoned_action_ids"])
-            elif event.event_type in {"EXIT_FILLED", "EXIT_ECONOMICS_CONFIRMED", "CLOSE_SUBMISSION_FAILED"} and action_id:
+            elif event.event_type in {
+                "EXIT_FILLED",
+                "EXIT_ECONOMICS_CONFIRMED",
+                "CLOSE_SUBMISSION_FAILED",
+                "CLOSE_EXECUTION_REJECTED",
+            } and action_id:
                 resolved.add(action_id)
                 if event.event_type == "EXIT_ECONOMICS_CONFIRMED" and not payload.get("attribution_confident", True):
                     self._unattributed_reconciled_position_ids.add(str(payload["position_id"]))
@@ -873,7 +941,6 @@ class V3BrokerExecutor:
             if self._unattributed_reconciled_position_ids:
                 self.halted_reason = "broker_quantity_reduction_unattributed"
 
-
     def confirmation_metrics(self) -> dict[str, object]:
         now = _utc_now()
         oldest_seconds = 0.0
@@ -915,6 +982,7 @@ class V3BrokerExecutor:
             "stale_mutation_count": sum(p.mutation_active and (now - _as_utc(p.accepted_at)).total_seconds() >= CONFIRMATION_STALE_HALT_SECONDS for p in self._pending_close_confirmations.values()),
             "stale_economics_only_count": sum(not p.mutation_active and (now - _as_utc(p.accepted_at)).total_seconds() >= CONFIRMATION_STALE_HALT_SECONDS for p in self._pending_close_confirmations.values()),
             "errors": self._confirmation_errors,
+            "terminal_rejections": self._confirmation_rejections,
             "http_429": self._confirmation_429,
             "timeouts": self._confirmation_timeouts,
             "http_5xx": self._confirmation_5xx,
@@ -1199,6 +1267,31 @@ class V3BrokerExecutor:
         if action_id in self._resolved_close_action_ids:
             return []
         if completion.error is not None:
+            if isinstance(completion.error, ClosePositionRejectedError):
+                self._confirmation_rejections += 1
+                broker_response = completion.error.broker_response or {}
+                self._append(
+                    event_type="CLOSE_EXECUTION_REJECTED",
+                    inventory_id=pending.context.inventory_id,
+                    event_id=f"{action_id}:close-execution-rejected:{pending.close_order_id}",
+                    payload={
+                        "action_id": action_id,
+                        "intent_id": pending.context.intent.intent_id,
+                        "position_id": pending.context.position_id,
+                        "close_order_id": pending.close_order_id,
+                        "requested_units": pending.context.requested_units,
+                        "pre_close_units": pending.context.pre_close_units,
+                        "full_close": pending.context.full_close,
+                        "error": str(completion.error),
+                        "error_type": type(completion.error).__name__,
+                        "broker_status_id": broker_response.get("statusID"),
+                        "broker_error_code": broker_response.get("errorCode"),
+                        "broker_error_message": broker_response.get("errorMessage"),
+                    },
+                )
+                self._finalize_rejected_close_action(pending.context)
+                return [pending.context.intent.intent_id]
+
             self._confirmation_errors += 1
             status = _http_status(completion.error)
             pending.last_error_type = type(completion.error).__name__
@@ -1275,6 +1368,7 @@ class V3BrokerExecutor:
             filled_at=execution.executed_at or _utc_now(),
             close_order_id=pending.close_order_id,
             executed_units=executed_units,
+            broker_execution_position_id=execution.broker_execution_position_id,
         )
         if not confirmed:
             self._defer_confirmation(pending, result_state="invalid_execution")
@@ -1288,6 +1382,7 @@ class V3BrokerExecutor:
         filled_at: datetime,
         close_order_id: str,
         executed_units: float,
+        broker_execution_position_id: str | None = None,
     ) -> bool:
         if context.action_id in self._resolved_close_action_ids:
             return False
@@ -1296,10 +1391,33 @@ class V3BrokerExecutor:
             return False
         reconciled = self._reconciled_close_quantities.get(context.action_id)
         if reconciled is not None:
-            compare = _migration_units_close if context.pre_close_units is None else _units_close
-            attribution_confident = reconciled.attribution_confident and compare(
-                executed_units, reconciled.reconciled_book_units,
-            )
+            if context.pre_close_units is None:
+                attribution_confident = (
+                    reconciled.attribution_confident
+                    and _migration_units_close(
+                        executed_units,
+                        reconciled.reconciled_book_units,
+                    )
+                )
+            else:
+                baseline_matches = _units_close(
+                    context.pre_close_units,
+                    reconciled.reconciled_book_units + reconciled.broker_units,
+                )
+                requested_matches = _units_close(
+                    reconciled.reconciled_book_units,
+                    context.requested_units,
+                )
+                execution_matches = _units_close(
+                    executed_units,
+                    reconciled.reconciled_book_units,
+                )
+                # Re-evaluate modern attribution from authoritative quantities
+                # instead of permanently trusting a historical false flag caused
+                # by a tighter-than-broker rounding tolerance.
+                attribution_confident = (
+                    baseline_matches and requested_matches and execution_matches
+                )
             if not attribution_confident:
                 self._unattributed_reconciled_position_ids.add(context.position_id)
                 if self.halted_reason in {
@@ -1308,6 +1426,8 @@ class V3BrokerExecutor:
                     "stale_close_confirmation",
                 }:
                     self.halted_reason = "broker_quantity_reduction_unattributed"
+            else:
+                self._unattributed_reconciled_position_ids.discard(context.position_id)
             confirmed_at = _utc_now()
             inserted = self._append(
                 event_type="EXIT_ECONOMICS_CONFIRMED",
@@ -1318,6 +1438,7 @@ class V3BrokerExecutor:
                     "intent_id": context.intent.intent_id,
                     "symbol": context.intent.symbol,
                     "position_id": context.position_id,
+                    "broker_execution_position_id": broker_execution_position_id,
                     "units": executed_units,
                     "requested_units": context.requested_units,
                     "pre_close_units": context.pre_close_units,
@@ -1367,7 +1488,10 @@ class V3BrokerExecutor:
         if leg is None:
             self.halted_reason = "close_fill_without_broker_leg"
             return False
-        if executed_units <= 0 or executed_units > leg.units + 1e-9:
+        if executed_units <= 0 or (
+            executed_units > leg.units
+            and not _units_close(executed_units, leg.units)
+        ):
             self.halted_reason = "close_execution_units_invalid"
             self._append(
                 event_type="CLOSE_EXECUTION_INVALID",
@@ -1384,6 +1508,7 @@ class V3BrokerExecutor:
             )
             return False
 
+        units_to_apply = min(executed_units, float(leg.units))
         confirmed_at = _utc_now()
         inserted = self._append(
             event_type="EXIT_FILLED",
@@ -1394,7 +1519,9 @@ class V3BrokerExecutor:
                 "intent_id": context.intent.intent_id,
                 "symbol": context.intent.symbol,
                 "position_id": context.position_id,
+                "broker_execution_position_id": broker_execution_position_id,
                 "units": executed_units,
+                "book_units_applied": units_to_apply,
                 "requested_units": context.requested_units,
                 "pre_close_units": context.pre_close_units,
                 "price": exit_price,
@@ -1410,7 +1537,7 @@ class V3BrokerExecutor:
         updated = self.book.apply_exit_fill(
             position_id=context.position_id,
             exit_price=exit_price,
-            units=executed_units,
+            units=units_to_apply,
             fee=0.0,
             filled_at=confirmed_at,
         )
@@ -1447,6 +1574,15 @@ class V3BrokerExecutor:
             next_attempt_at=pending.next_attempt_at, last_error_type=pending.last_error_type,
             last_http_status=pending.last_http_status, last_result_state=result_state,
         ))
+
+    def _finalize_rejected_close_action(self, context: _CloseContext) -> None:
+        self._pending_close_confirmations.pop(context.action_id, None)
+        self._release_close_mutation(context)
+        self._resolved_close_action_ids.add(context.action_id)
+        self.runtime_state_store.delete_close_retry(context.action_id)
+        self._pending_economic_fill_action_ids.discard(context.action_id)
+        self._reconciled_close_quantities.pop(context.action_id, None)
+        self._refresh_stale_confirmation_halt(_utc_now())
 
     def _finalize_confirmed_close_action(self, context: _CloseContext) -> None:
         self._pending_close_confirmations.pop(context.action_id, None)
