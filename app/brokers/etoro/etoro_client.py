@@ -94,7 +94,7 @@ class EtoroClient(BrokerClient):
         self.settings = settings
         self.env = broker_environment_from_name(settings.broker)
         self.position_instruments: dict[str, int] = {}
-        self.instrument_ids_by_symbol: dict[int, str] = {}
+        self.instrument_ids_by_symbol: dict[str, int] = {}
         self.symbol_by_instrument_id: dict[int, str] = {}
         self._get_rate_governor = get_rate_governor or EtoroGetRateGovernor()
         self._order_lookup_get_rate_governor = order_lookup_get_rate_governor or EtoroGetRateGovernor()
