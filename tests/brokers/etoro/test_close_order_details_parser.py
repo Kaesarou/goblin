@@ -28,6 +28,7 @@ def test_extract_close_execution_uses_matching_broker_position_fill():
 
     assert execution is not None
     assert execution.position_id == "position-1"
+    assert execution.broker_execution_position_id == "position-1"
     assert execution.close_order_id == "close-1"
     assert execution.executed_exit_price == 99.42
     assert execution.executed_at == datetime(
@@ -46,7 +47,37 @@ def test_extract_close_execution_uses_matching_broker_position_fill():
     assert execution.broker_response is payload
 
 
-def test_extract_close_execution_does_not_fabricate_missing_or_invalid_fill():
+def test_extract_partial_close_execution_keeps_original_leg_and_broker_fill_id():
+    payload = {
+        "orderID": 380196350,
+        "statusID": 3,
+        "errorCode": 0,
+        "positions": [
+            {
+                "positionID": 3597134264,
+                "occurred": "2026-09-09T13:31:10.273Z",
+                "rate": 999.47,
+                "units": 0.063388,
+                "conversionRate": 1.0,
+                "amount": 57.56,
+            }
+        ],
+    }
+
+    execution = extract_close_execution(
+        payload,
+        close_order_id="380196350",
+        position_id="3590324772",
+    )
+
+    assert execution is not None
+    assert execution.position_id == "3590324772"
+    assert execution.broker_execution_position_id == "3597134264"
+    assert execution.units == 0.063388
+    assert execution.executed_exit_price == 999.47
+
+
+def test_extract_close_execution_does_not_fabricate_missing_invalid_or_ambiguous_fill():
     assert (
         extract_close_execution(
             {"status": "accepted"},
@@ -65,7 +96,12 @@ def test_extract_close_execution_does_not_fabricate_missing_or_invalid_fill():
     )
     assert (
         extract_close_execution(
-            {"positions": [{"positionID": "other", "rate": 99.42}]},
+            {
+                "positions": [
+                    {"positionID": "other-1", "rate": 99.42},
+                    {"positionID": "other-2", "rate": 99.43},
+                ]
+            },
             close_order_id="close-1",
             position_id="position-1",
         )
