@@ -368,4 +368,4 @@ async def _receive_authentication_response(
         except json.JSONDecodeError:
             continue
         if isinstance(payload, dict) and payload.get('id') == request_id:
-            return text
+            return json.dumps(payload, separators=(',', ':'))
