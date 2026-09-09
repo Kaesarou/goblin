@@ -65,6 +65,7 @@ class EtoroWebSocketMarketDataFeed(LiveMarketDataFeed):
         self._events = 0
         self._null_frames = 0
         self._global_silences = 0
+        self._queue_overflows = 0
         self._last_error: str | None = None
 
     @property
@@ -149,6 +150,7 @@ class EtoroWebSocketMarketDataFeed(LiveMarketDataFeed):
             'events': self._events,
             'null_frames': self._null_frames,
             'global_silences': self._global_silences,
+            'queue_overflows': self._queue_overflows,
             'queue_size': self._queue.qsize(),
             'last_error': self._last_error,
             'fatal_error': str(self._fatal_error) if self._fatal_error else None,
@@ -215,6 +217,11 @@ class EtoroWebSocketMarketDataFeed(LiveMarketDataFeed):
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                # A queue overflow means the consumer temporarily fell behind. It
+                # invalidates continuity of the current connection but does not make
+                # the feed permanently unusable. Reconnect under the existing
+                # backoff so coordinator freshness can fail closed during the gap,
+                # instead of killing the entire V3 runtime.
                 self._last_error = str(exc)
                 if self._stop_event.is_set():
                     return
@@ -302,11 +309,10 @@ class EtoroWebSocketMarketDataFeed(LiveMarketDataFeed):
             self._queue.put(event, timeout=1.0)
             self._events += 1
         except queue.Full as exc:
-            self._fatal_error = RuntimeError(
-                'Market-data queue overflow'
-            )
-            self._stop_event.set()
-            raise self._fatal_error from exc
+            self._queue_overflows += 1
+            # Let _run() reconnect. Do not set _fatal_error or _stop_event here:
+            # doing so made one transient backlog a process-level fatal error.
+            raise RuntimeError('Market-data queue overflow') from exc
 
 
 def _normalize_symbols(symbols: list[str]) -> tuple[str, ...]:
@@ -362,4 +368,4 @@ async def _receive_authentication_response(
         except json.JSONDecodeError:
             continue
         if isinstance(payload, dict) and payload.get('id') == request_id:
-            return json.dumps(payload, separators=(',', ':'))
+            return text
