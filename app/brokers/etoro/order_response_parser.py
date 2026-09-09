@@ -181,6 +181,14 @@ def is_order_rejected(payload: dict) -> bool:
     if error_code not in (None, 0):
         return True
 
+    # eToro close-order lookup uses a top-level statusID. Prospectively observed
+    # terminal failures return statusID=4 with positions=[]; treating those as
+    # merely "execution unavailable" leaves the broker leg mutation locked
+    # forever. Status 4 is therefore terminal even when errorCode is absent/zero.
+    top_level_status_id = extract_optional_int(payload, CLOSE_STATUS_ID_KEYS)
+    if top_level_status_id == 4:
+        return True
+
     status = payload.get('status')
     if not isinstance(status, dict):
         return False
@@ -190,7 +198,9 @@ def is_order_rejected(payload: dict) -> bool:
         return True
 
     status_name = str(status.get('name', '')).lower()
-    return status_name in REJECTED_STATUS_NAMES
+    if status_name in REJECTED_STATUS_NAMES:
+        return True
+    return status.get('id') == 4
 
 
 def is_close_response_accepted(payload: dict, position_id: str) -> bool:

@@ -34,7 +34,7 @@ def test_failed_run_checkpoints_qc_manifest_and_heartbeat_share_authority(tmp_pa
     )
     assert manifest["schema_version"] == 20
     contracts = manifest["runtime"]["contracts"]
-    assert contracts["v3_runtime"] == "inventory_runtime_v3_7"
+    assert contracts["v3_runtime"] == "inventory_runtime_v3_8"
     assert contracts["v3_runtime_state"] == "v3_runtime_state_v1"
     assert contracts["broker_equity_reference"] == "v3_broker_equity_reference_v1"
     assert contracts["close_retry_scheduler"] == "v3_close_retry_scheduler_v1"

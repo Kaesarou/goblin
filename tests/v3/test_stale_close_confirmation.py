@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from app.brokers.base import ClosePositionRejectedError
 from app.runtime.broker_task_runner import BrokerTaskCompletion, BrokerTaskLane
 from app.v3.book import InventoryBook
 from app.v3.live_execution import (
@@ -158,6 +159,64 @@ def test_confirmed_fill_clears_stale_halt_when_no_other_uncertainty_remains(tmp_
     assert executor.halted_reason is None
     assert executor.new_risk_allowed
     assert executor.book.active_for_symbol("AAPL").total_units == pytest.approx(0.16)
+
+
+def test_terminal_rejected_close_releases_mutation_without_changing_book(tmp_path):
+    executor, runner = _executor(tmp_path)
+    base = time.monotonic()
+    pending = executor._pending_close_confirmations["close:p1"]
+    pending.next_attempt_monotonic = base
+
+    assert executor.schedule_close_confirmation_checks(
+        monotonic_now=base,
+        utc_now=NOW + timedelta(minutes=16),
+    ) == 1
+    task = runner.tasks[-1]
+    assert task["kind"] == "v3_close_execution_lookup"
+    runner.complete(
+        task,
+        error=ClosePositionRejectedError(
+            position_id="p1",
+            message="minimum remaining position amount",
+            broker_response={
+                "statusID": 4,
+                "errorCode": 776,
+                "errorMessage": "remaining equity under minimum",
+                "positions": [],
+            },
+        ),
+    )
+
+    assert executor.drain() == ("close",)
+    assert executor.book.active_for_symbol("AAPL").total_units == pytest.approx(1.0)
+    assert not executor._pending_close_confirmations
+    assert not executor._active_close_mutations_by_position
+    assert not executor.runtime_state_store.load_close_retries()
+    assert executor.halted_reason is None
+    assert executor.new_risk_allowed
+    assert executor.confirmation_metrics()["terminal_rejections"] == 1
+
+    rejected = [
+        event
+        for event in executor.event_store.events()
+        if event.event_type == "CLOSE_EXECUTION_REJECTED"
+    ]
+    assert len(rejected) == 1
+    assert rejected[0].payload["broker_error_code"] == 776
+
+    # The terminal event must make restart reconstruction deterministic: the old
+    # accepted action is resolved and must never reclaim the position id.
+    restarted = V3BrokerExecutor(
+        broker=Broker(),
+        task_runner=QueueRunner(),
+        event_store=executor.event_store,
+        book=executor.book,
+        strategy_version="INVENTORY_RR5_ETORO5_V1",
+        model_version=None,
+    )
+    restarted.restore_pending_close_confirmations(executor.event_store.events())
+    assert not restarted._pending_close_confirmations
+    assert not restarted._active_close_mutations_by_position
 
 
 def test_incompatible_broker_reduction_supersedes_stale_and_is_not_cleared_by_fill(tmp_path):
