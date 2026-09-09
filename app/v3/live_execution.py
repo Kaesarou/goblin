@@ -552,8 +552,12 @@ class V3BrokerExecutor:
                 "CLOSE_EXECUTION_REJECTED",
             } and action_id:
                 resolved.add(action_id)
-                if event.event_type == "EXIT_ECONOMICS_CONFIRMED" and not payload.get("attribution_confident", True):
-                    self._unattributed_reconciled_position_ids.add(str(payload["position_id"]))
+                if event.event_type == "EXIT_ECONOMICS_CONFIRMED":
+                    position_id = str(payload["position_id"])
+                    if payload.get("attribution_confident", True):
+                        self._unattributed_reconciled_position_ids.discard(position_id)
+                    else:
+                        self._unattributed_reconciled_position_ids.add(position_id)
 
         self._resolved_close_action_ids.update(resolved)
         saved_retries = self.runtime_state_store.load_close_retries()
