@@ -34,7 +34,7 @@ from app.v3.state_store import V3RuntimeStateStore
 
 logger = logging.getLogger(__name__)
 
-V3_RUNTIME_CONTRACT_VERSION = "inventory_runtime_v3_7"
+V3_RUNTIME_CONTRACT_VERSION = "inventory_runtime_v3_8"
 
 _MATERIAL_DECISION_REASONS = frozenset(
     {
@@ -267,6 +267,7 @@ class GoblinV3Runtime:
         self.metrics = {
             "market_snapshots": 0,
             "candles_closed": 0,
+            "candle_replay_skips": 0,
             "decision_windows": 0,
             "decision_windows_incomplete": 0,
             "decision_quotes_outside_bucket": 0,
@@ -612,6 +613,32 @@ class GoblinV3Runtime:
                  "reason": invalid_session or "candle_crosses_session_end"},
             )
             return
+
+        last_processed_opened_at = self.feature_engine.last_opened_at(symbol)
+        if (
+            last_processed_opened_at is not None
+            and _utc(candle.opened_at) <= _utc(last_processed_opened_at)
+        ):
+            # The restart cache is authoritative for causal features. A newly
+            # constructed candle builder can replay the last already-persisted M1
+            # after a process restart; treating that as a fresh feature update used
+            # to crash the runtime with a non-causal-order exception. Skip the
+            # replay before MTF/book/feature mutation and keep an explicit audit
+            # event rather than silently mutating state twice.
+            self.metrics["candle_replay_skips"] += 1
+            self.trade_journal.write(
+                "v3_candle_replay_skipped",
+                {
+                    "symbol": symbol,
+                    "opened_at": candle.opened_at,
+                    "closed_at": candle.closed_at,
+                    "last_processed_opened_at": last_processed_opened_at,
+                    "finalization_source": source,
+                    "reason": "already_processed_feature_state",
+                },
+            )
+            return
+
         self._clear_maintenance_error(
             f"candle_session:{symbol}", "v3_candle_session_recovered", {"symbol": symbol},
         )

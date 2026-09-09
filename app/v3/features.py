@@ -246,3 +246,10 @@ class OnlineFeatureEngine:
         except KeyError as exc:
             raise KeyError(f"No V3 feature state for {symbol}") from exc
         return state.update(candle)
+
+    def last_opened_at(self, symbol: str) -> datetime | None:
+        normalized = symbol.strip().upper()
+        try:
+            return self.states[normalized].last_opened_at
+        except KeyError as exc:
+            raise KeyError(f"No V3 feature state for {normalized}") from exc

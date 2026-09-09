@@ -113,8 +113,14 @@ def parse_websocket_events(
 
         previous_prices = _prices(previous)
         current_prices = _prices(merged)
+        # Timestamp provenance belongs to the current WebSocket message, not to
+        # the reconstructed price state. Reusing an old Date/lastUpdate from the
+        # merged state makes legitimate price PATCHes look permanently stale when
+        # eToro omits a timestamp on the patch. A timestamp-less PATCH therefore
+        # uses received_at / LOCAL_RECEIVE_TIME, while snapshots still use their
+        # broker timestamp when provided.
         source_timestamp = _first_datetime(
-            merged,
+            patch,
             'Date',
             'date',
             'lastUpdate',

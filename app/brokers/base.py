@@ -33,6 +33,11 @@ class BrokerCloseExecution:
     conversion_rate: float | None
     amount: float | None
     broker_response: dict[str, Any]
+    # eToro partial-close lookup can report a broker execution/fill position id
+    # that differs from the original open position id. Keep both identities so
+    # V3 can attribute the mutation to the original broker leg without throwing
+    # away the broker execution provenance.
+    broker_execution_position_id: str | None = None
 
 
 class ClosePositionRejectedError(RuntimeError):

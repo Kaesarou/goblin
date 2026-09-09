@@ -198,6 +198,68 @@ def test_profit_exit_collapses_point_m_dust_to_full_close(tmp_path):
     assert started.payload["full_close"] is True
 
 
+def test_profit_exit_collapses_whole_inventory_when_each_broker_leg_would_be_dust(tmp_path):
+    book = InventoryBook()
+    broker = PaperBrokerClient(equity=100_000)
+    for position_id in ("p1", "p2"):
+        broker.positions[position_id] = {"position_id": position_id, "symbol": "AAPL"}
+    book.apply_entry_fill(
+        inventory_id="inv",
+        symbol="AAPL",
+        position_id="p1",
+        units=0.4,
+        price=100.0,
+        fee=0.0,
+        filled_at=NOW,
+    )
+    book.apply_entry_fill(
+        inventory_id="inv",
+        symbol="AAPL",
+        position_id="p2",
+        units=0.5,
+        price=100.0,
+        fee=0.0,
+        filled_at=NOW,
+    )
+    executor = _executor(tmp_path, broker, book)
+    inventory = book.active_for_symbol("AAPL")
+
+    # The aggregate 16% residual is 14.40 USD and would previously survive the
+    # aggregate dust test, but eToro applies its minimum per physical position:
+    # p1 would retain 6.40 USD and p2 8.00 USD. The execution adapter must close
+    # the whole inventory instead of submitting two doomed 84% partial closes.
+    assert executor.schedule(
+        _close_intent(inventory, 0.84, "leg-dust"),
+        snapshot=_snapshot(),
+    )
+    assert executor.drain() == ("leg-dust", "leg-dust")
+    assert book.active_for_symbol("AAPL") is None
+    assert not broker.is_position_open("p1")
+    assert not broker.is_position_open("p2")
+
+    started = [
+        event
+        for event in executor.event_store.events()
+        if event.event_type == "CLOSE_SUBMISSION_STARTED"
+    ]
+    assert len(started) == 2
+    assert all(event.payload["full_close"] is True for event in started)
+    assert all(event.payload["execution_close_fraction"] == pytest.approx(1.0) for event in started)
+    assert all(event.payload["dust_collapse"] is True for event in started)
+    assert all(
+        event.payload["dust_collapse_reason"] == "broker_leg_below_minimum"
+        for event in started
+    )
+    assert all(
+        event.payload["broker_leg_dust_positions"] == ["p1", "p2"]
+        for event in started
+    )
+    assert all(
+        event.payload["projected_remaining_notional_usd"] == pytest.approx(14.4)
+        for event in started
+    )
+
+
 def test_two_leg_pro_rata_partial_close_preserves_weighted_entry(tmp_path):
     book = InventoryBook()
     broker = PaperBrokerClient(equity=100_000)
