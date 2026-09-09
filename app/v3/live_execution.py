@@ -555,7 +555,16 @@ class V3BrokerExecutor:
                 if event.event_type == "EXIT_ECONOMICS_CONFIRMED":
                     position_id = str(payload["position_id"])
                     if payload.get("attribution_confident", True):
-                        self._unattributed_reconciled_position_ids.discard(position_id)
+                        quantity = quantities.get(action_id)
+                        if (
+                            quantity is not None
+                            and not quantity.attribution_confident
+                            and _units_close(
+                                self._current_leg_units(position_id),
+                                quantity.broker_units,
+                            )
+                        ):
+                            self._unattributed_reconciled_position_ids.discard(position_id)
                     else:
                         self._unattributed_reconciled_position_ids.add(position_id)
 
@@ -1430,7 +1439,17 @@ class V3BrokerExecutor:
                     "stale_close_confirmation",
                 }:
                     self.halted_reason = "broker_quantity_reduction_unattributed"
-            else:
+            elif (
+                not reconciled.attribution_confident
+                and _units_close(
+                    self._current_leg_units(context.position_id),
+                    reconciled.broker_units,
+                )
+            ):
+                # Clear only the historical false attribution represented by this
+                # exact reconciled quantity. If broker exposure has moved again
+                # since that reconciliation, an independent unexplained reduction
+                # still owns the fail-closed halt and must survive this fill.
                 self._unattributed_reconciled_position_ids.discard(context.position_id)
             confirmed_at = _utc_now()
             inserted = self._append(
