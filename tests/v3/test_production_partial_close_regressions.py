@@ -172,3 +172,20 @@ def test_real_mu_rounding_and_fill_id_recover_persisted_false_unattributed_state
     assert economics[0].payload["attribution_confident"] is True
     assert economics[0].payload["broker_execution_position_id"] == "3597134264"
     assert economics[0].payload["units"] == pytest.approx(0.063388)
+
+    # The corrective attribution must survive a second restart. The earlier false
+    # BROKER_QUANTITY_RECONCILED event is historical evidence, while the later
+    # authoritative economics event resolves that action and clears its old halt.
+    restarted = V3BrokerExecutor(
+        broker=_Broker(),
+        task_runner=_Runner(),
+        event_store=store,
+        book=book,
+        strategy_version="INVENTORY_RR5_ETORO5_V1",
+        model_version=None,
+    )
+    restarted.restore_pending_close_confirmations((*events, *store.events()))
+    assert restarted.halted_reason is None
+    assert restarted.confirmation_metrics()["unattributed_reconciliation_count"] == 0
+    assert not restarted._pending_close_confirmations
+    assert not restarted._active_close_mutations_by_position
