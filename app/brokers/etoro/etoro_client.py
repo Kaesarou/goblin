@@ -94,7 +94,7 @@ class EtoroClient(BrokerClient):
         self.settings = settings
         self.env = broker_environment_from_name(settings.broker)
         self.position_instruments: dict[str, int] = {}
-        self.instrument_ids_by_symbol: dict[str, int] = {}
+        self.instrument_ids_by_symbol: dict[int, str] = {}
         self.symbol_by_instrument_id: dict[int, str] = {}
         self._get_rate_governor = get_rate_governor or EtoroGetRateGovernor()
         self._order_lookup_get_rate_governor = order_lookup_get_rate_governor or EtoroGetRateGovernor()
@@ -275,8 +275,21 @@ class EtoroClient(BrokerClient):
     ) -> BrokerCloseExecution | None:
         # The V3 confirmation scheduler owns per-action retry/backoff. The eToro
         # client applies the separate order-lookup user-key budget.
-        payload = self._get_once(close_order_lookup_path(self.env, close_order_id),
-                                 governor=self._order_lookup_governor())
+        payload = self._get_once(
+            close_order_lookup_path(self.env, close_order_id),
+            governor=self._order_lookup_governor(),
+        )
+        if is_order_rejected(payload):
+            raise ClosePositionRejectedError(
+                position_id=position_id,
+                message=(
+                    'eToro close order reached a terminal rejected/failed state: '
+                    f'position_id={position_id}, close_order_id={close_order_id}, '
+                    f'error_code={extract_order_error_code(payload)}, '
+                    f'error_message={extract_order_error_message(payload)}'
+                ),
+                broker_response=payload,
+            )
         return extract_close_execution(
             payload,
             close_order_id=close_order_id,
