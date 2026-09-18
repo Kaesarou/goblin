@@ -17,6 +17,10 @@ class InventoryBook:
     def __init__(self) -> None:
         self._inventories: dict[str, InventoryState] = {}
         self._inventory_by_position_id: dict[str, str] = {}
+        # Historical concurrent fills may have distinct inventory IDs even though
+        # the strategy allows only one aggregate inventory per symbol. Preserve
+        # the raw event IDs; use aliases in the *projection* only.
+        self._legacy_inventory_aliases: dict[str, str] = {}
 
     @classmethod
     def from_events(cls, events: Iterable[InventoryEvent]) -> "InventoryBook":
@@ -26,9 +30,20 @@ class InventoryBook:
                 payload = event.payload
                 units = float(payload["units"])
                 price = float(payload["price"])
+                symbol = str(payload["symbol"])
+                inventory_id = book._legacy_inventory_aliases.get(
+                    event.inventory_id, event.inventory_id
+                )
+                if inventory_id not in book._inventories:
+                    active = book.active_for_symbol(symbol)
+                    if active is not None:
+                        # Only replay merges historical confirmed broker fills;
+                        # apply_entry_fill stays strict for new live opens.
+                        inventory_id = active.inventory_id
+                        book._legacy_inventory_aliases[event.inventory_id] = inventory_id
                 book.apply_entry_fill(
-                    inventory_id=event.inventory_id,
-                    symbol=str(payload["symbol"]),
+                    inventory_id=inventory_id,
+                    symbol=symbol,
                     position_id=str(payload["position_id"]),
                     units=units,
                     price=price,
@@ -48,7 +63,9 @@ class InventoryBook:
             elif event.event_type == "EXIT_ECONOMICS_CONFIRMED":
                 payload = event.payload
                 book.apply_exit_economics(
-                    inventory_id=event.inventory_id,
+                    inventory_id=book._legacy_inventory_aliases.get(
+                        event.inventory_id, event.inventory_id
+                    ),
                     position_id=str(payload["position_id"]),
                     exit_price=float(payload["price"]),
                     units=float(payload["units"]),
@@ -73,6 +90,11 @@ class InventoryBook:
     @property
     def inventories(self) -> tuple[InventoryState, ...]:
         return tuple(self._inventories.values())
+
+    @property
+    def legacy_inventory_aliases(self) -> Mapping[str, str]:
+        """Historical duplicate inventory IDs mapped to their canonical aggregate."""
+        return dict(self._legacy_inventory_aliases)
 
     def active_for_symbol(self, symbol: str) -> InventoryState | None:
         normalized = symbol.strip().upper()
@@ -380,7 +402,7 @@ class InventoryBook:
             tmax = high
             tminmax = close
         else:
-            tminmax = min(tminmax if tminmax is not None else close, low)
+            tmaxmin = min(tminmax if tminmax is not None else close, low)
         min_last = min(
             value for value in (inventory.min_price_since_last_entry, low) if value is not None
         )
