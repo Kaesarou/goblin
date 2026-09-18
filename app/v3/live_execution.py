@@ -1,29 +1,18 @@
-"""V3 broker execution, including durable same-symbol open authority.
+"""V3 broker execution with durable same-symbol open authority.
 
-The existing close/reconciliation implementation is kept byte-for-byte in
-``_live_execution_impl``. Only the entry scheduling/completion boundary is
-specialized here; no strategy, order sizing, or close behavior is changed.
+The unchanged close/reconciliation code lives in ``_live_execution_impl``.
+Expose that module directly to existing callers so monkeypatches of its clocks
+and helpers still affect the functions in the original implementation.
 """
 
 from __future__ import annotations
 
+import sys
 from . import _live_execution_impl as _impl
-
-# Preserve the public and historical private imports used by the runtime,
-# tests and reconciliation tooling while moving the unchanged implementation.
-for _export in dir(_impl):
-    if not _export.startswith("__"):
-        globals()[_export] = getattr(_impl, _export)
 
 
 class V3BrokerExecutor(_impl.V3BrokerExecutor):
-    """Never dispatch two broker BUYs on one symbol while an open is unresolved.
-
-    The reservation precedes event journaling and task submission. A definite
-    broker rejection releases it; a possibly accepted order never does until
-    its broker-confirmed fill has been projected successfully. Existing unresolved
-    submissions restored from SQLite block new risk after process restart.
-    """
+    """Reserve BUY symbols before submission and fail closed on uncertain opens."""
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -59,26 +48,25 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
 
     def schedule(self, intent, *, snapshot):
         if intent.side.upper() != "BUY":
-            # SELL reduce-only must remain independent of BUY reservations.
+            # SELL reduce-only stays independent of the pending BUY lock.
             return super().schedule(intent, snapshot=snapshot)
         symbol = intent.symbol.strip().upper()
         action = str(intent.intent_id)
         if (not self.new_risk_allowed or symbol in self._open_by_symbol
                 or action in self._open_action_ids):
             return False
-        # Reserve BEFORE append/submit: submit() can dispatch broker work now.
+        # Reserve before the durable START and before task_runner.submit() can
+        # dispatch a broker request. No second intent can use the same symbol.
         self._open_by_symbol[symbol] = action
         self._unresolved_open_actions.add(action)
         self._open_action_ids.add(action)
         try:
             scheduled = super().schedule(intent, snapshot=snapshot)
         except Exception:
-            # Submission may have reached the broker even when submit raises.
-            # Keep the action reserved; require durable operator reconciliation.
+            # submit() may have reached eToro even when it raises locally.
             self.halted_reason = "open_submission_dispatch_unknown"
             raise
         if not scheduled:
-            # The base executor returned False without journaling or dispatching.
             self._release_open(symbol, action)
             self._open_action_ids.discard(action)
         return scheduled
@@ -95,9 +83,7 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
         action = context.action_id
         symbol = context.intent.symbol.strip().upper()
         error = completion.error
-        # A lost response, timeout or unclassified exception does not prove
-        # rejection. The eToro adapter identifies definitive rejections with
-        # this explicit broker rejection marker; everything else fails closed.
+        # An unclassified exception or lost response is NOT a broker rejection.
         if error is not None and not isinstance(error, _impl.EtoroOrderConfirmationUnknownError):
             if "eToro order rejected:" not in str(error):
                 self._pending_actions.discard(action)
@@ -119,20 +105,15 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
         try:
             applied = super()._handle_open_completion(completion)
         except Exception:
-            # ENTRY_FILLED may already have been durably appended. Never retry
-            # the broker open; restart must replay the ledger and reconcile.
+            # The confirmed fill may already be durable in the append-only
+            # ledger. Never submit another BUY; replay and reconcile on restart.
             self.halted_reason = "open_ledger_projection_failed"
             raise
-
         if applied:
-            # Only a completed book projection releases the symbol, not merely
-            # a durable ENTRY_FILLED record or broker's accepted response.
             self._release_open(symbol, action)
         elif error is not None and "eToro order rejected:" in str(error):
             self._release_open(symbol, action)
         else:
-            # Invalid/partial completion can follow a real broker fill. Record
-            # explicit uncertainty even when the base executor only halted.
             if self.halted_reason is None:
                 self.halted_reason = "invalid_open_completion"
             self._append(
@@ -154,3 +135,9 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
         result["pending_open_symbols"] = dict(sorted(self._open_by_symbol.items()))
         result["unresolved_open_action_ids"] = sorted(self._unresolved_open_actions)
         return result
+
+
+# Preserve the original module's globals for existing imports and test clock
+# monkeypatches; the only replaced exported object is the guarded executor.
+_impl.V3BrokerExecutor = V3BrokerExecutor
+sys.modules[__name__] = _impl
