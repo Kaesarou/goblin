@@ -10,7 +10,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import shutil
 import sqlite3
+import tempfile
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -35,18 +37,32 @@ def _fingerprints(db: Path) -> dict[str, str]:
     return result
 
 
+def _event_rows_on_disposable_copy(db: Path) -> list[tuple]:
+    # SQLite may checkpoint or remove its WAL/SHM files even on connection close.
+    # Never let SQLite open the SOURCE, including an offline operator backup.
+    # Copy the complete stopped database and its WAL/SHM siblings first.
+    with tempfile.TemporaryDirectory(prefix="goblin-v3-audit-") as scratch:
+        shadow = Path(scratch) / db.name
+        for suffix in ("", "-wal", "-shm"):
+            source = Path(f"{db}{suffix}")
+            if source.is_file():
+                shutil.copy2(source, Path(f"{shadow}{suffix}"))
+        uri = f"file:{quote(str(shadow.resolve()), safe='/')}?mode=ro"
+        with sqlite3.connect(uri, uri=True) as conn:
+            conn.execute("PRAGMA query_only = ON")
+            rows = conn.execute(
+                "SELECT event_id, inventory_id, event_type, occurred_at, payload_json, "
+                "strategy_version, model_version FROM inventory_events "
+                "ORDER BY occurred_at, rowid"
+            ).fetchall()
+        return rows
+
+
 def audit(db: Path) -> dict:
     if not db.is_file():
         raise FileNotFoundError(db)
     before = _fingerprints(db)
-    uri = f"file:{quote(str(db.resolve()), safe='/')}?mode=ro"
-    with sqlite3.connect(uri, uri=True) as conn:
-        conn.execute("PRAGMA query_only = ON")
-        rows = conn.execute(
-            "SELECT event_id, inventory_id, event_type, occurred_at, payload_json, "
-            "strategy_version, model_version FROM inventory_events "
-            "ORDER BY occurred_at, rowid"
-        ).fetchall()
+    rows = _event_rows_on_disposable_copy(db)
 
     events = [
         InventoryEvent(
