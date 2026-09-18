@@ -57,10 +57,6 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
         if self._unresolved_open_actions and self.halted_reason is None:
             self.halted_reason = "unresolved_open_submission_at_restart"
 
-    @property
-    def new_risk_allowed(self) -> bool:
-        return super().new_risk_allowed and not self._unresolved_open_actions
-
     def schedule(self, intent, *, snapshot):
         if intent.side.upper() != "BUY":
             # SELL reduce-only must remain independent of BUY reservations.
