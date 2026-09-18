@@ -17,9 +17,9 @@ class InventoryBook:
     def __init__(self) -> None:
         self._inventories: dict[str, InventoryState] = {}
         self._inventory_by_position_id: dict[str, str] = {}
-        # Historical concurrent fills may have distinct inventory IDs even though
-        # the strategy allows only one aggregate inventory per symbol. Preserve
-        # the raw event IDs; use aliases in the *projection* only.
+        # Concurrent historical opens may have different inventory IDs for the
+        # same symbol. Keep the original events intact and alias IDs only in
+        # the in-memory projection.
         self._legacy_inventory_aliases: dict[str, str] = {}
 
     @classmethod
@@ -37,8 +37,8 @@ class InventoryBook:
                 if inventory_id not in book._inventories:
                     active = book.active_for_symbol(symbol)
                     if active is not None:
-                        # Only replay merges historical confirmed broker fills;
-                        # apply_entry_fill stays strict for new live opens.
+                        # Replay only: live apply_entry_fill still rejects a
+                        # second independent inventory for the same symbol.
                         inventory_id = active.inventory_id
                         book._legacy_inventory_aliases[event.inventory_id] = inventory_id
                 book.apply_entry_fill(
@@ -402,7 +402,7 @@ class InventoryBook:
             tmax = high
             tminmax = close
         else:
-            tmaxmin = min(tminmax if tminmax is not None else close, low)
+            tminmax = min(tminmax if tminmax is not None else close, low)
         min_last = min(
             value for value in (inventory.min_price_since_last_entry, low) if value is not None
         )
