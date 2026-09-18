@@ -1,5 +1,6 @@
 """The offline audit must not mutate the week's research ledger."""
 
+import gc
 import importlib.util
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -33,6 +34,15 @@ def _fill(name, position, seconds, units):
     )
 
 
+def _finalize_disposable_writer_handles():
+    # InventoryEventStore's sqlite3 context manager commits but does not close
+    # its connection. If GC closes a previous writer while audit fingerprints
+    # the fixture, SQLite can checkpoint/delete source -wal/-shm. Quiesce the
+    # TEST writer before establishing the immutable source fingerprint. A real
+    # audit similarly requires a stopped source or a consistent offline backup.
+    gc.collect()
+
+
 def test_offline_audit_preserves_source_bytes_and_both_intc_legs(tmp_path):
     db = tmp_path / "copy.sqlite"
     store = InventoryEventStore(db)
@@ -41,6 +51,7 @@ def test_offline_audit_preserves_source_bytes_and_both_intc_legs(tmp_path):
         _fill("second", "3599774883", 7, 3.291612),
     ):
         assert store.append(e)
+    _finalize_disposable_writer_handles()
     module = _audit_module()
     before = module._fingerprints(db)
     result = module.audit(db)
@@ -68,6 +79,7 @@ def test_offline_audit_exposes_unresolved_open_as_unsafe(tmp_path):
         payload={"action_id": "pending", "symbol": "INTC"},
         strategy_version="INVENTORY_RR5_ETORO5_V1",
     ))
+    _finalize_disposable_writer_handles()
     result = _audit_module().audit(db)
     assert result["restart_safety"]["safe_from_event_history_only"] is False
     assert result["restart_safety"]["unresolved_action_ids"] == ["pending"]
