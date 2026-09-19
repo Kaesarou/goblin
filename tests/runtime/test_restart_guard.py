@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,13 +11,33 @@ from scripts import demo_rearm_after_manual_closes
 
 
 def test_production_compose_runs_guard_with_persistent_data_volume():
-    """The DEMO close watcher must call the tested persistent start guard."""
+    """A unit-tested guard is useless if production bypasses the wrapper."""
     compose = (Path(__file__).resolve().parents[2] /
                "docker-compose.production.yml").read_text(encoding="utf-8")
-    assert 'command: ["python", "-m", "scripts.demo_rearm_after_manual_closes"]' in compose
-    assert demo_rearm_after_manual_closes.start_normal_runtime is restart_guard.main
+    assert 'command: ["python", "-m", "app.runtime.restart_guard"]' in compose
     assert './data:/app/data' in compose
     assert 'restart: "on-failure:5"' in compose
+
+
+def test_demo_watcher_is_guard_child_and_execs_v3_in_place(tmp_path, monkeypatch):
+    monkeypatch.setenv("GOBLIN_RESTART_GUARD_PATH", str(tmp_path / "guard.json"))
+    monkeypatch.setenv("GOBLIN_OBSERVATION_ONLY", "0")
+    monkeypatch.setenv("GOBLIN_DEMO_AUTO_REARM_AFTER_MANUAL_CLOSE", "1")
+    launched = []
+    child = SimpleNamespace(wait=lambda: 0, poll=lambda: None, send_signal=lambda signum: None)
+    monkeypatch.setattr(restart_guard.subprocess, "Popen", lambda args: launched.append(args) or child)
+    monkeypatch.setattr(restart_guard.signal, "signal", lambda *_: None)
+    assert restart_guard.main() == 0
+    assert launched == [[restart_guard.sys.executable, "-m", "scripts.demo_rearm_after_manual_closes"]]
+    executed = []
+    def fake_exec(executable, arguments):
+        executed.append((executable, arguments))
+        raise OSError("test exec replaced")
+    monkeypatch.setattr(demo_rearm_after_manual_closes.os, "execv", fake_exec)
+    with pytest.raises(OSError, match="test exec replaced"):
+        demo_rearm_after_manual_closes.start_normal_runtime()
+    assert executed == [(restart_guard.sys.executable,
+                         [restart_guard.sys.executable, "-m", "app.main"])]
 
 
 def test_sixth_start_within_half_hour_is_blocked_even_if_each_run_survives(tmp_path):
