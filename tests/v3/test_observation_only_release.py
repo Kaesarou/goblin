@@ -1,4 +1,4 @@
-"""A Saturday payload probe must not rearm trading even on a flat DEMO account."""
+"""A DEMO release must wait for broker-flat evidence before enabling BUYs."""
 
 import importlib.util
 from pathlib import Path
@@ -57,11 +57,13 @@ def test_observation_gate_cannot_be_removed_by_deleting_latch(tmp_path, monkeypa
     assert not gate_active(tmp_path / "goblin.sqlite")
 
 
-def test_production_release_is_pinned_read_only_and_never_rolls_back_to_old_image():
+def test_production_release_requires_broker_flat_watcher_and_never_rolls_back():
     compose = (ROOT / "docker-compose.production.yml").read_text(encoding="utf-8")
     script = (ROOT / "scripts/deploy_release.sh").read_text(encoding="utf-8")
-    assert 'GOBLIN_OBSERVATION_ONLY: "1"' in compose
-    assert 'Refusing recovery release without pinned observation-only mode' in script
+    assert 'GOBLIN_OBSERVATION_ONLY: "0"' in compose
+    assert 'GOBLIN_DEMO_AUTO_REARM_AFTER_MANUAL_CLOSE: "1"' in compose
+    assert 'command: ["python", "-m", "app.runtime.restart_guard"]' in compose
+    assert 'Refusing DEMO release without the broker-flat close watcher and restart guard' in script
     assert 'docker update --restart=no goblin-bot' in script
     assert 'docker stop --time 30 goblin-bot' in script
     assert 'Restoring the previous Goblin image' not in script
@@ -75,3 +77,4 @@ def test_diagnostic_is_invoked_as_importable_module_from_image_workdir():
     assert 'docker exec "$container_id" python -m scripts.inspect_etoro_payload_schema_readonly' in script
     assert 'python scripts/inspect_etoro_payload_schema_readonly.py' not in script
     assert importlib.util.find_spec("scripts.inspect_etoro_payload_schema_readonly") is not None
+    assert importlib.util.find_spec("scripts.demo_rearm_after_manual_closes") is not None
