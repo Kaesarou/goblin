@@ -5,6 +5,11 @@ services:
     init: true
     env_file:
       - .env
+    # Recovery release: collect real DEMO payloads without rearming BUYs even if
+    # manually queued closes complete before the next preflight. A separate
+    # reviewed release is required to enable broker mutations again.
+    environment:
+      GOBLIN_OBSERVATION_ONLY: "1"
     volumes:
       - ./data:/app/data
     # Count starts in a persistent 30-minute window: Docker may reset its own
