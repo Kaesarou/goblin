@@ -35,11 +35,11 @@ class ResilientEtoroClient(EtoroClient):
         delay_seconds: float = 1.0,
         require_position_details: bool = True,
     ) -> dict:
-        """Classify a rejection only from eToro's structured order status.
+        """Classify a rejection only from unambiguous terminal broker status.
 
-        This explicitly replaces the base client's RuntimeError-with-a-message
-        contract for V3. A transient failed lookup, timeout or exhausted poll
-        can never be mistaken for a terminal broker rejection.
+        A response with both a terminal failure and execution evidence is NOT a
+        proven zero-fill rejection. A later lookup or portfolio reconciliation
+        must resolve it; do not free the per-symbol BUY reservation.
         """
         last_lookup_error: Exception | None = None
         for _attempt in range(1, attempts + 1):
@@ -50,6 +50,14 @@ class ResilientEtoroClient(EtoroClient):
                 time.sleep(delay_seconds)
                 continue
             if is_order_rejected(details):
+                # Even malformed/noncanonical executions are evidence of a
+                # potentially filled position. Never claim a definitive reject
+                # when a broker response contains both contradictory signals.
+                if details.get("positionExecutions") or has_executed_position_details(details):
+                    raise RuntimeError(
+                        "eToro order outcome conflicting: terminal rejection "
+                        f"with position execution data; order_id={order_id}"
+                    )
                 raise EtoroOrderRejectedError(
                     order_id=order_id,
                     error_code=extract_order_error_code(details),
@@ -119,8 +127,7 @@ class ResilientEtoroClient(EtoroClient):
                 require_position_details=True,
             )
         except EtoroOrderRejectedError:
-            # Only the broker's explicit terminal status proves that no fill
-            # can still arrive for this order. Never inspect exception text.
+            # Only an unambiguous terminal broker status proves no fill.
             raise
         except Exception as exc:
             raise EtoroOrderConfirmationUnknownError(
