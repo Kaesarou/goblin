@@ -129,7 +129,9 @@ if ! docker inspect --format '{{.State.Running}}' "$container_id" | grep -qx tru
   capture_failed_release_diagnostics
   fail_closed
 fi
-if ! docker exec "$container_id" python scripts/inspect_etoro_payload_schema_readonly.py; then
+# A file-path invocation makes sys.path[0] /app/scripts, hiding the sibling
+# /app/app package. -m runs from the image WORKDIR /app and resolves both.
+if ! docker exec "$container_id" python -m scripts.inspect_etoro_payload_schema_readonly; then
   printf 'Read-only DEMO schema probe failed; refusing to certify the release\n' >&2
   capture_failed_release_diagnostics
   fail_closed
@@ -140,7 +142,7 @@ docker logs --timestamps --tail 180 "$container_id" 2>&1 | \
   tail -n 60 || true
 
 # Do not mistake PID 1 being alive for an authorized trading state.
-deployed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+deployed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ")"
 printf '{"git_commit":"%s","image":"%s","deployed_at":"%s","observation_only":true}\n' \
   "$git_sha" "$image" "$deployed_at" > "$app_dir/deployment.json"
 printf 'Goblin observation-only release verified on %s (%s)\n' "$image" "$container_id"
