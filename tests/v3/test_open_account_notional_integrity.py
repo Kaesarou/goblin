@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 from app.brokers.base import OpenPositionResult
 from app.market.models import MarketSnapshot
-from app.runtime.broker_task_runner import BrokerTaskCompletion, BrokerTaskLane
+from app.runtime.broker_task_runner import BrokerTaskCompletion
 from app.v3.book import InventoryBook
 from app.v3.live_execution import V3BrokerExecutor
 from app.v3.models import ExecutionStyle, IntentPurpose, OrderIntent
@@ -72,7 +72,7 @@ def test_one_dollar_broker_notional_books_requested_amount_and_blocks_new_risk(t
     assert fill.payload["notional"] == 300.0
     assert fill.payload["notional_source"] == "requested_account_currency"
     assert anomaly.payload["reported_account_notional"] == 1.0
-    assert executor.book.active_for_symbol("INTC").total_account_notional == 300.0
+    assert executor.book.active_for_symbol("INTC").total_notional == 300.0
     assert not executor.new_risk_allowed
     assert not executor.schedule(intent, snapshot=snapshot)
     assert broker.calls == 1
