@@ -5,16 +5,15 @@ services:
     init: true
     env_file:
       - .env
-    # Explicit DEMO-only close watcher: no V3 BUY until the existing manual
-    # closes are no longer present in the portfolio and pending OPEN is empty
-    # on two independent account checks. Never import or close external legs.
+    # The persistent guard starts the DEMO close watcher. No new BUY until
+    # two independent broker-flat checks and V3's own reconciliation.
     environment:
       GOBLIN_OBSERVATION_ONLY: "0"
       GOBLIN_DEMO_AUTO_REARM_AFTER_MANUAL_CLOSE: "1"
     volumes:
       - ./data:/app/data
-    # Persisted five-start breaker still wraps each actual app start.
-    command: ["python", "-m", "scripts.demo_rearm_after_manual_closes"]
+    # The guard is always the parent and forwards SIGTERM to its child.
+    command: ["python", "-m", "app.runtime.restart_guard"]
     restart: "on-failure:5"
     stop_signal: SIGTERM
     stop_grace_period: 2m
