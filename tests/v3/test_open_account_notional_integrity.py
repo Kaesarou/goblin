@@ -86,6 +86,20 @@ def test_one_dollar_broker_notional_books_requested_amount_and_blocks_new_risk(t
     assert restarted.halted_reason == "open_account_notional_mismatch_at_restart"
 
 
+def test_missing_live_broker_notional_is_not_treated_as_verified(tmp_path):
+    executor, broker, store, intent, snapshot = _exercise(tmp_path, None)
+    fill = next(event for event in store.events() if event.event_type == "ENTRY_FILLED")
+    anomaly = next(event for event in store.events()
+                   if event.event_type == "OPEN_ACCOUNT_NOTIONAL_MISMATCH")
+    assert fill.payload["notional"] == 300.0
+    assert fill.payload["notional_source"] == "requested_account_currency"
+    assert anomaly.payload["reported_account_notional"] is None
+    assert anomaly.payload["reason"] == "broker_account_notional_missing"
+    assert not executor.new_risk_allowed
+    assert executor.schedule(intent, snapshot=snapshot) is False
+    assert broker.calls == 1
+
+
 def test_large_broker_notional_keeps_larger_risk_and_halts(tmp_path):
     executor, _broker, store, _intent, _snapshot = _exercise(tmp_path, 700.0)
     fill = next(event for event in store.events() if event.event_type == "ENTRY_FILLED")
