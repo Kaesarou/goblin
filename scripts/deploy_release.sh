@@ -142,7 +142,7 @@ docker logs --timestamps --tail 180 "$container_id" 2>&1 | \
   tail -n 60 || true
 
 # Do not mistake PID 1 being alive for an authorized trading state.
-deployed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ")"
+deployed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 printf '{"git_commit":"%s","image":"%s","deployed_at":"%s","observation_only":true}\n' \
   "$git_sha" "$image" "$deployed_at" > "$app_dir/deployment.json"
 printf 'Goblin observation-only release verified on %s (%s)\n' "$image" "$container_id"
