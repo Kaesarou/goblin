@@ -1,10 +1,21 @@
 import logging
+import time
 from datetime import datetime, timezone
+
+import requests
 
 from app.brokers.base import OpenPositionResult
 from app.brokers.etoro.etoro_client import EtoroClient
 from app.brokers.etoro.order_confirmation_error import (
     EtoroOrderConfirmationUnknownError,
+    EtoroOrderRejectedError,
+)
+from app.brokers.etoro.order_response_parser import (
+    extract_order_error_code,
+    extract_order_error_message,
+    has_executed_position_details,
+    is_order_executed,
+    is_order_rejected,
 )
 from app.brokers.etoro.position_instrument_cache import (
     remember_position_instrument_id,
@@ -16,6 +27,46 @@ logger = logging.getLogger(__name__)
 
 class ResilientEtoroClient(EtoroClient):
     """Preserve exposure while accepted open orders remain uncertain."""
+
+    def _wait_for_executed_order(
+        self,
+        order_id: str,
+        attempts: int = 10,
+        delay_seconds: float = 1.0,
+        require_position_details: bool = True,
+    ) -> dict:
+        """Classify a rejection only from eToro's structured order status.
+
+        This explicitly replaces the base client's RuntimeError-with-a-message
+        contract for V3. A transient failed lookup, timeout or exhausted poll
+        can never be mistaken for a terminal broker rejection.
+        """
+        last_lookup_error: Exception | None = None
+        for _attempt in range(1, attempts + 1):
+            try:
+                details = self.get_order_details(order_id)
+            except (requests.RequestException, RuntimeError, ValueError) as exc:
+                last_lookup_error = exc
+                time.sleep(delay_seconds)
+                continue
+            if is_order_rejected(details):
+                raise EtoroOrderRejectedError(
+                    order_id=order_id,
+                    error_code=extract_order_error_code(details),
+                    error_message=extract_order_error_message(details),
+                    details=details,
+                )
+            executed = is_order_executed(details)
+            position_details_ready = has_executed_position_details(details)
+            if executed and (position_details_ready or not require_position_details):
+                return details
+            time.sleep(delay_seconds)
+        raise RuntimeError(
+            'eToro order was not executed with required details after polling: '
+            f'order_id={order_id}, '
+            f'require_position_details={require_position_details}, '
+            f'last_lookup_error={last_lookup_error}'
+        )
 
     def open_position(
         self,
@@ -67,9 +118,11 @@ class ResilientEtoroClient(EtoroClient):
                 order_id,
                 require_position_details=True,
             )
+        except EtoroOrderRejectedError:
+            # Only the broker's explicit terminal status proves that no fill
+            # can still arrive for this order. Never inspect exception text.
+            raise
         except Exception as exc:
-            if 'eToro order rejected:' in str(exc):
-                raise
             raise EtoroOrderConfirmationUnknownError(
                 order_id=order_id,
                 reference_id=reference_id,
