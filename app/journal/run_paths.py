@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -56,20 +55,14 @@ def rotate_run_journals(
     max_runs: int,
     current_run_id: str,
 ) -> tuple[str, ...]:
-    limit = max(1, max_runs)
-    if not runs_root.exists():
-        return ()
-    directories = sorted(
-        (
-            path
-            for path in runs_root.iterdir()
-            if path.is_dir() and path.name != current_run_id
-        ),
-        key=lambda path: path.stat().st_mtime,
-        reverse=True,
-    )
-    removed: list[str] = []
-    for path in directories[max(0, limit - 1):]:
-        shutil.rmtree(path, ignore_errors=True)
-        removed.append(path.name)
-    return tuple(removed)
+    """Keep all run evidence, including when startup fails repeatedly.
+
+    Formerly this function recursively deleted older run directories on *every*
+    startup. A crash loop could therefore erase an entire week of candles and
+    trade journals before a successful run ever started. Retention by run count
+    is unsafe: a run is not a measure of elapsed time or successfully archived
+    data. The legacy call remains for compatibility, but it must never purge
+    evidence. Any future retention needs a separately verified backup and an
+    explicit operator-controlled process outside the trading startup path.
+    """
+    return ()
