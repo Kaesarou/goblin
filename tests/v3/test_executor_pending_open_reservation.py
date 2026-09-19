@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import pytest
 
 from app.brokers.base import OpenPositionResult
+from app.brokers.etoro.order_confirmation_error import EtoroOrderRejectedError
 from app.market.models import MarketSnapshot
 from app.runtime.broker_task_runner import BrokerTaskCompletion, BrokerTaskLane
 from app.v3.book import InventoryBook
@@ -161,9 +162,11 @@ def test_unknown_result_remains_reserved_through_restart(tmp_path):
 
 
 def test_definitive_broker_rejection_releases_symbol(tmp_path):
-    executor, broker, runner, store = _executor(
-        tmp_path, broker=Broker([RuntimeError("eToro order rejected: insufficient funds")])
+    rejection = EtoroOrderRejectedError(
+        order_id="order-1", error_code=42, error_message="insufficient funds",
+        details={"status": {"name": "Rejected", "errorCode": 42}},
     )
+    executor, broker, runner, store = _executor(tmp_path, broker=Broker([rejection]))
     assert executor.schedule(_intent("first"), snapshot=_snapshot())
     assert executor.drain() == ()
     assert evaluate_restart_safety(store.events()).safe
@@ -171,6 +174,20 @@ def test_definitive_broker_rejection_releases_symbol(tmp_path):
     assert executor.drain() == ("second",)
     assert len(broker.open_calls) == 2
     assert executor.book.active_for_symbol("INTC").entry_fill_count == 1
+
+
+def test_rejection_looking_untyped_error_does_not_release_buy(tmp_path):
+    executor, broker, runner, store = _executor(
+        tmp_path, broker=Broker([RuntimeError("eToro order rejected: network proxy returned this text")])
+    )
+    assert executor.schedule(_intent("first"), snapshot=_snapshot())
+    assert executor.drain() == ()
+    assert not executor.new_risk_allowed
+    assert executor.schedule(_intent("second"), snapshot=_snapshot()) is False
+    assert len(broker.open_calls) == 1
+    assert "ORDER_SUBMISSION_UNKNOWN" in [event.event_type for event in store.events()]
+    assert "ORDER_SUBMISSION_FAILED" not in [event.event_type for event in store.events()]
+    assert not evaluate_restart_safety(store.events()).safe
 
 
 def test_dispatch_exception_retains_durable_start_and_fails_closed(tmp_path):
