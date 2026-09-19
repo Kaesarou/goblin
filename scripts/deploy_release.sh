@@ -119,7 +119,28 @@ if [[ "$running_image" != "$image" ]]; then
   fail_closed
 fi
 
-deployed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# A mere PID-1 healthcheck does not prove that V3 startup/preflight succeeded.
+# Observe the process for a short interval and issue only two redacted DEMO
+# GETs for actual portfolio/P&L payload-shape diagnostics. Never send a POST.
+printf 'Observing the read-only DEMO release before payload validation\n'
+sleep 120
+if ! docker inspect --format '{{.State.Running}}' "$container_id" | grep -qx true; then
+  printf 'Goblin exited during observation window\n' >&2
+  capture_failed_release_diagnostics
+  fail_closed
+fi
+if ! docker exec "$container_id" python scripts/inspect_etoro_payload_schema_readonly.py; then
+  printf 'Read-only DEMO schema probe failed; refusing to certify the release\n' >&2
+  capture_failed_release_diagnostics
+  fail_closed
+fi
+printf '=== Runtime startup/health summary (no raw broker payloads) ===\n'
+docker logs --timestamps --tail 180 "$container_id" 2>&1 | \
+  grep -E 'v3_runtime_started|external_broker_activity|observation|CRITICAL|ERROR|Traceback|429|Timeout' | \
+  tail -n 60 || true
+
+# Do not mistake PID 1 being alive for an authorized trading state.
+deployed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ")"
 printf '{"git_commit":"%s","image":"%s","deployed_at":"%s","observation_only":true}\n' \
   "$git_sha" "$image" "$deployed_at" > "$app_dir/deployment.json"
-printf 'Goblin observation-only release started on %s (%s)\n' "$image" "$container_id"
+printf 'Goblin observation-only release verified on %s (%s)\n' "$image" "$container_id"
