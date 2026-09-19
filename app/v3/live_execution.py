@@ -155,21 +155,29 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
         if error is None and isinstance(result, _impl.OpenPositionResult):
             requested = float(context.intent.notional)
             reported_raw = result.executed_notional
-            if reported_raw is not None and math.isfinite(requested) and requested > 0:
+            # Paper fills have no authoritative execution price/quantity and
+            # legitimately derive both locally. A broker-confirmed price/units
+            # without account notional is NOT a certified cost basis.
+            needs_broker_notional = result.executed_entry_price is not None
+            if math.isfinite(requested) and requested > 0 and (
+                reported_raw is not None or needs_broker_notional
+            ):
                 try:
-                    reported = float(reported_raw)
+                    reported = (math.nan if reported_raw is None
+                                else float(reported_raw))
                 except (TypeError, ValueError):
                     reported = math.nan
                 inconsistent = (
-                    isinstance(reported_raw, bool)
+                    reported_raw is None
+                    or isinstance(reported_raw, bool)
                     or not math.isfinite(reported)
                     or reported <= 0
                     or reported < 0.8 * requested
                     or reported > 1.2 * requested
                 )
                 if inconsistent:
-                    # Preserve the broker's raw $1 amount for investigation.
-                    # Requested account currency is provisional, not certified.
+                    # Requested account currency is provisional, not certified;
+                    # never turn a missing broker amount into an undetected fill.
                     use_requested = not math.isfinite(reported) or reported < requested
                     booked = requested if use_requested else reported
                     self._append(
@@ -187,7 +195,11 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
                             ),
                             "reported_raw": repr(reported_raw),
                             "booked_account_notional": booked,
-                            "reason": "broker_account_notional_inconsistent_with_request",
+                            "reason": (
+                                "broker_account_notional_missing"
+                                if reported_raw is None
+                                else "broker_account_notional_inconsistent_with_request"
+                            ),
                         },
                     )
                     self._notional_anomaly_action_ids.add(action)
