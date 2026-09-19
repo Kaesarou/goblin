@@ -9,6 +9,7 @@ from app.brokers.etoro.resilient_client import ResilientEtoroClient
 from app.config.settings import Settings
 from app.market.models import MarketSnapshot
 from app.v3.book import InventoryBook
+from app.v3.external_account_gate import gate_path
 from app.v3.live_execution import V3BrokerExecutor
 from app.v3.models import ExecutionStyle, IntentPurpose, OrderIntent
 from app.v3.persistence import InventoryEvent, InventoryEventStore
@@ -76,11 +77,24 @@ def test_pending_manual_close_starts_observing_without_buy_or_duplicate_close(tm
     assert executor.schedule(_intent("BUY"), snapshot=_snapshot()) is False
     assert executor.schedule(_intent("SELL"), snapshot=_snapshot()) is False
     assert executor.event_store.events() == []  # no phantom fills / close starts
-    # A subsequent controlled restart is allowed to trade only after the
-    # broker independently reports an empty account and no pending opens.
+    marker = gate_path(tmp_path / "fresh.sqlite")
+    assert marker.is_file()
+
+    # Even if the next portfolio snapshot becomes flat, there is no API proof
+    # that every manually queued close has settled. No automatic BUY re-arm.
     flat = _executor(tmp_path, monkeypatch, {"clientPortfolio": {"positions": []}})
     assert flat.verify_known_broker_legs() == ()
-    assert flat.new_risk_allowed
+    assert not flat.new_risk_allowed
+    assert flat.halted_reason == "external_broker_activity_ack_required"
+    assert flat.confirmation_metrics()["account_observation_only"]
+    assert flat.schedule(_intent("BUY"), snapshot=_snapshot()) is False
+
+    # An explicit operator action is required AFTER checking the broker; tests
+    # model acknowledgment by deleting ONLY this gate, never the SQLite/logs.
+    marker.unlink()
+    armed = _executor(tmp_path, monkeypatch, {"clientPortfolio": {"positions": []}})
+    assert armed.verify_known_broker_legs() == ()
+    assert armed.new_risk_allowed
 
 
 def test_pending_open_from_old_account_starts_readonly_not_as_new_risk(tmp_path, monkeypatch):
@@ -95,6 +109,7 @@ def test_pending_open_from_old_account_starts_readonly_not_as_new_risk(tmp_path,
     assert "pending_broker_open:ordersForOpen:pending-2808" in (
         executor._last_broker_reconciliation_issues
     )
+    assert gate_path(tmp_path / "fresh.sqlite").is_file()
 
 
 def test_untracked_position_in_nonempty_ledger_still_rejects_startup(tmp_path, monkeypatch):
@@ -111,6 +126,13 @@ def test_untracked_position_in_nonempty_ledger_still_rejects_startup(tmp_path, m
     assert executor.verify_known_broker_legs() == ("untracked_broker_position:external:units=2",)
     assert not executor.new_risk_allowed
     assert not executor.confirmation_metrics()["account_observation_only"]
+    assert not gate_path(tmp_path / "fresh.sqlite").exists()
+
+
+def test_corrupt_recovery_gate_never_silently_rearms_buy(tmp_path, monkeypatch):
+    gate_path(tmp_path / "fresh.sqlite").write_text('{"version": "unknown"}', encoding="utf-8")
+    with pytest.raises(ValueError, match="Invalid external broker recovery gate"):
+        _executor(tmp_path, monkeypatch, {"clientPortfolio": {"positions": []}})
 
 
 def test_unparseable_portfolio_is_not_mistaken_for_empty(tmp_path, monkeypatch):
