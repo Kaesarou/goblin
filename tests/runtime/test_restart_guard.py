@@ -1,10 +1,20 @@
 """The production restart guard is durable across separate processes."""
 
 import json
+from pathlib import Path
 
 import pytest
 
 from app.runtime import restart_guard
+
+
+def test_production_compose_runs_guard_with_persistent_data_volume():
+    """A unit-tested guard is useless if production bypasses the wrapper."""
+    compose = (Path(__file__).resolve().parents[2] /
+               "docker-compose.production.yml").read_text(encoding="utf-8")
+    assert 'command: ["python", "-m", "app.runtime.restart_guard"]' in compose
+    assert './data:/app/data' in compose
+    assert 'restart: "on-failure:5"' in compose
 
 
 def test_sixth_start_within_half_hour_is_blocked_even_if_each_run_survives(tmp_path):
