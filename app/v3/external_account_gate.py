@@ -3,6 +3,9 @@
 A queued manual close can leave an open position visible, and the documented P&L
 open-order arrays cannot prove that *close* requests have settled. The gate
 therefore persists outside the replaceable SQLite and is never auto-cleared.
+
+The deployment can additionally force observation independently of broker state:
+GOBLIN_OBSERVATION_ONLY=1 cannot be acknowledged by deleting the marker.
 """
 
 from __future__ import annotations
@@ -22,8 +25,9 @@ def gate_path(sqlite_path: str | Path) -> Path:
 
 def gate_active(sqlite_path: str | Path) -> bool:
     path = gate_path(sqlite_path)
+    forced_observation = os.environ.get("GOBLIN_OBSERVATION_ONLY") == "1"
     if not path.exists():
-        return False
+        return forced_observation
     payload = json.loads(path.read_text(encoding="utf-8"))
     if (not isinstance(payload, dict) or payload.get("version") != VERSION
             or payload.get("reason") != "external_broker_activity"
@@ -38,7 +42,8 @@ def record_external_broker_activity(
     if not issues:
         raise ValueError("External broker gate needs confirmed observation issues")
     path = gate_path(sqlite_path)
-    if gate_active(sqlite_path):
+    if path.exists():
+        gate_active(sqlite_path)  # Validate existing marker before reusing it.
         return path  # Never overwrite the first incident/acknowledgment marker.
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
