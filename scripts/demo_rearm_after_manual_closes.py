@@ -1,8 +1,8 @@
-"""Wait for manual DEMO closes to settle before handing off to the normal V3 runtime.
+"""Wait for manual DEMO closes to settle before handing off to normal V3.
 
-This release does not import historical broker positions into a fresh ledger and
-never treats a queued close as a fill. It performs only account GETs while the
-broker still reports external exposure. No order is submitted by this module.
+This script is the child of app.runtime.restart_guard. The final os.execv
+replaces this child with app.main, retaining its PID and Docker stop forwarding.
+Only account GETs are issued while untracked positions are still present.
 """
 
 from __future__ import annotations
@@ -17,29 +17,33 @@ from app.brokers.etoro.pending_orders_preflight import pending_open_order_descri
 from app.brokers.etoro.portfolio_position_parser import extract_open_position_units
 from app.brokers.etoro.resilient_client import ResilientEtoroClient
 from app.config.settings import Settings
-from app.runtime.restart_guard import main as start_normal_runtime
 from app.v3.external_account_gate import gate_active, gate_path
 from app.v3.persistence import InventoryEventStore
 
-# Separate from the runtime's read governors: leave room for the deploy probe.
 CHECK_INTERVAL_SECONDS = 180
 REQUIRED_CONSECUTIVE_FLAT_CHECKS = 2
+
+
+def start_normal_runtime() -> int:
+    """Replace the restart-guard child; do not create an untracked grandchild."""
+    os.execv(sys.executable, [sys.executable, "-m", "app.main"])
+    raise RuntimeError("execv unexpectedly returned")
 
 
 def broker_account_flat(client: ResilientEtoroClient) -> bool:
     """Require authoritative zero open units AND zero pending opening orders."""
     positions = extract_open_position_units(client.get_portfolio())
-    # Never infer a close fill from an accepted/queued close request.
+    # A queued/accepted close is not proof of execution.
     pending_opens = pending_open_order_descriptions(client)
     return not any(units is None or units > 0 for units in positions.values()) and not pending_opens
 
 
 def archive_external_gate(sqlite_path: str | Path) -> Path | None:
-    """Keep the original incident marker; never delete or reset SQLite/logs."""
+    """Archive the incident marker in the persistent volume, never SQLite/logs."""
     path = gate_path(sqlite_path)
     if not path.exists():
         return None
-    gate_active(sqlite_path)  # Invalid markers are a hard stop, not an ack.
+    gate_active(sqlite_path)  # A malformed marker must fail closed.
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     archive = path.with_name(f"{path.stem}.acknowledged.{stamp}.{os.getpid()}.json")
     if archive.exists():
@@ -54,8 +58,6 @@ def archive_external_gate(sqlite_path: str | Path) -> Path | None:
 
 
 def main() -> int:
-    # The explicit release configuration is required; never let a local .env
-    # accidentally bypass the observation mode or act against a real account.
     if (os.environ.get("GOBLIN_OBSERVATION_ONLY") != "0"
             or os.environ.get("GOBLIN_DEMO_AUTO_REARM_AFTER_MANUAL_CLOSE") != "1"):
         print("CRITICAL: DEMO close-wait release configuration missing; staying stopped",
@@ -100,8 +102,8 @@ def main() -> int:
                 print("DEMO_REARM_WAIT: first flat snapshot; waiting for independent confirmation",
                       flush=True)
             else:
-                # The normal V3 startup checks the broker again. If anything
-                # reappears after these reads it records a NEW durable gate.
+                # V3 re-checks the broker during its own startup and records a
+                # new durable gate if old positions reappear.
                 try:
                     archived = archive_external_gate(sqlite_path)
                 except Exception as exc:
