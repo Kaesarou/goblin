@@ -7,7 +7,9 @@ and helpers still affect the functions in the original implementation.
 
 from __future__ import annotations
 
+import math
 import sys
+from dataclasses import replace
 
 from app.brokers.etoro.order_confirmation_error import EtoroOrderRejectedError
 from app.brokers.etoro.portfolio_position_parser import extract_open_position_units
@@ -23,6 +25,7 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
         self._open_by_symbol: dict[str, str] = {}
         self._open_action_ids: set[str] = set()
         self._unresolved_open_actions: set[str] = set()
+        self._notional_anomaly_action_ids: set[str] = set()
         started: dict[str, str] = {}
         resolved: set[str] = set()
         unknown: set[str] = set()
@@ -40,6 +43,8 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
                 resolved.add(action)
             elif event.event_type == "ORDER_SUBMISSION_UNKNOWN":
                 unknown.add(action)
+            elif event.event_type == "OPEN_ACCOUNT_NOTIONAL_MISMATCH":
+                self._notional_anomaly_action_ids.add(action)
         self._unresolved_open_actions = (set(started) - resolved) | unknown
         for action in sorted(self._unresolved_open_actions):
             symbol = started.get(action)
@@ -49,6 +54,8 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
                     self.halted_reason = "multiple_unresolved_open_submissions"
         if self._unresolved_open_actions and self.halted_reason is None:
             self.halted_reason = "unresolved_open_submission_at_restart"
+        if self._notional_anomaly_action_ids and self.halted_reason is None:
+            self.halted_reason = "open_account_notional_mismatch_at_restart"
 
     def verify_known_broker_legs(self) -> tuple[str, ...]:
         # A fresh SQLite has no known legs: the base verifier would return OK
@@ -135,6 +142,58 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
             )
             self.halted_reason = "open_order_confirmation_unknown"
             return []
+
+        result = completion.value
+        if error is None and isinstance(result, _impl.OpenPositionResult):
+            requested = float(context.intent.notional)
+            reported_raw = result.executed_notional
+            if reported_raw is not None and math.isfinite(requested) and requested > 0:
+                try:
+                    reported = float(reported_raw)
+                except (TypeError, ValueError):
+                    reported = math.nan
+                inconsistent = (
+                    isinstance(reported_raw, bool)
+                    or not math.isfinite(reported)
+                    or reported <= 0
+                    or reported < 0.8 * requested
+                    or reported > 1.2 * requested
+                )
+                if inconsistent:
+                    # eToro has returned investedAmountCurrency=1.0 for orders
+                    # of hundreds of USD. Do not book $1 exposure. A requested
+                    # amount is a fallback, NOT a proven broker cost basis;
+                    # preserve the raw value and halt new risk for investigation.
+                    # If the broker reports MORE than requested, retain that
+                    # larger exposure instead of understating it.
+                    use_requested = not math.isfinite(reported) or reported < requested
+                    booked = requested if use_requested else reported
+                    self._append(
+                        event_type="OPEN_ACCOUNT_NOTIONAL_MISMATCH",
+                        inventory_id=context.inventory_id,
+                        event_id=f"{action}:account-notional-mismatch",
+                        payload={
+                            "action_id": action,
+                            "intent_id": context.intent.intent_id,
+                            "symbol": symbol,
+                            "position_id": result.position_id,
+                            "requested_account_notional": requested,
+                            "reported_account_notional": (
+                                reported if math.isfinite(reported) else None
+                            ),
+                            "reported_raw": repr(reported_raw),
+                            "booked_account_notional": booked,
+                            "reason": "broker_account_notional_inconsistent_with_request",
+                        },
+                    )
+                    self._notional_anomaly_action_ids.add(action)
+                    self.halted_reason = "open_account_notional_mismatch"
+                    if use_requested:
+                        # The base executor will book requested account currency
+                        # rather than the broker's inconsistent $1 amount.
+                        completion = replace(
+                            completion, value=replace(result, executed_notional=None)
+                        )
         try:
             applied = super()._handle_open_completion(completion)
         except Exception:
@@ -167,6 +226,9 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
         result = super().confirmation_metrics()
         result["pending_open_symbols"] = dict(sorted(self._open_by_symbol.items()))
         result["unresolved_open_action_ids"] = sorted(self._unresolved_open_actions)
+        result["account_notional_anomaly_action_ids"] = sorted(
+            self._notional_anomaly_action_ids
+        )
         return result
 
 
