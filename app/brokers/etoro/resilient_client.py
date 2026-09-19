@@ -1,4 +1,5 @@
 import logging
+import math
 import time
 from datetime import datetime, timezone
 
@@ -17,6 +18,7 @@ from app.brokers.etoro.order_response_parser import (
     is_order_executed,
     is_order_rejected,
 )
+from app.brokers.etoro.pnl_position_amount import position_amount_usd
 from app.brokers.etoro.position_instrument_cache import (
     remember_position_instrument_id,
 )
@@ -75,6 +77,47 @@ class ResilientEtoroClient(EtoroClient):
             f'require_position_details={require_position_details}, '
             f'last_lookup_error={last_lookup_error}'
         )
+
+    def _resolve_suspicious_account_notional(
+        self, *, position_id: str, requested: float,
+        reported: float | None,
+    ) -> float | None:
+        """Cross-check suspect order amounts using the exact P&L position in USD.
+
+        Missing/stale/malformed P&L never hides the confirmed position. The V3
+        executor retains its provisional exposure and blocks further BUYs.
+        """
+        if (reported is not None and math.isfinite(reported)
+                and 0.8 * requested <= reported <= 1.2 * requested):
+            return reported
+        if self.settings.base_currency.strip().upper() != 'USD':
+            logger.error('P&L notional cross-check requires USD account currency')
+            return reported
+        if self.env not in {'demo', 'real'}:
+            return reported
+        path = ('/api/v1/trading/info/demo/pnl' if self.env == 'demo'
+                else '/api/v1/trading/info/real/pnl')
+        try:
+            pnl_amount = position_amount_usd(self._get(path), position_id)
+        except Exception as exc:
+            logger.warning(
+                'eToro account-notional P&L cross-check unavailable | '
+                'position_id=%s | error_type=%s',
+                position_id, type(exc).__name__,
+            )
+            return reported
+        if pnl_amount is None:
+            logger.warning(
+                'eToro P&L has not yet exposed confirmed position | position_id=%s',
+                position_id,
+            )
+            return reported
+        logger.warning(
+            'eToro order notional cross-checked with exact P&L position | '
+            'position_id=%s | order_invested_amount=%s | pnl_account_amount_usd=%s',
+            position_id, reported, pnl_amount,
+        )
+        return pnl_amount
 
     def open_position(
         self,
@@ -157,10 +200,16 @@ class ResilientEtoroClient(EtoroClient):
                 ),
             )
         executed_position = executed_positions[0]
+        # Even a P&L GET failure must not hide the known confirmed broker ID.
         remember_position_instrument_id(
             position_instruments=self.position_instruments,
             position_id=executed_position.position_id,
             instrument_id=instrument_id,
+        )
+        account_notional = self._resolve_suspicious_account_notional(
+            position_id=executed_position.position_id,
+            requested=float(amount),
+            reported=executed_position.executed_notional,
         )
         logger.info(
             'eToro position confirmed | order_id=%s | position_id=%s | '
@@ -172,11 +221,11 @@ class ResilientEtoroClient(EtoroClient):
             normalized_side,
             executed_position.executed_entry_price,
             executed_position.executed_units,
-            executed_position.executed_notional,
+            account_notional,
         )
         return OpenPositionResult(
             position_id=executed_position.position_id,
             executed_entry_price=executed_position.executed_entry_price,
             executed_units=executed_position.executed_units,
-            executed_notional=executed_position.executed_notional,
+            executed_notional=account_notional,
         )
