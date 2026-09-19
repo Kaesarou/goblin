@@ -27,6 +27,7 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
         self._open_action_ids: set[str] = set()
         self._unresolved_open_actions: set[str] = set()
         self._notional_anomaly_action_ids: set[str] = set()
+        self._account_observation_only = False
         active_position_ids = {
             str(leg.position_id)
             for inventory in self.book.inventories
@@ -84,9 +85,10 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
             self.halted_reason = "open_account_notional_mismatch_at_restart"
 
     def verify_known_broker_legs(self) -> tuple[str, ...]:
-        # A fresh SQLite has no known legs: the base verifier would return OK
-        # without contacting eToro. Query the whole account, including pending
-        # opens, and refuse any incomplete response rather than assume zero risk.
+        # A fresh SQLite knows no broker legs. After manually queuing closes
+        # outside market hours, the positions can remain visible until the
+        # exchange executes those closes. Start the data/research runtime in
+        # observation-only mode, but never trade those untracked positions.
         broker = getattr(self.broker, "delegate", self.broker)
         if isinstance(broker, ResilientEtoroClient):
             known_ids = {
@@ -111,11 +113,17 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
             )
             issues = unexpected + pending_issues
             if issues:
+                self._last_broker_reconciliation_issues = issues
+                # Only a genuinely empty ledger may opt into observation-only
+                # startup. Never conceal divergences in an existing ledger.
+                if not self.event_store.events() and not known_ids:
+                    self._account_observation_only = True
+                    self.halted_reason = "external_broker_activity_observation_only"
+                    return ()
                 self.halted_reason = (
                     "pending_broker_open_orders" if pending_issues
                     else "untracked_broker_positions"
                 )
-                self._last_broker_reconciliation_issues = issues
                 return issues
         return super().verify_known_broker_legs()
 
@@ -268,6 +276,7 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
         result["account_notional_anomaly_action_ids"] = sorted(
             self._notional_anomaly_action_ids
         )
+        result["account_observation_only"] = self._account_observation_only
         return result
 
 
