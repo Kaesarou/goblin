@@ -10,6 +10,8 @@ from __future__ import annotations
 import sys
 
 from app.brokers.etoro.order_confirmation_error import EtoroOrderRejectedError
+from app.brokers.etoro.portfolio_position_parser import extract_open_position_units
+from app.brokers.etoro.resilient_client import ResilientEtoroClient
 from . import _live_execution_impl as _impl
 
 
@@ -47,6 +49,35 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
                     self.halted_reason = "multiple_unresolved_open_submissions"
         if self._unresolved_open_actions and self.halted_reason is None:
             self.halted_reason = "unresolved_open_submission_at_restart"
+
+    def verify_known_broker_legs(self) -> tuple[str, ...]:
+        # A fresh SQLite has no known legs: the base verifier would return OK
+        # without contacting eToro. Query the full DEMO portfolio first and
+        # reject ANY position absent from the event ledger. A malformed or
+        # unavailable portfolio must raise, never masquerade as an empty one.
+        broker = getattr(self.broker, "delegate", self.broker)
+        if isinstance(broker, ResilientEtoroClient):
+            known_ids = {
+                str(leg.position_id)
+                for inventory in self.book.inventories
+                for leg in inventory.broker_legs
+                if leg.units > 0
+            }
+            try:
+                all_units = extract_open_position_units(broker.get_portfolio())
+            except Exception:
+                self.halted_reason = "broker_portfolio_preflight_unavailable"
+                raise
+            unexpected = tuple(
+                f"untracked_broker_position:{position_id}:units={units:.12g}"
+                for position_id, units in sorted(all_units.items())
+                if units is not None and units > 0 and position_id not in known_ids
+            )
+            if unexpected:
+                self.halted_reason = "untracked_broker_positions"
+                self._last_broker_reconciliation_issues = unexpected
+                return unexpected
+        return super().verify_known_broker_legs()
 
     def schedule(self, intent, *, snapshot):
         if intent.side.upper() != "BUY":
