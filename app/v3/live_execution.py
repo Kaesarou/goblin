@@ -8,6 +8,8 @@ and helpers still affect the functions in the original implementation.
 from __future__ import annotations
 
 import sys
+
+from app.brokers.etoro.order_confirmation_error import EtoroOrderRejectedError
 from . import _live_execution_impl as _impl
 
 
@@ -83,25 +85,25 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
         action = context.action_id
         symbol = context.intent.symbol.strip().upper()
         error = completion.error
-        # An unclassified exception or lost response is NOT a broker rejection.
-        if error is not None and not isinstance(error, _impl.EtoroOrderConfirmationUnknownError):
-            if "eToro order rejected:" not in str(error):
-                self._pending_actions.discard(action)
-                self._append(
-                    event_type="ORDER_SUBMISSION_UNKNOWN",
-                    inventory_id=context.inventory_id,
-                    event_id=f"{action}:open-error-uncertain",
-                    payload={
-                        "action_id": action,
-                        "intent_id": context.intent.intent_id,
-                        "symbol": symbol,
-                        "reason": "open_broker_outcome_not_proven_rejected",
-                        "error_type": type(error).__name__,
-                        "error": str(error),
-                    },
-                )
-                self.halted_reason = "open_order_confirmation_unknown"
-                return []
+        # Only a structured broker terminal status creates EtoroOrderRejectedError.
+        # Error text, even a literal "eToro order rejected:", is never proof.
+        if error is not None and not isinstance(error, EtoroOrderRejectedError):
+            self._pending_actions.discard(action)
+            self._append(
+                event_type="ORDER_SUBMISSION_UNKNOWN",
+                inventory_id=context.inventory_id,
+                event_id=f"{action}:open-error-uncertain",
+                payload={
+                    "action_id": action,
+                    "intent_id": context.intent.intent_id,
+                    "symbol": symbol,
+                    "reason": "open_broker_outcome_not_proven_rejected",
+                    "error_type": type(error).__name__,
+                    "error": str(error),
+                },
+            )
+            self.halted_reason = "open_order_confirmation_unknown"
+            return []
         try:
             applied = super()._handle_open_completion(completion)
         except Exception:
@@ -111,7 +113,7 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
             raise
         if applied:
             self._release_open(symbol, action)
-        elif error is not None and "eToro order rejected:" in str(error):
+        elif isinstance(error, EtoroOrderRejectedError):
             self._release_open(symbol, action)
         else:
             if self.halted_reason is None:
