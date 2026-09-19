@@ -38,13 +38,13 @@ if [[ ! -f "$incoming_compose" ]]; then
   exit 66
 fi
 
-# A release must not remove observation-only and accidentally bypass the
-# broker-flat preflight. The wrapper waits for two independent DEMO reads and
-# preserves the original SQLite, logs, and incident marker in an archive.
+# Never bypass either the DEMO close watcher or the durable restart guard.
+# The guard is PID 1's child and forwards Docker SIGTERM to the same child
+# after it execs app.main, preventing orphaned trading processes.
 if ! grep -Eq '^[[:space:]]+GOBLIN_OBSERVATION_ONLY:[[:space:]]*"0"[[:space:]]*$' "$incoming_compose" || \
    ! grep -Eq '^[[:space:]]+GOBLIN_DEMO_AUTO_REARM_AFTER_MANUAL_CLOSE:[[:space:]]*"1"[[:space:]]*$' "$incoming_compose" || \
-   ! grep -Fq 'command: ["python", "-m", "scripts.demo_rearm_after_manual_closes"]' "$incoming_compose"; then
-  printf 'Refusing DEMO release without the broker-flat close watcher\n' >&2
+   ! grep -Fq 'command: ["python", "-m", "app.runtime.restart_guard"]' "$incoming_compose"; then
+  printf 'Refusing DEMO release without the broker-flat close watcher and restart guard\n' >&2
   exit 67
 fi
 
@@ -122,9 +122,9 @@ if [[ "$running_image" != "$image" ]]; then
   fail_closed
 fi
 
-# PID-1 health does not prove that positions are closed or trading is armed.
-# The watcher checks flatness at t~0 and t~180s. This probe runs at t~120s,
-# leaving room for the DEMO account-read governor between independent GETs.
+# PID-1 health alone does not prove the manual closes filled or trading armed.
+# The watcher checks flatness at t~0 and t~180s. Probe at t~120s to avoid
+# overlapping the account-read budget of the watcher.
 printf 'Observing DEMO close watcher before read-only payload validation\n'
 sleep 120
 if ! docker inspect --format '{{.State.Running}}' "$container_id" | grep -qx true; then
