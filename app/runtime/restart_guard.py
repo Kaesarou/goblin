@@ -90,7 +90,18 @@ def main() -> int:
         # stopped container, not a simulated healthy/trading process.
         return 0
 
-    child = subprocess.Popen([sys.executable, "-m", "app.main"])
+    # The conditional DEMO watcher is the guard's child, not a second wrapper:
+    # it execs app.main in-place after broker-flat confirmation, preserving PID
+    # and the SIGTERM/SIGINT forwarding contract for Docker stop and redeploy.
+    demo_close_watcher = (
+        os.environ.get("GOBLIN_DEMO_AUTO_REARM_AFTER_MANUAL_CLOSE") == "1"
+        and os.environ.get("GOBLIN_OBSERVATION_ONLY") == "0"
+    )
+    child_module = (
+        "scripts.demo_rearm_after_manual_closes" if demo_close_watcher
+        else "app.main"
+    )
+    child = subprocess.Popen([sys.executable, "-m", child_module])
     stopping = False
 
     def forward_stop(signum, _frame):
