@@ -1,7 +1,7 @@
 """Read-only DEMO schema check; never print full portfolio, orders, credentials or headers.
 
-Run inside the observation-only container after startup:
-    python scripts/inspect_etoro_payload_schema_readonly.py
+Run inside the observation-only container after startup from WORKDIR /app:
+    python -m scripts.inspect_etoro_payload_schema_readonly
 This performs one portfolio GET and one P&L GET, no broker mutations.
 """
 
