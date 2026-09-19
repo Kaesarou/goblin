@@ -129,7 +129,9 @@ if ! docker inspect --format '{{.State.Running}}' "$container_id" | grep -qx tru
   capture_failed_release_diagnostics
   fail_closed
 fi
-if ! docker exec "$container_id" python scripts/inspect_etoro_payload_schema_readonly.py; then
+# A file-path invocation makes sys.path[0] /app/scripts, hiding the sibling
+# /app/app package. -m runs from the image WORKDIR /app and resolves both.
+if ! docker exec "$container_id" python -m scripts.inspect_etoro_payload_schema_readonly; then
   printf 'Read-only DEMO schema probe failed; refusing to certify the release\n' >&2
   capture_failed_release_diagnostics
   fail_closed
