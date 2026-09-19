@@ -62,8 +62,8 @@ def test_production_release_requires_broker_flat_watcher_and_never_rolls_back():
     script = (ROOT / "scripts/deploy_release.sh").read_text(encoding="utf-8")
     assert 'GOBLIN_OBSERVATION_ONLY: "0"' in compose
     assert 'GOBLIN_DEMO_AUTO_REARM_AFTER_MANUAL_CLOSE: "1"' in compose
-    assert 'command: ["python", "-m", "scripts.demo_rearm_after_manual_closes"]' in compose
-    assert 'Refusing DEMO release without the broker-flat close watcher' in script
+    assert 'command: ["python", "-m", "app.runtime.restart_guard"]' in compose
+    assert 'Refusing DEMO release without the broker-flat close watcher and restart guard' in script
     assert 'docker update --restart=no goblin-bot' in script
     assert 'docker stop --time 30 goblin-bot' in script
     assert 'Restoring the previous Goblin image' not in script
