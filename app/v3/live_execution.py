@@ -27,6 +27,12 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
         self._open_action_ids: set[str] = set()
         self._unresolved_open_actions: set[str] = set()
         self._notional_anomaly_action_ids: set[str] = set()
+        active_position_ids = {
+            str(leg.position_id)
+            for inventory in self.book.inventories
+            for leg in inventory.broker_legs
+            if leg.units > 0
+        }
         started: dict[str, str] = {}
         resolved: set[str] = set()
         unknown: set[str] = set()
@@ -40,7 +46,26 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
                     symbol = event.inventory_id.split(":", 1)[0].strip().upper()
                 started[action] = symbol
                 self._open_action_ids.add(action)
-            elif event.event_type in {"ENTRY_FILLED", "ORDER_SUBMISSION_FAILED"}:
+            elif event.event_type == "ENTRY_FILLED":
+                resolved.add(action)
+                # Old ledgers have 1.0 as broker-confirmed account notional but
+                # predate OPEN_ACCOUNT_NOTIONAL_MISMATCH. Never treat those
+                # active legs as $1 risk just because no anomaly event exists.
+                position_id = str(event.payload.get("position_id", ""))
+                if (position_id in active_position_ids
+                        and event.payload.get("notional_source") ==
+                        "broker_confirmed_account_currency"):
+                    try:
+                        requested = float(event.payload["requested_notional"])
+                        booked = float(event.payload["notional"])
+                    except (KeyError, TypeError, ValueError):
+                        requested, booked = math.nan, math.nan
+                    if (not math.isfinite(requested) or requested <= 0
+                            or not math.isfinite(booked) or booked <= 0
+                            or booked < 0.8 * requested
+                            or booked > 1.2 * requested):
+                        self._notional_anomaly_action_ids.add(action)
+            elif event.event_type == "ORDER_SUBMISSION_FAILED":
                 resolved.add(action)
             elif event.event_type == "ORDER_SUBMISSION_UNKNOWN":
                 unknown.add(action)
@@ -59,7 +84,7 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
             self.halted_reason = "open_account_notional_mismatch_at_restart"
 
     def verify_known_broker_legs(self) -> tuple[str, ...]:
-        # Fresh SQLite has no known legs: the base verifier would return OK
+        # A fresh SQLite has no known legs: the base verifier would return OK
         # without contacting eToro. Query the whole account, including pending
         # opens, and refuse any incomplete response rather than assume zero risk.
         broker = getattr(self.broker, "delegate", self.broker)
