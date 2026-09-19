@@ -1,6 +1,8 @@
 """A Saturday payload probe must not rearm trading even on a flat DEMO account."""
 
+import importlib.util
 from pathlib import Path
+from datetime import datetime, timezone
 
 from app.brokers.cached_broker import CachedBrokerClient
 from app.brokers.etoro.resilient_client import ResilientEtoroClient
@@ -11,7 +13,6 @@ from app.v3.external_account_gate import gate_active
 from app.v3.live_execution import V3BrokerExecutor
 from app.v3.models import ExecutionStyle, IntentPurpose, OrderIntent
 from app.v3.persistence import InventoryEventStore
-from datetime import datetime, timezone
 
 ROOT = Path(__file__).resolve().parents[2]
 NOW = datetime(2026, 9, 19, 13, 0, tzinfo=timezone.utc)
@@ -64,3 +65,13 @@ def test_production_release_is_pinned_read_only_and_never_rolls_back_to_old_imag
     assert 'docker update --restart=no goblin-bot' in script
     assert 'docker stop --time 30 goblin-bot' in script
     assert 'Restoring the previous Goblin image' not in script
+
+
+def test_diagnostic_is_invoked_as_importable_module_from_image_workdir():
+    script = (ROOT / "scripts/deploy_release.sh").read_text(encoding="utf-8")
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert 'WORKDIR /app' in dockerfile
+    assert 'COPY app ./app' in dockerfile and 'COPY scripts ./scripts' in dockerfile
+    assert 'docker exec "$container_id" python -m scripts.inspect_etoro_payload_schema_readonly' in script
+    assert 'python scripts/inspect_etoro_payload_schema_readonly.py' not in script
+    assert importlib.util.find_spec("scripts.inspect_etoro_payload_schema_readonly") is not None
