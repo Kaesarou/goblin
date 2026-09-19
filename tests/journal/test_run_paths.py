@@ -22,7 +22,7 @@ def test_run_paths_are_compressed_and_isolated(tmp_path):
     assert paths.root.exists()
 
 
-def test_run_rotation_keeps_current_and_newest_runs(tmp_path):
+def test_run_rotation_never_deletes_unarchived_runs(tmp_path):
     runs_root = tmp_path / 'runs'
     current = runs_root / 'run-current'
     current.mkdir(parents=True)
@@ -30,16 +30,8 @@ def test_run_rotation_keeps_current_and_newest_runs(tmp_path):
     old.mkdir()
     recent = runs_root / 'run-recent'
     recent.mkdir()
-    (old / 'marker').write_text('old', encoding='utf-8')
-    (recent / 'marker').write_text('recent', encoding='utf-8')
-    old.touch()
-    recent.touch()
-    old_time = 1_000_000_000
-    recent_time = old_time + 100
-    import os
-
-    os.utime(old, (old_time, old_time))
-    os.utime(recent, (recent_time, recent_time))
+    (old / 'candles.jsonl.gz').write_bytes(b'historical M1 candles')
+    (recent / 'trades.jsonl.gz').write_bytes(b'historical trades')
 
     removed = rotate_run_journals(
         runs_root=runs_root,
@@ -47,7 +39,28 @@ def test_run_rotation_keeps_current_and_newest_runs(tmp_path):
         current_run_id='run-current',
     )
 
-    assert removed == ('run-old',)
+    assert removed == ()
     assert current.exists()
-    assert recent.exists()
-    assert not old.exists()
+    assert (old / 'candles.jsonl.gz').read_bytes() == b'historical M1 candles'
+    assert (recent / 'trades.jsonl.gz').read_bytes() == b'historical trades'
+
+
+def test_hundreds_of_crash_restarts_cannot_evict_last_successful_run(tmp_path):
+    runs_root = tmp_path / 'runs'
+    historical = runs_root / 'run-previous-session'
+    historical.mkdir(parents=True)
+    (historical / 'candles.jsonl.gz').write_bytes(b'unarchived research evidence')
+    (historical / 'trades.jsonl.gz').write_bytes(b'unarchived fills')
+
+    for index in range(200):
+        current = f'run-crashed-{index:04d}'
+        (runs_root / current).mkdir()
+        assert rotate_run_journals(
+            runs_root=runs_root,
+            max_runs=1,
+            current_run_id=current,
+        ) == ()
+
+    assert (historical / 'candles.jsonl.gz').read_bytes() == b'unarchived research evidence'
+    assert (historical / 'trades.jsonl.gz').read_bytes() == b'unarchived fills'
+    assert len(list(runs_root.iterdir())) == 201

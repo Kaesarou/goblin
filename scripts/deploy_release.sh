@@ -38,14 +38,19 @@ if [[ ! -f "$incoming_compose" ]]; then
   exit 66
 fi
 
+# The recovery release must never trade by accident, even if a manual close
+# completes before startup. Refuse deployment if the safety override is absent.
+if ! grep -Eq '^[[:space:]]+GOBLIN_OBSERVATION_ONLY:[[:space:]]*"1"[[:space:]]*$' "$incoming_compose"; then
+  printf 'Refusing recovery release without pinned observation-only mode\n' >&2
+  exit 67
+fi
+
 mkdir -p "$app_dir/data"
 
 compose_file="$app_dir/docker-compose.production.yml"
 image_env="$app_dir/.deployment.env"
 next_compose="$app_dir/.docker-compose.production.yml.next"
 next_image_env="$app_dir/.deployment.env.next"
-previous_compose="$app_dir/.docker-compose.production.yml.previous"
-previous_image_env="$app_dir/.deployment.env.previous"
 
 deployment_diagnostics="$release_dir/deployment-failure.log"
 
@@ -58,13 +63,6 @@ docker compose \
   -f "$next_compose" \
   config --quiet
 docker pull "$image"
-
-had_previous=false
-if [[ -f "$compose_file" && -f "$image_env" ]]; then
-  cp "$compose_file" "$previous_compose"
-  cp "$image_env" "$previous_image_env"
-  had_previous=true
-fi
 
 mv "$next_compose" "$compose_file"
 mv "$next_image_env" "$image_env"
@@ -95,16 +93,17 @@ capture_failed_release_diagnostics() {
   } 2>&1 | tee "$deployment_diagnostics" >&2 || true
 }
 
+fail_closed() {
+  printf 'Recovery deployment not validated; stopping the container without rolling back to the old trading image\n' >&2
+  docker update --restart=no goblin-bot || true
+  docker stop --time 30 goblin-bot || true
+  exit 1
+}
+
 if ! start_release; then
   printf 'Deployment failed for %s\n' "$image" >&2
   capture_failed_release_diagnostics
-  if [[ "$had_previous" == true ]]; then
-    printf 'Restoring the previous Goblin image\n' >&2
-    mv "$previous_compose" "$compose_file"
-    mv "$previous_image_env" "$image_env"
-    start_release
-  fi
-  exit 1
+  fail_closed
 fi
 
 container_id="$(docker compose \
@@ -117,10 +116,31 @@ running_image="$(docker inspect --format '{{.Config.Image}}' "$container_id")"
 if [[ "$running_image" != "$image" ]]; then
   printf 'Running image mismatch: expected %s, got %s\n' "$image" "$running_image" >&2
   capture_failed_release_diagnostics
-  exit 1
+  fail_closed
 fi
 
+# A mere PID-1 healthcheck does not prove that V3 startup/preflight succeeded.
+# Observe the process for a short interval and issue only two redacted DEMO
+# GETs for actual portfolio/P&L payload-shape diagnostics. Never send a POST.
+printf 'Observing the read-only DEMO release before payload validation\n'
+sleep 120
+if ! docker inspect --format '{{.State.Running}}' "$container_id" | grep -qx true; then
+  printf 'Goblin exited during observation window\n' >&2
+  capture_failed_release_diagnostics
+  fail_closed
+fi
+if ! docker exec "$container_id" python scripts/inspect_etoro_payload_schema_readonly.py; then
+  printf 'Read-only DEMO schema probe failed; refusing to certify the release\n' >&2
+  capture_failed_release_diagnostics
+  fail_closed
+fi
+printf '=== Runtime startup/health summary (no raw broker payloads) ===\n'
+docker logs --timestamps --tail 180 "$container_id" 2>&1 | \
+  grep -E 'v3_runtime_started|external_broker_activity|observation|CRITICAL|ERROR|Traceback|429|Timeout' | \
+  tail -n 60 || true
+
+# Do not mistake PID 1 being alive for an authorized trading state.
 deployed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-printf '{"git_commit":"%s","image":"%s","deployed_at":"%s"}\n' \
+printf '{"git_commit":"%s","image":"%s","deployed_at":"%s","observation_only":true}\n' \
   "$git_sha" "$image" "$deployed_at" > "$app_dir/deployment.json"
-printf 'Goblin is healthy on %s (%s)\n' "$image" "$container_id"
+printf 'Goblin observation-only release verified on %s (%s)\n' "$image" "$container_id"
