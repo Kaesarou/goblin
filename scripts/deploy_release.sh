@@ -38,10 +38,13 @@ if [[ ! -f "$incoming_compose" ]]; then
   exit 66
 fi
 
-# The recovery release must never trade by accident, even if a manual close
-# completes before startup. Refuse deployment if the safety override is absent.
-if ! grep -Eq '^[[:space:]]+GOBLIN_OBSERVATION_ONLY:[[:space:]]*"1"[[:space:]]*$' "$incoming_compose"; then
-  printf 'Refusing recovery release without pinned observation-only mode\n' >&2
+# Never bypass either the DEMO close watcher or the durable restart guard.
+# The guard is PID 1's child and forwards Docker SIGTERM to the same child
+# after it execs app.main, preventing orphaned trading processes.
+if ! grep -Eq '^[[:space:]]+GOBLIN_OBSERVATION_ONLY:[[:space:]]*"0"[[:space:]]*$' "$incoming_compose" || \
+   ! grep -Eq '^[[:space:]]+GOBLIN_DEMO_AUTO_REARM_AFTER_MANUAL_CLOSE:[[:space:]]*"1"[[:space:]]*$' "$incoming_compose" || \
+   ! grep -Fq 'command: ["python", "-m", "app.runtime.restart_guard"]' "$incoming_compose"; then
+  printf 'Refusing DEMO release without the broker-flat close watcher and restart guard\n' >&2
   exit 67
 fi
 
@@ -94,7 +97,7 @@ capture_failed_release_diagnostics() {
 }
 
 fail_closed() {
-  printf 'Recovery deployment not validated; stopping the container without rolling back to the old trading image\n' >&2
+  printf 'DEMO close-watch deployment not validated; stopping the container without rolling back to an older trading image\n' >&2
   docker update --restart=no goblin-bot || true
   docker stop --time 30 goblin-bot || true
   exit 1
@@ -119,18 +122,16 @@ if [[ "$running_image" != "$image" ]]; then
   fail_closed
 fi
 
-# A mere PID-1 healthcheck does not prove that V3 startup/preflight succeeded.
-# Observe the process for a short interval and issue only two redacted DEMO
-# GETs for actual portfolio/P&L payload-shape diagnostics. Never send a POST.
-printf 'Observing the read-only DEMO release before payload validation\n'
+# PID-1 health alone does not prove the manual closes filled or trading armed.
+# The watcher checks flatness at t~0 and t~180s. Probe at t~120s to avoid
+# overlapping the account-read budget of the watcher.
+printf 'Observing DEMO close watcher before read-only payload validation\n'
 sleep 120
 if ! docker inspect --format '{{.State.Running}}' "$container_id" | grep -qx true; then
   printf 'Goblin exited during observation window\n' >&2
   capture_failed_release_diagnostics
   fail_closed
 fi
-# A file-path invocation makes sys.path[0] /app/scripts, hiding the sibling
-# /app/app package. -m runs from the image WORKDIR /app and resolves both.
 if ! docker exec "$container_id" python -m scripts.inspect_etoro_payload_schema_readonly; then
   printf 'Read-only DEMO schema probe failed; refusing to certify the release\n' >&2
   capture_failed_release_diagnostics
@@ -138,11 +139,11 @@ if ! docker exec "$container_id" python -m scripts.inspect_etoro_payload_schema_
 fi
 printf '=== Runtime startup/health summary (no raw broker payloads) ===\n'
 docker logs --timestamps --tail 180 "$container_id" 2>&1 | \
-  grep -E 'v3_runtime_started|external_broker_activity|observation|CRITICAL|ERROR|Traceback|429|Timeout' | \
+  grep -E 'DEMO_REARM|v3_runtime_started|external_broker_activity|observation|CRITICAL|ERROR|Traceback|429|Timeout' | \
   tail -n 60 || true
 
-# Do not mistake PID 1 being alive for an authorized trading state.
+# Staging success is NOT evidence that manual closes filled or BUYs are enabled.
 deployed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-printf '{"git_commit":"%s","image":"%s","deployed_at":"%s","observation_only":true}\n' \
+printf '{"git_commit":"%s","image":"%s","deployed_at":"%s","observation_only_at_deploy":true,"auto_rearm_requires_two_flat_broker_checks":true}\n' \
   "$git_sha" "$image" "$deployed_at" > "$app_dir/deployment.json"
-printf 'Goblin observation-only release verified on %s (%s)\n' "$image" "$container_id"
+printf 'Goblin DEMO close-watch release staged on %s (%s); BUY only after two broker-flat checks and normal V3 preflight\n' "$image" "$container_id"

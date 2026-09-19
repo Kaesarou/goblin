@@ -5,16 +5,14 @@ services:
     init: true
     env_file:
       - .env
-    # Recovery release: collect real DEMO payloads without rearming BUYs even if
-    # manually queued closes complete before the next preflight. A separate
-    # reviewed release is required to enable broker mutations again.
+    # The persistent guard starts the DEMO close watcher. No new BUY until
+    # two independent broker-flat checks and V3's own reconciliation.
     environment:
-      GOBLIN_OBSERVATION_ONLY: "1"
+      GOBLIN_OBSERVATION_ONLY: "0"
+      GOBLIN_DEMO_AUTO_REARM_AFTER_MANUAL_CLOSE: "1"
     volumes:
       - ./data:/app/data
-    # Count starts in a persistent 30-minute window: Docker may reset its own
-    # retry counter after 10 seconds of uptime. A tripped guard exits 0 without
-    # submitting broker actions, and requires operator review before restart.
+    # The guard is always the parent and forwards SIGTERM to its child.
     command: ["python", "-m", "app.runtime.restart_guard"]
     restart: "on-failure:5"
     stop_signal: SIGTERM
