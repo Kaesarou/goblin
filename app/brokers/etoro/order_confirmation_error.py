@@ -3,6 +3,32 @@ from __future__ import annotations
 from datetime import datetime
 
 
+class EtoroOrderRejectedError(RuntimeError):
+    """The order lookup explicitly reported a terminal rejected/failed state.
+
+    This exception must only be raised after examining the broker's structured
+    response. Neither HTTP failure nor an exception message proves rejection.
+    """
+
+    def __init__(
+        self,
+        *,
+        order_id: str,
+        error_code: int | None,
+        error_message: str | None,
+        details: dict,
+    ) -> None:
+        self.order_id = order_id
+        self.error_code = error_code
+        self.error_message = error_message
+        self.details = details
+        super().__init__(
+            'eToro order rejected: '
+            f'order_id={order_id}, error_code={error_code}, '
+            f'error_message={error_message}, details={details}'
+        )
+
+
 class EtoroOrderConfirmationUnknownError(RuntimeError):
     def __init__(
         self,
