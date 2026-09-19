@@ -15,6 +15,7 @@ from app.brokers.etoro.order_confirmation_error import EtoroOrderRejectedError
 from app.brokers.etoro.pending_orders_preflight import pending_open_order_descriptions
 from app.brokers.etoro.portfolio_position_parser import extract_open_position_units
 from app.brokers.etoro.resilient_client import ResilientEtoroClient
+from app.v3.external_account_gate import gate_active, record_external_broker_activity
 from . import _live_execution_impl as _impl
 
 
@@ -28,6 +29,13 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
         self._unresolved_open_actions: set[str] = set()
         self._notional_anomaly_action_ids: set[str] = set()
         self._account_observation_only = False
+        broker = getattr(self.broker, "delegate", self.broker)
+        if isinstance(broker, ResilientEtoroClient) and broker.env == "demo":
+            # The P&L open-order arrays do not prove that manual CLOSE orders
+            # have settled. Replacing SQLite never clears this durable gate.
+            if gate_active(self.event_store.path):
+                self._account_observation_only = True
+                self.halted_reason = "external_broker_activity_ack_required"
         active_position_ids = {
             str(leg.position_id)
             for inventory in self.book.inventories
@@ -86,9 +94,8 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
 
     def verify_known_broker_legs(self) -> tuple[str, ...]:
         # A fresh SQLite knows no broker legs. After manually queuing closes
-        # outside market hours, the positions can remain visible until the
-        # exchange executes those closes. Start the data/research runtime in
-        # observation-only mode, but never trade those untracked positions.
+        # outside market hours, positions may remain visible until execution.
+        # Start market/research services, but never trade untracked positions.
         broker = getattr(self.broker, "delegate", self.broker)
         if isinstance(broker, ResilientEtoroClient):
             known_ids = {
@@ -117,6 +124,7 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
                 # Only a genuinely empty ledger may opt into observation-only
                 # startup. Never conceal divergences in an existing ledger.
                 if not self.event_store.events() and not known_ids:
+                    record_external_broker_activity(self.event_store.path, issues=issues)
                     self._account_observation_only = True
                     self.halted_reason = "external_broker_activity_observation_only"
                     return ()
@@ -125,6 +133,8 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
                     else "untracked_broker_positions"
                 )
                 return issues
+        # A previously observed close cannot silently re-arm on a later restart
+        # merely because current positions disappeared from the portfolio.
         return super().verify_known_broker_legs()
 
     def schedule(self, intent, *, snapshot):
