@@ -6,13 +6,15 @@ from pathlib import Path
 import pytest
 
 from app.runtime import restart_guard
+from scripts import demo_rearm_after_manual_closes
 
 
 def test_production_compose_runs_guard_with_persistent_data_volume():
-    """A unit-tested guard is useless if production bypasses the wrapper."""
+    """The DEMO close watcher must call the tested persistent start guard."""
     compose = (Path(__file__).resolve().parents[2] /
                "docker-compose.production.yml").read_text(encoding="utf-8")
-    assert 'command: ["python", "-m", "app.runtime.restart_guard"]' in compose
+    assert 'command: ["python", "-m", "scripts.demo_rearm_after_manual_closes"]' in compose
+    assert demo_rearm_after_manual_closes.start_normal_runtime is restart_guard.main
     assert './data:/app/data' in compose
     assert 'restart: "on-failure:5"' in compose
 
