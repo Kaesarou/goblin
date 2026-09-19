@@ -32,6 +32,20 @@ def test_broker_terminal_status_produces_typed_rejection(monkeypatch):
     assert caught.value.details == details
 
 
+@pytest.mark.parametrize("position_executions", (
+    [{"positionID": "p1", "openingData": {"avgPrice": 99.27, "units": 3.0}}],
+    [{"positionID": "p1", "openingData": {"units": None}}],
+))
+def test_rejected_order_with_position_execution_is_not_definitive(monkeypatch, position_executions):
+    client = _client()
+    details = {"status": {"name": "Rejected", "errorCode": 42},
+               "positionExecutions": position_executions}
+    monkeypatch.setattr(client, "get_order_details", lambda order_id: details)
+    with pytest.raises(RuntimeError, match="outcome conflicting") as caught:
+        client._wait_for_executed_order("order-conflict", attempts=1, delay_seconds=0)
+    assert not isinstance(caught.value, EtoroOrderRejectedError)
+
+
 def test_failed_lookup_never_proves_rejection(monkeypatch):
     client = _client()
 
