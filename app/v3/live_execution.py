@@ -12,6 +12,7 @@ import sys
 from dataclasses import replace
 
 from app.brokers.etoro.order_confirmation_error import EtoroOrderRejectedError
+from app.brokers.etoro.pending_orders_preflight import pending_open_order_descriptions
 from app.brokers.etoro.portfolio_position_parser import extract_open_position_units
 from app.brokers.etoro.resilient_client import ResilientEtoroClient
 from . import _live_execution_impl as _impl
@@ -58,10 +59,9 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
             self.halted_reason = "open_account_notional_mismatch_at_restart"
 
     def verify_known_broker_legs(self) -> tuple[str, ...]:
-        # A fresh SQLite has no known legs: the base verifier would return OK
-        # without contacting eToro. Query the full DEMO portfolio first and
-        # reject ANY position absent from the event ledger. A malformed or
-        # unavailable portfolio must raise, never masquerade as an empty one.
+        # Fresh SQLite has no known legs: the base verifier would return OK
+        # without contacting eToro. Query the whole account, including pending
+        # opens, and refuse any incomplete response rather than assume zero risk.
         broker = getattr(self.broker, "delegate", self.broker)
         if isinstance(broker, ResilientEtoroClient):
             known_ids = {
@@ -72,18 +72,26 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
             }
             try:
                 all_units = extract_open_position_units(broker.get_portfolio())
+                pending_opens = pending_open_order_descriptions(broker)
             except Exception:
-                self.halted_reason = "broker_portfolio_preflight_unavailable"
+                self.halted_reason = "broker_account_preflight_unavailable"
                 raise
             unexpected = tuple(
                 f"untracked_broker_position:{position_id}:units={units:.12g}"
                 for position_id, units in sorted(all_units.items())
                 if units is not None and units > 0 and position_id not in known_ids
             )
-            if unexpected:
-                self.halted_reason = "untracked_broker_positions"
-                self._last_broker_reconciliation_issues = unexpected
-                return unexpected
+            pending_issues = tuple(
+                f"pending_broker_open:{description}" for description in pending_opens
+            )
+            issues = unexpected + pending_issues
+            if issues:
+                self.halted_reason = (
+                    "pending_broker_open_orders" if pending_issues
+                    else "untracked_broker_positions"
+                )
+                self._last_broker_reconciliation_issues = issues
+                return issues
         return super().verify_known_broker_legs()
 
     def schedule(self, intent, *, snapshot):
@@ -160,12 +168,8 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
                     or reported > 1.2 * requested
                 )
                 if inconsistent:
-                    # eToro has returned investedAmountCurrency=1.0 for orders
-                    # of hundreds of USD. Do not book $1 exposure. A requested
-                    # amount is a fallback, NOT a proven broker cost basis;
-                    # preserve the raw value and halt new risk for investigation.
-                    # If the broker reports MORE than requested, retain that
-                    # larger exposure instead of understating it.
+                    # Preserve the broker's raw $1 amount for investigation.
+                    # Requested account currency is provisional, not certified.
                     use_requested = not math.isfinite(reported) or reported < requested
                     booked = requested if use_requested else reported
                     self._append(
@@ -189,8 +193,6 @@ class V3BrokerExecutor(_impl.V3BrokerExecutor):
                     self._notional_anomaly_action_ids.add(action)
                     self.halted_reason = "open_account_notional_mismatch"
                     if use_requested:
-                        # The base executor will book requested account currency
-                        # rather than the broker's inconsistent $1 amount.
                         completion = replace(
                             completion, value=replace(result, executed_notional=None)
                         )
