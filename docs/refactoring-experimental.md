@@ -44,6 +44,17 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
    trailing-extrema helper from the V3 Point-M replay. The active
    `_ext_values` implementation is unchanged; Point-M behavior is preserved.
    Validation: the full 928-test suite passes.
+6. eToro payload contracts: replace the old tuple-based key mappers and
+   recursive envelope/case fallbacks with the documented endpoint fields. The
+   adapter now reads `orderId`/`referenceId`, `positionExecutions[].positionId`,
+   `openingData.avgPrice`/`units`, `orderForClose.positionID`/`statusID`,
+   `clientPortfolio.positions[].positionID`/`units`, aggregate
+   `accountTotals.accountTotalValue`, instrument `items[].internalInstrumentId`,
+   REST rates `instrumentID`/`Bid`/`Ask`/`Last`, P&L root `ordersForOpen`/`orders`,
+   and the canonical WebSocket `Bid`/`Ask`/`LastExecution`/`Date`/
+   `PriceRateID` fields. Unused generic scalar/string mapper modules and their
+   compatibility tests were removed. Validation: the full 907-test suite
+   passes.
 
 ## Retirement evidence
 
@@ -55,12 +66,14 @@ consumers were only V1-specific tests. CLI entrypoints in Docker/Compose, shell
 scripts, workflows and documentation were also checked. No dynamic imports or
 plugin entrypoints target these modules.
 
-Test accounting: 1,034 passing after checkpoint 2 minus 94 retired V1-only tests
-minus 12 byte-identical duplicate portfolio-parser tests = **928 passing**.
-The other portfolio-parser test file is retained unchanged. Four research tests
-are retained and now exercise V3 instead of a fabricated V1 runtime. No active
-V3 safety/strategy test was removed. Removed code and tests remain recoverable
-from the baseline commit above.
+Test accounting: 1,034 passing after checkpoint 2 minus the retired V1-only and
+duplicate compatibility coverage through checkpoint 5, then the obsolete
+payload-key mapper coverage in checkpoint 6 = **907 passing**. The retained
+tests exercise the documented eToro shapes and assert that unknown/legacy
+shapes fail closed. Four research tests are retained and now exercise V3
+instead of a fabricated V1 runtime. No active V3 safety/strategy test was
+removed. Removed code and tests remain recoverable from the baseline commit
+above.
 
 ## Validation
 

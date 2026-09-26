@@ -37,8 +37,8 @@ def _client(monkeypatch, *, instrument_price=100.0, units=3.0,
 
 def test_one_dollar_order_field_uses_exact_pnl_position_usd_amount(monkeypatch):
     client, calls = _client(monkeypatch, pnl={"clientPortfolio": {"positions": [
-        {"positionId": "different", "amount": 10_000.0},
-        {"positionId": "position-1", "amount": 299.0},
+        {"positionID": "different", "amount": 10_000.0},
+        {"positionID": "position-1", "amount": 299.0},
     ]}})
     result = client.open_position("INTC", "BUY", 300.0, 50.0, 1_000.0)
     assert result.position_id == "position-1"
@@ -65,10 +65,10 @@ def test_good_broker_notional_requires_no_extra_pnl_get(monkeypatch):
 
 @pytest.mark.parametrize("pnl", (
     {"clientPortfolio": {"positions": []}},
-    {"clientPortfolio": {"positions": [{"positionId": "position-1", "amount": 1.0}]}},
+    {"clientPortfolio": {"positions": [{"positionID": "position-1", "amount": 1.0}]}},
     {"clientPortfolio": {"positions": [
-        {"positionId": "position-1", "amount": 300.0},
-        {"positionId": "position-1", "amount": 300.0},
+        {"positionID": "position-1", "amount": 300.0},
+        {"positionID": "position-1", "amount": 300.0},
     ]}},
     {"no": "positions"},
     RuntimeError("GET 429"),
@@ -86,10 +86,10 @@ def test_missing_stale_ambiguous_or_unavailable_pnl_never_hides_confirmed_fill(
 def test_pnl_parser_rejects_duplicate_or_invalid_amounts():
     with pytest.raises(ValueError, match="Duplicate"):
         position_amount_usd({"clientPortfolio": {"positions": [
-            {"positionId": "p1", "amount": 300},
-            {"positionId": "p1", "amount": 300},
+            {"positionID": "p1", "amount": 300},
+            {"positionID": "p1", "amount": 300},
         ]}}, "p1")
     with pytest.raises(ValueError, match="amount"):
         position_amount_usd({"clientPortfolio": {"positions": [
-            {"positionId": "p1", "amount": True},
+            {"positionID": "p1", "amount": True},
         ]}}, "p1")

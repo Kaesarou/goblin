@@ -22,21 +22,16 @@ def position_amount_usd(payload: dict, position_id: str) -> float | None:
     """
     if not isinstance(payload, dict):
         raise ValueError("Invalid eToro P&L payload")
-    current = payload
-    for _ in range(4):
-        root = current.get("clientPortfolio", current)
-        if isinstance(root, dict) and "positions" in root:
-            break
-        current = current.get("data")
-        if not isinstance(current, dict):
-            raise ValueError("Missing authoritative eToro P&L positions")
-    else:
-        raise ValueError("Excessively nested eToro P&L positions")
-
-    positions = root["positions"]
+    client_portfolio = payload.get("clientPortfolio")
+    if not isinstance(client_portfolio, dict):
+        raise ValueError("Missing authoritative eToro P&L positions")
+    positions = client_portfolio.get("positions")
     if not isinstance(positions, list) or not all(isinstance(p, dict) for p in positions):
         raise ValueError("Invalid eToro P&L positions collection")
-    matches = [p for p in positions if extract_position_id(p) == str(position_id)]
+    matches = [
+        p for p in positions
+        if extract_position_id(p) == str(position_id)
+    ]
     if len(matches) > 1:
         raise ValueError(f"Duplicate eToro P&L position identity: {position_id}")
     if not matches:

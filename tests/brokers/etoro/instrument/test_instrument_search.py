@@ -8,7 +8,7 @@ from app.brokers.etoro.instrument_search_parser import (
 )
 
 
-def test_extract_items_from_items_list_and_ignores_non_dict_values():
+def test_extract_items_from_documented_items_list_and_ignores_non_dict_values():
     payload = {
         'items': [
             {'internalSymbolFull': 'BTC'},
@@ -23,39 +23,16 @@ def test_extract_items_from_items_list_and_ignores_non_dict_values():
     ]
 
 
-def test_extract_items_from_single_data_dict():
-    assert extract_items({'data': {'internalSymbolFull': 'BTC'}}) == [
-        {'internalSymbolFull': 'BTC'}
-    ]
-
-
-def test_extract_items_from_payload_list():
-    assert extract_items([
-        {'internalSymbolFull': 'BTC'},
-        'ignored',
-        {'internalSymbolFull': 'ETH'},
-    ]) == [
-        {'internalSymbolFull': 'BTC'},
-        {'internalSymbolFull': 'ETH'},
-    ]
-
-
 def test_extract_items_returns_empty_list_when_missing():
     assert extract_items({'unexpected': []}) == []
 
 
-@pytest.mark.parametrize(
-    ('instrument', 'instrument_id'),
-    [
-        ({'internalInstrumentId': 100000}, 100000),
-        ({'instrumentId': '100001'}, 100001),
-        ({'InstrumentID': 100002}, 100002),
-        ({'instrumentID': 100003}, 100003),
-        ({'id': 100004}, 100004),
-    ],
-)
-def test_extract_instrument_id_accepts_known_key_variants(instrument: dict, instrument_id: int):
-    assert extract_instrument_id(instrument) == instrument_id
+def test_extract_instrument_id_uses_documented_field():
+    assert extract_instrument_id({'internalInstrumentId': '100000'}) == 100000
+
+
+def test_extract_instrument_id_ignores_legacy_field_names():
+    assert extract_instrument_id({'instrumentId': 100001}) is None
 
 
 def test_extract_instrument_id_returns_none_when_missing():
