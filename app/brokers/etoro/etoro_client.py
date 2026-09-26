@@ -618,13 +618,6 @@ class EtoroClient(BrokerClient):
     def _extract_reference_id(self, payload: dict) -> str | None:
         return extract_reference_id(payload)
 
-    def _is_close_response_accepted(self, payload: dict, position_id: str) -> bool:
-        return is_close_response_accepted(payload, position_id)
-
-    def _is_order_rejected(self, payload: dict) -> bool:
-        return is_order_rejected(payload)
-
-
 def _retry_after_seconds(response) -> float | None:
     value = response.headers.get('Retry-After')
     if value in (None, ''):
