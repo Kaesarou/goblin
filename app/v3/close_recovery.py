@@ -60,6 +60,50 @@ class CloseEventReplay:
     unattributed_position_ids: set[str]
 
 
+def reconciled_reduction_attributable(
+    context: _CloseContext,
+    *,
+    previous_units: float,
+    reconciled_book_units: float,
+    units_close: Callable[[float, float], bool],
+    migration_units_close: Callable[[float, float], bool],
+) -> bool:
+    """Compare a pending close with an observed broker quantity reduction."""
+    baseline_matches = (
+        context.pre_close_units is None
+        or units_close(previous_units, context.pre_close_units)
+    )
+    compare = migration_units_close if context.pre_close_units is None else units_close
+    return baseline_matches and compare(reconciled_book_units, context.requested_units)
+
+
+def confirmed_economics_attributable(
+    context: _CloseContext,
+    reconciled: _ReconciledCloseQuantity,
+    *,
+    executed_units: float,
+    units_close: Callable[[float, float], bool],
+    migration_units_close: Callable[[float, float], bool],
+) -> bool:
+    """Modern broker evidence can correct old attribution; legacy evidence cannot."""
+    if context.pre_close_units is None:
+        return reconciled.attribution_confident and migration_units_close(
+            executed_units, reconciled.reconciled_book_units,
+        )
+
+    baseline_matches = units_close(
+        context.pre_close_units,
+        reconciled.reconciled_book_units + reconciled.broker_units,
+    )
+    requested_matches = units_close(
+        reconciled.reconciled_book_units, context.requested_units,
+    )
+    execution_matches = units_close(
+        executed_units, reconciled.reconciled_book_units,
+    )
+    return baseline_matches and requested_matches and execution_matches
+
+
 def replay_close_events(
     events: Iterable[InventoryEvent],
     *,

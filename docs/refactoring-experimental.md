@@ -112,6 +112,12 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
     mutation locks and halt decisions, while the replay step reconstructs
     accepted actions, reconciled quantities, resolved actions and unattributed
     positions without mutating the executor or retry store.
+19. Centralize pure close attribution checks with the recovered close context.
+    A legacy action retains its historical confidence gate and migration
+    quantity tolerance; a modern action can correct a historical false flag
+    only when baseline, requested and executed quantities match broker
+    evidence. Journal writes, quantity application, retry persistence and risk
+    halts remain in the executor.
 
 ## Retirement evidence
 

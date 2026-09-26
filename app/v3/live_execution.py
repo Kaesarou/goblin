@@ -22,6 +22,8 @@ from app.v3.close_recovery import (
     _CloseContext,
     _PendingCloseConfirmation,
     _ReconciledCloseQuantity,
+    confirmed_economics_attributable,
+    reconciled_reduction_attributable,
     replay_close_events,
 )
 from app.v3.execution import ProRataPartialCloseAllocator, assess_inventory_close
@@ -800,11 +802,13 @@ class V3BrokerExecutor:
         pending = self._pending_close_confirmations.get(active_id)
         attribution_confident = False
         if allow_action_attribution and pending is not None and pending.mutation_active:
-            context = pending.context
-            baseline_matches = (context.pre_close_units is None or
-                                _units_close(previous_units, context.pre_close_units))
-            compare = _migration_units_close if context.pre_close_units is None else _units_close
-            attribution_confident = baseline_matches and compare(reconciled_book_units, context.requested_units)
+            attribution_confident = reconciled_reduction_attributable(
+                pending.context,
+                previous_units=previous_units,
+                reconciled_book_units=reconciled_book_units,
+                units_close=_units_close,
+                migration_units_close=_migration_units_close,
+            )
 
         previous_account_notional = (
             float(leg.account_notional)
@@ -1492,33 +1496,13 @@ class V3BrokerExecutor:
             return False
         reconciled = self._reconciled_close_quantities.get(context.action_id)
         if reconciled is not None:
-            if context.pre_close_units is None:
-                attribution_confident = (
-                    reconciled.attribution_confident
-                    and _migration_units_close(
-                        executed_units,
-                        reconciled.reconciled_book_units,
-                    )
-                )
-            else:
-                baseline_matches = _units_close(
-                    context.pre_close_units,
-                    reconciled.reconciled_book_units + reconciled.broker_units,
-                )
-                requested_matches = _units_close(
-                    reconciled.reconciled_book_units,
-                    context.requested_units,
-                )
-                execution_matches = _units_close(
-                    executed_units,
-                    reconciled.reconciled_book_units,
-                )
-                # Re-evaluate modern attribution from authoritative quantities
-                # instead of permanently trusting a historical false flag caused
-                # by a tighter-than-broker rounding tolerance.
-                attribution_confident = (
-                    baseline_matches and requested_matches and execution_matches
-                )
+            attribution_confident = confirmed_economics_attributable(
+                context,
+                reconciled,
+                executed_units=executed_units,
+                units_close=_units_close,
+                migration_units_close=_migration_units_close,
+            )
             if not attribution_confident:
                 self._unattributed_reconciled_position_ids.add(context.position_id)
                 if self.halted_reason in {
