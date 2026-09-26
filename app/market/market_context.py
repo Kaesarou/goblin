@@ -439,34 +439,11 @@ class MarketContextService:
                     config.maximum_context_age_seconds
                 ),
             )
-            return BenchmarkContext(
-                symbol=symbol,
-                available=True,
-                direction=_direction_from_return(
-                    session_return,
-                    config.minimum_benchmark_move_percent,
-                ),
-                session_return_percent=_round_optional(session_return),
-                momentum_percent=_round_optional(momentum),
-                spread_percent=_round_optional(_spread_percent(snapshot)),
-                snapshot_age_seconds=round(
-                    max(
-                        0.0,
-                        (
-                            as_of - _as_utc(snapshot.timestamp)
-                        ).total_seconds(),
-                    ),
-                    3,
-                ),
+            return _build_benchmark_context(
+                symbol, snapshot, session_return, momentum, as_of, config,
             )
-        return BenchmarkContext(
-            symbol=configured_symbols[0] if configured_symbols else None,
-            available=False,
-            direction=MarketDirection.UNKNOWN,
-            session_return_percent=None,
-            momentum_percent=None,
-            spread_percent=None,
-            snapshot_age_seconds=None,
+        return _unavailable_benchmark_context(
+            configured_symbols[0] if configured_symbols else None,
         )
 
     def _research_breadth_context(
@@ -680,29 +657,11 @@ class MarketContextService:
                 window_seconds=config.momentum_window_seconds,
                 maximum_reference_lag_seconds=config.maximum_context_age_seconds,
             )
-            return BenchmarkContext(
-                symbol=symbol,
-                available=True,
-                direction=_direction_from_return(
-                    session_return,
-                    config.minimum_benchmark_move_percent,
-                ),
-                session_return_percent=_round_optional(session_return),
-                momentum_percent=_round_optional(momentum),
-                spread_percent=_round_optional(_spread_percent(snapshot)),
-                snapshot_age_seconds=round(
-                    max(0.0, (as_of - _as_utc(snapshot.timestamp)).total_seconds()),
-                    3,
-                ),
+            return _build_benchmark_context(
+                symbol, snapshot, session_return, momentum, as_of, config,
             )
-        return BenchmarkContext(
-            symbol=configured_symbols[0] if configured_symbols else None,
-            available=False,
-            direction=MarketDirection.UNKNOWN,
-            session_return_percent=None,
-            momentum_percent=None,
-            spread_percent=None,
-            snapshot_age_seconds=None,
+        return _unavailable_benchmark_context(
+            configured_symbols[0] if configured_symbols else None,
         )
 
     def _breadth_context(
@@ -914,6 +873,37 @@ def _direction_from_return(
     if value <= -minimum_move_percent:
         return MarketDirection.BEARISH
     return MarketDirection.NEUTRAL
+
+
+def _build_benchmark_context(
+    symbol: str, snapshot: MarketSnapshot, session_return: float | None,
+    momentum: float | None, as_of: datetime, config: MarketContextConfig,
+) -> BenchmarkContext:
+    return BenchmarkContext(
+        symbol=symbol,
+        available=True,
+        direction=_direction_from_return(
+            session_return, config.minimum_benchmark_move_percent,
+        ),
+        session_return_percent=_round_optional(session_return),
+        momentum_percent=_round_optional(momentum),
+        spread_percent=_round_optional(_spread_percent(snapshot)),
+        snapshot_age_seconds=round(
+            max(0.0, (as_of - _as_utc(snapshot.timestamp)).total_seconds()), 3,
+        ),
+    )
+
+
+def _unavailable_benchmark_context(symbol: str | None) -> BenchmarkContext:
+    return BenchmarkContext(
+        symbol=symbol,
+        available=False,
+        direction=MarketDirection.UNKNOWN,
+        session_return_percent=None,
+        momentum_percent=None,
+        spread_percent=None,
+        snapshot_age_seconds=None,
+    )
 
 
 def _build_breadth_context(

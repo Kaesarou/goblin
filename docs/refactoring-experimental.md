@@ -133,6 +133,10 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
     strictly before the cutoff; live retains its existing freshness policy.
     Availability thresholds, direction, rounding and median are calculated
     once from the selected returns.
+23. Share benchmark-context construction and unavailable fallback after each
+    path chooses its own eligible snapshot, session return and momentum. The
+    live freshness and strict research cutoff remain separate; the resulting
+    direction, spread and snapshot-age calculations now have one owner.
 
 ## Retirement evidence
 

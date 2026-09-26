@@ -191,6 +191,7 @@ def test_live_and_research_aggregate_the_same_eligible_returns():
     live = service.build_candidate_context(symbol='AAPL', side='BUY', as_of=cutoff)
     research = service.build_side_neutral_research_context(symbol='AAPL', as_of=cutoff)
 
+    assert live.benchmark == research.benchmark
     assert live.breadth == research.breadth
     assert live.sector == research.sector
     assert live.breadth.advancing_count == 1
