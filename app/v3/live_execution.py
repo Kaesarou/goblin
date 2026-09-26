@@ -1559,6 +1559,25 @@ class V3BrokerExecutor:
             self._finalize_confirmed_close_action(context)
             return True
 
+        return self._confirm_direct_close(
+            context=context,
+            exit_price=exit_price,
+            filled_at=filled_at,
+            close_order_id=close_order_id,
+            executed_units=executed_units,
+            broker_execution_position_id=broker_execution_position_id,
+        )
+
+    def _confirm_direct_close(
+        self,
+        *,
+        context: _CloseContext,
+        exit_price: float,
+        filled_at: datetime,
+        close_order_id: str,
+        executed_units: float,
+        broker_execution_position_id: str | None,
+    ) -> bool:
         inventory = self.book.active_for_symbol(context.intent.symbol)
         if inventory is None:
             self.halted_reason = "close_fill_without_inventory"

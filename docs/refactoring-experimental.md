@@ -137,6 +137,10 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
     path chooses its own eligible snapshot, session return and momentum. The
     live freshness and strict research cutoff remain separate; the resulting
     direction, spread and snapshot-age calculations now have one owner.
+24. Separate direct close execution from the path where broker quantity was
+    already reconciled. Shared idempotency and execution validation still run
+    first; each path retains its original journal-before-book ordering,
+    instrument cleanup, retry retirement and risk-halt behavior.
 
 ## Retirement evidence
 
