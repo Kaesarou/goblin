@@ -13,11 +13,8 @@ from app.brokers.base import (
     ClosePositionRejectedError,
     ClosePositionSubmissionUnknownError,
     OpenPositionResult,
+    OpenPositionRejectedError,
 )
-from app.brokers.etoro.order_confirmation_error import EtoroOrderRejectedError
-from app.brokers.etoro.pending_orders_preflight import pending_open_order_descriptions
-from app.brokers.etoro.portfolio_position_parser import extract_open_position_units
-from app.brokers.etoro.resilient_client import ResilientEtoroClient
 from app.market.models import MarketSnapshot
 from app.runtime.broker_task_runner import BrokerTaskCompletion, BrokerTaskLane
 from app.v3.book import InventoryBook
@@ -192,8 +189,7 @@ class V3BrokerExecutor:
         self._unresolved_open_actions: set[str] = set()
         self._notional_anomaly_action_ids: set[str] = set()
         self._account_observation_only = False
-        broker = getattr(self.broker, "delegate", self.broker)
-        if isinstance(broker, ResilientEtoroClient) and broker.env == "demo":
+        if getattr(self.broker, "requires_external_activity_ack", False):
             # The P&L open-order arrays do not prove that manual CLOSE orders
             # have settled. Replacing SQLite never clears this durable gate.
             if gate_active(self.event_store.path):
@@ -750,27 +746,29 @@ class V3BrokerExecutor:
         # A fresh SQLite knows no broker legs. After manually queuing closes
         # outside market hours, positions may remain visible until execution.
         # Start market/research services, but never trade untracked positions.
-        broker = getattr(self.broker, "delegate", self.broker)
-        if isinstance(broker, ResilientEtoroClient):
+        preflight = None
+        get_preflight = getattr(self.broker, "get_account_preflight", None)
+        if get_preflight is not None:
+            try:
+                preflight = get_preflight()
+            except Exception:
+                self.halted_reason = "broker_account_preflight_unavailable"
+                raise
+        if preflight is not None:
             known_ids = {
                 str(leg.position_id)
                 for inventory in self.book.inventories
                 for leg in inventory.broker_legs
                 if leg.units > 0
             }
-            try:
-                all_units = extract_open_position_units(broker.get_portfolio())
-                pending_opens = pending_open_order_descriptions(broker)
-            except Exception:
-                self.halted_reason = "broker_account_preflight_unavailable"
-                raise
             unexpected = tuple(
                 f"untracked_broker_position:{position_id}:units={units:.12g}"
-                for position_id, units in sorted(all_units.items())
+                for position_id, units in sorted(preflight.position_units.items())
                 if units is not None and units > 0 and position_id not in known_ids
             )
             pending_issues = tuple(
-                f"pending_broker_open:{description}" for description in pending_opens
+                f"pending_broker_open:{description}"
+                for description in preflight.pending_open_orders
             )
             issues = unexpected + pending_issues
             if issues:
@@ -1215,9 +1213,9 @@ class V3BrokerExecutor:
         action = context.action_id
         symbol = context.intent.symbol.strip().upper()
         error = completion.error
-        # Only a structured broker terminal status creates EtoroOrderRejectedError.
+        # Only a structured broker terminal status creates OpenPositionRejectedError.
         # Error text, even a literal "eToro order rejected:", is never proof.
-        if error is not None and not isinstance(error, EtoroOrderRejectedError):
+        if error is not None and not isinstance(error, OpenPositionRejectedError):
             self._pending_actions.discard(action)
             self._append(
                 event_type="ORDER_SUBMISSION_UNKNOWN",
@@ -1301,7 +1299,7 @@ class V3BrokerExecutor:
             raise
         if applied:
             self._release_open(symbol, action)
-        elif isinstance(error, EtoroOrderRejectedError):
+        elif isinstance(error, OpenPositionRejectedError):
             self._release_open(symbol, action)
         else:
             if self.halted_reason is None:

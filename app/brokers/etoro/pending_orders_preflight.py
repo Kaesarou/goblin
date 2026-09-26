@@ -45,7 +45,7 @@ def pending_open_order_descriptions(client) -> tuple[str, ...]:
             raise ValueError(f"Missing or invalid eToro P&L {field} collection")
         for index, order in enumerate(entries):
             identity = next(
-                (str(order[key]) for key in ("orderId", "orderID", "orderId", "id", "orderForOpenID")
+                (str(order[key]) for key in ("orderId", "orderID", "id", "orderForOpenID")
                  if order.get(key) is not None),
                 f"index-{index}",
             )

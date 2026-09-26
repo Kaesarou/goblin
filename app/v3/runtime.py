@@ -8,7 +8,6 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Mapping
 
-from app.brokers.etoro.account_equity_mapper import ACCOUNT_EQUITY_SOURCE
 from app.market.data_quality import MarketDataStatus, MarketDataValidator
 from app.market.models import MarketSnapshot
 from app.market_data.coordinator import MarketDataCoordinator
@@ -997,8 +996,7 @@ class GoblinV3Runtime:
                         and isinstance(equity, (int, float))
                         and math.isfinite(equity) and equity > 0):
                     now = datetime.now(UTC)
-                    source = ("paper_broker" if self.settings.broker == "paper"
-                              else ACCOUNT_EQUITY_SOURCE)
+                    source = self.execution_broker.account_equity_source
                     self.runtime_state_store.save_broker_equity(
                         value=equity, observed_at=now, source=source,
                     )

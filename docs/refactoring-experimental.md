@@ -20,6 +20,13 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
    into `app/v3/live_execution.py`. Remove the `sys.modules` replacement and the
    unreachable duplicate unknown-error classification. Existing public imports
    and clock monkeypatches work directly. Validation: 1,026 tests pass.
+2. Broker boundaries: account preflight, durable external-activity policy,
+   equity provenance and structured open rejection are generic contracts.
+   eToro payload parsing stays in its adapter; caching forwards safety reads
+   without TTL reuse. The V3 execution/decision core no longer imports a concrete
+   broker (the deployment manifest retains its eToro provenance). Contract tests
+   cover another broker, nested caches, rejection, unavailable preflight and
+   unchanged paper/demo/live metadata.
 
 ## Validation
 

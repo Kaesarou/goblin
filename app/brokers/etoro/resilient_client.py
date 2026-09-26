@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 import requests
 
-from app.brokers.base import OpenPositionResult
+from app.brokers.base import BrokerAccountPreflight, OpenPositionResult
 from app.brokers.etoro.etoro_client import EtoroClient
 from app.brokers.etoro.order_confirmation_error import (
     EtoroOrderConfirmationUnknownError,
@@ -19,6 +19,8 @@ from app.brokers.etoro.order_response_parser import (
     is_order_rejected,
 )
 from app.brokers.etoro.pnl_position_amount import position_amount_usd
+from app.brokers.etoro.pending_orders_preflight import pending_open_order_descriptions
+from app.brokers.etoro.portfolio_position_parser import extract_open_position_units
 from app.brokers.etoro.position_instrument_cache import (
     remember_position_instrument_id,
 )
@@ -29,6 +31,16 @@ logger = logging.getLogger(__name__)
 
 class ResilientEtoroClient(EtoroClient):
     """Preserve exposure while accepted open orders remain uncertain."""
+
+    @property
+    def requires_external_activity_ack(self) -> bool:
+        return self.env == "demo"
+
+    def get_account_preflight(self) -> BrokerAccountPreflight:
+        return BrokerAccountPreflight(
+            position_units=extract_open_position_units(self.get_portfolio()),
+            pending_open_orders=pending_open_order_descriptions(self),
+        )
 
     def _wait_for_executed_order(
         self,

@@ -83,6 +83,7 @@ class EtoroClient(BrokerClient):
     """
 
     etoro_api_base_url = 'https://public-api.etoro.com'
+    account_equity_source = ACCOUNT_EQUITY_SOURCE
 
     def __init__(
         self,

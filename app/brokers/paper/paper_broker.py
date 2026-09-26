@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 class PaperBrokerClient(BrokerClient):
     """Simulate execution while the runtime consumes real eToro market data."""
 
+    account_equity_source = "paper_broker"
+
     equity: float = 50.0
     positions: dict[str, dict[str, object]] = field(default_factory=dict)
 
