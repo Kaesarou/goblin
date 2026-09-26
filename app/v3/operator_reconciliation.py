@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import math
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime
 
 from app.v3.book import InventoryBook
 from app.v3.live_execution import _units_close

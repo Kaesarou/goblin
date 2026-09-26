@@ -5,7 +5,7 @@ import math
 import sqlite3
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, replace
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 

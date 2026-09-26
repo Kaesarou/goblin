@@ -1,6 +1,6 @@
 from collections import Counter
 from dataclasses import replace
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime
 
 from app.market.candle_builder import CandleBuilder
 from app.market.models import MarketSnapshot

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from app.execution.position_close_reason import PositionCloseReason
 from app.execution.position_models import ExitPriceSource

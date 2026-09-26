@@ -1,7 +1,7 @@
 import logging
 from collections import defaultdict
 from dataclasses import replace
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime
 
 from app.execution.candidate_economics import (
     EvaluatedTradeCandidate,

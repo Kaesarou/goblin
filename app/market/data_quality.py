@@ -2,7 +2,7 @@ import math
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 
 from app.market.models import MarketSnapshot

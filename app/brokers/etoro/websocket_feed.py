@@ -4,7 +4,7 @@ import queue
 import threading
 import time
 from collections.abc import Callable
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from app.brokers.etoro.websocket_protocol import (

@@ -1,4 +1,4 @@
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from app.market.models import Candle, MarketSnapshot
 from app.market.timeframes import BASE_TIMEFRAME

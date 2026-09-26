@@ -1,7 +1,7 @@
 import json
 import logging
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime
 from types import MappingProxyType
 from uuid import uuid4
 
