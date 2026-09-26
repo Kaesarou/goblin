@@ -55,6 +55,11 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
    `PriceRateID` fields. Unused generic scalar/string mapper modules and their
    compatibility tests were removed. Validation: the full 907-test suite
    passes.
+7. Application-wide orphan cleanup: remove the unused legacy
+   `BrokerOrderResult` model and the unused `TradeCandidateScorer` façade.
+   Historical signal scoring remains available through the exercised scorer
+   modules and candidate-ranking path. Validation: the full 907-test suite
+   remains green.
 
 ## Retirement evidence
 
