@@ -18,7 +18,7 @@ from app.brokers.base import (
 from app.market.models import MarketSnapshot
 from app.runtime.broker_task_runner import BrokerTaskCompletion, BrokerTaskLane
 from app.v3.book import InventoryBook
-from app.v3.execution import ProRataPartialCloseAllocator
+from app.v3.execution import ProRataPartialCloseAllocator, assess_inventory_close
 from app.v3.external_account_gate import gate_active, record_external_broker_activity
 from app.v3.models import IntentPurpose, OrderIntent
 from app.v3.persistence import InventoryEvent, InventoryEventStore
@@ -355,86 +355,17 @@ class V3BrokerExecutor:
         inventory = self.book.active_for_symbol(intent.symbol)
         if inventory is None:
             return False
-        fraction = float(intent.metadata.get("close_fraction_of_units", 0.0))
-        strategy_target_units = (
-            inventory.total_units * fraction
-            if fraction > 0
-            else intent.notional / max(float(snapshot.bid), 1e-12)
+        assessment = assess_inventory_close(
+            inventory=inventory,
+            intent=intent,
+            bid=snapshot.bid,
+            allocator=self.allocator,
+            dust_threshold_usd=POINT_M_DUST_NOTIONAL_USD,
+            unit_tolerance=BROKER_UNIT_ABS_TOLERANCE,
         )
-        strategy_target_units = min(inventory.total_units, strategy_target_units)
-        strategy_plan = self.allocator.plan(inventory, strategy_target_units)
-        if not strategy_plan.requests:
+        if assessment is None:
             return False
-
-        leg_by_position = {
-            leg.position_id: leg
-            for leg in inventory.broker_legs
-            if leg.units > 0
-        }
-        projected_leg_remaining: dict[str, float] = {}
-        for request in strategy_plan.requests:
-            leg = leg_by_position[request.position_id]
-            remaining_units = max(0.0, float(leg.units) - float(request.units))
-            if remaining_units <= BROKER_UNIT_ABS_TOLERANCE:
-                projected_leg_remaining[request.position_id] = 0.0
-                continue
-            entry_account_per_unit = (
-                float(leg.account_notional) / max(float(leg.units), 1e-12)
-                if leg.account_notional is not None
-                else float(leg.entry_price)
-            )
-            current_account_per_unit = entry_account_per_unit
-            if float(leg.entry_price) > 0:
-                current_account_per_unit *= (
-                    float(snapshot.bid) / float(leg.entry_price)
-                )
-            projected_leg_remaining[request.position_id] = max(
-                0.0,
-                remaining_units * current_account_per_unit,
-            )
-
-        projected_remaining_notional = sum(projected_leg_remaining.values())
-        aggregate_dust = bool(
-            intent.purpose == IntentPurpose.PROFIT_EXIT
-            and strategy_target_units < inventory.total_units
-            and 0.0 < projected_remaining_notional < POINT_M_DUST_NOTIONAL_USD
-        )
-        broker_leg_dust_positions = sorted(
-            request.position_id
-            for request in strategy_plan.requests
-            if not request.full_close
-            and 0.0 < projected_leg_remaining[request.position_id]
-            < POINT_M_DUST_NOTIONAL_USD
-        )
-        broker_leg_dust = bool(
-            intent.purpose == IntentPurpose.PROFIT_EXIT
-            and strategy_target_units < inventory.total_units
-            and broker_leg_dust_positions
-        )
-        dust_collapse = aggregate_dust or broker_leg_dust
-        if aggregate_dust and broker_leg_dust:
-            dust_collapse_reason = "inventory_and_broker_leg_below_minimum"
-        elif broker_leg_dust:
-            dust_collapse_reason = "broker_leg_below_minimum"
-        elif aggregate_dust:
-            dust_collapse_reason = "inventory_below_minimum"
-        else:
-            dust_collapse_reason = None
-
-        # eToro enforces minimum remaining position equity per physical broker leg,
-        # while Point-M reasons over the aggregate inventory. If an 84% pro-rata
-        # close would leave even one broker leg below the 10 USD safety floor, do
-        # not redistribute the residual and break pro-rata geometry: collapse the
-        # whole inventory to a deterministic 100% close instead.
-        plan = (
-            self.allocator.plan(inventory, inventory.total_units)
-            if dust_collapse
-            else strategy_plan
-        )
-        if not plan.requests:
-            return False
-
-        execution_fraction = plan.target_units / max(inventory.total_units, 1e-12)
+        plan = assessment.plan
         # A plan is pro-rata across its legs. Wait for an active mutation instead
         # of silently submitting only the currently unlocked subset of the plan.
         if any(request.position_id in self._active_close_mutations_by_position
@@ -464,16 +395,16 @@ class V3BrokerExecutor:
                     "pre_close_units": self._current_leg_units(request.position_id),
                     "full_close": request.full_close,
                     "trigger_price": float(snapshot.bid),
-                    "strategy_close_fraction": fraction,
-                    "execution_close_fraction": execution_fraction,
-                    "projected_remaining_notional_usd": projected_remaining_notional,
+                    "strategy_close_fraction": assessment.strategy_fraction,
+                    "execution_close_fraction": assessment.execution_fraction,
+                    "projected_remaining_notional_usd": assessment.projected_remaining_notional,
                     "projected_broker_leg_remaining_notional_usd": (
-                        projected_leg_remaining.get(request.position_id)
+                        assessment.projected_leg_remaining.get(request.position_id)
                     ),
-                    "broker_leg_dust_positions": broker_leg_dust_positions,
+                    "broker_leg_dust_positions": assessment.broker_leg_dust_positions,
                     "dust_threshold_usd": POINT_M_DUST_NOTIONAL_USD,
-                    "dust_collapse": dust_collapse,
-                    "dust_collapse_reason": dust_collapse_reason,
+                    "dust_collapse": assessment.dust_collapse,
+                    "dust_collapse_reason": assessment.dust_collapse_reason,
                 },
             )
             context = _CloseContext(

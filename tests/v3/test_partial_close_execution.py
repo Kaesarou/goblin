@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -6,8 +7,12 @@ from app.brokers.paper.paper_broker import PaperBrokerClient
 from app.market.models import MarketSnapshot
 from app.runtime.broker_task_runner import BrokerTaskCompletion, BrokerTaskLane
 from app.v3.book import InventoryBook
-from app.v3.execution import ProRataPartialCloseAllocator
-from app.v3.live_execution import POINT_M_DUST_NOTIONAL_USD, V3BrokerExecutor
+from app.v3.execution import ProRataPartialCloseAllocator, assess_inventory_close
+from app.v3.live_execution import (
+    BROKER_UNIT_ABS_TOLERANCE,
+    POINT_M_DUST_NOTIONAL_USD,
+    V3BrokerExecutor,
+)
 from app.v3.models import ExecutionStyle, IntentPurpose, OrderIntent
 from app.v3.persistence import InventoryEventStore
 
@@ -104,6 +109,37 @@ def test_pro_rata_allocator_preserves_fraction_per_leg():
     assert [request.units for request in plan.requests] == pytest.approx([1.68, 0.84])
     assert not any(request.full_close for request in plan.requests)
     assert plan.planned_units == pytest.approx(inventory.total_units * 0.84)
+
+
+def test_close_assessment_does_not_collapse_non_profit_partial_close():
+    book = InventoryBook()
+    book.apply_entry_fill(
+        inventory_id="inv",
+        symbol="AAPL",
+        position_id="p1",
+        units=0.5,
+        price=100.0,
+        fee=0.0,
+        filled_at=NOW,
+    )
+    inventory = book.active_for_symbol("AAPL")
+    intent = replace(_close_intent(inventory, 0.84), purpose=IntentPurpose.RISK_REDUCTION)
+
+    assessment = assess_inventory_close(
+        inventory=inventory,
+        intent=intent,
+        bid=100.0,
+        allocator=ProRataPartialCloseAllocator(),
+        dust_threshold_usd=POINT_M_DUST_NOTIONAL_USD,
+        unit_tolerance=BROKER_UNIT_ABS_TOLERANCE,
+    )
+
+    assert assessment is not None
+    assert assessment.projected_remaining_notional == pytest.approx(8.0)
+    assert assessment.plan.requests[0].units == pytest.approx(0.42)
+    assert assessment.plan.requests[0].full_close is False
+    assert assessment.dust_collapse is False
+    assert assessment.dust_collapse_reason is None
 
 
 def test_partial_exit_fill_keeps_broker_leg_and_rebuilds():

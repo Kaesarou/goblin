@@ -92,6 +92,12 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
     from the runtime into `app/v3/decision_window.py`. Keep the same ordering,
     grace timeout, symbol reset and late-event refusal. Runtime callers and
     tests use the new direct module; no compatibility facade is retained.
+15. Separate pure close-plan assessment from asynchronous broker mutation in
+    `app/v3/execution.py`. The existing pro-rata allocator, account-notional
+    dust projection, broker-leg minimum and journal payload values are
+    unchanged. Profit exits still collapse a sub-10-USD residual to full close;
+    other reduce-only purposes are not silently collapsed. Close submission,
+    reservations and confirmation remain owned by `V3BrokerExecutor`.
 
 ## Retirement evidence
 
