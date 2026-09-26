@@ -81,6 +81,13 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
     0.0033291 initial exposure, recoverability and hedge OFF. All other
     strategy thresholds and risk fields must match frozen RR5; live-capital
     refusal and Point-M golden tests remain in place.
+13. Share the duplicated eToro account/order and REST market-data GET retry
+    loop. The common path preserves per-request headers, request timeout,
+    transport/status retry delays, bucket-local 429 cooldown and bounded
+    attempts. Each client retains its own terminal HTTP logging and payload
+    handling; the close-confirmation `_get_once` remains strictly single-shot.
+    Both clients now have parity tests for retryable status and transport
+    errors.
 
 ## Retirement evidence
 

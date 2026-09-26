@@ -203,3 +203,64 @@ def test_market_data_429_cools_down_shared_account_bucket(tmp_path, monkeypatch)
     assert client._get_once("/portfolio") == {"ok": True}
     assert calls == [0.0, 11.0]
     assert clock.governor_sleeps == [11.0]
+
+
+@pytest.mark.parametrize("market_data", [False, True])
+def test_both_get_clients_retry_a_503_using_retry_after(tmp_path, monkeypatch, market_data):
+    client, clock = build_uninitialized_client()
+    target = (
+        EtoroRestMarketDataClient(
+            api_key="api-key",
+            user_key="user-key",
+            instrument_id_cache_path=str(tmp_path / "instruments.json"),
+            get_rate_governor=client._get_rate_governor,
+        )
+        if market_data
+        else client
+    )
+    calls = []
+    sleeps = []
+    responses = [FakeResponse(503, headers={"Retry-After": "4"}), FakeResponse(200, {"ok": True})]
+
+    def fake_get(*args, **kwargs):
+        calls.append(clock.now())
+        return responses.pop(0)
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr("time.sleep", lambda seconds: sleeps.append(seconds))
+
+    assert target._get("/path") == {"ok": True}
+    assert calls == [0.0, 0.0]
+    assert sleeps == [4.0]
+    assert clock.governor_sleeps == []
+
+
+@pytest.mark.parametrize("market_data", [False, True])
+def test_both_get_clients_retry_transport_error(tmp_path, monkeypatch, market_data):
+    client, _ = build_uninitialized_client()
+    target = (
+        EtoroRestMarketDataClient(
+            api_key="api-key",
+            user_key="user-key",
+            instrument_id_cache_path=str(tmp_path / "instruments.json"),
+            get_rate_governor=client._get_rate_governor,
+        )
+        if market_data
+        else client
+    )
+    sleeps = []
+    calls = []
+
+    def fake_get(*args, **kwargs):
+        calls.append(kwargs["headers"]["x-request-id"])
+        if len(calls) == 1:
+            raise requests.ConnectionError("temporary network error")
+        return FakeResponse(200, {"ok": True})
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr("time.sleep", lambda seconds: sleeps.append(seconds))
+
+    assert target._get("/path") == {"ok": True}
+    assert len(calls) == 2
+    assert calls[0] != calls[1]
+    assert sleeps == [delay_seconds_for_attempt(1)]

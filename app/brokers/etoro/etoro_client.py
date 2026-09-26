@@ -15,7 +15,6 @@ from app.brokers.base import (
     OpenPositionResult,
 )
 from app.brokers.etoro.account_equity_mapper import ACCOUNT_EQUITY_SOURCE, extract_account_equity
-from app.brokers.etoro.attempt_delay import delay_seconds_for_attempt
 from app.brokers.etoro.broker_environment import broker_environment_from_name
 from app.brokers.etoro.close_order_details_parser import extract_close_execution
 from app.brokers.etoro.close_order_payload_builder import build_close_order_payload
@@ -38,8 +37,7 @@ from app.brokers.etoro.http_response_payload import response_payload
 from app.brokers.etoro.http_retry_policy import (
     apply_429_cooldown,
     default_get_max_attempts,
-    is_retryable_http_status,
-    retry_after_seconds,
+    get_with_retries,
 )
 from app.brokers.etoro.http_url_builder import build_http_url
 from app.brokers.etoro.instrument_cache import (
@@ -437,54 +435,18 @@ class EtoroClient(BrokerClient):
              governor: EtoroGetRateGovernor | None = None) -> dict:
         governor = governor or self._get_governor()
         url = build_http_url(self.etoro_api_base_url, path)
-        max_attempts = default_get_max_attempts()
-        for attempt in range(1, max_attempts + 1):
-            governor.acquire()
-            try:
-                response = requests.get(
-                    url,
-                    headers=self.headers,
-                    params=params,
-                    timeout=default_request_timeout_seconds(),
-                )
-            except requests.RequestException as exc:
-                logger.warning(
-                    'eToro GET failed | attempt=%s/%s | url=%s | params=%s | error=%s',
-                    attempt,
-                    max_attempts,
-                    url,
-                    params,
-                    exc,
-                )
-                if attempt == max_attempts:
-                    raise
-                time.sleep(delay_seconds_for_attempt(attempt))
-                continue
-
-            apply_429_cooldown(response, governor)
-            if (
-                is_retryable_http_status(response.status_code)
-                and attempt < max_attempts
-            ):
-                logger.warning(
-                    'eToro GET retryable error | attempt=%s/%s | status=%s | url=%s | params=%s',
-                    attempt,
-                    max_attempts,
-                    response.status_code,
-                    url,
-                    params,
-                )
-                retry_after = retry_after_seconds(response)
-                time.sleep(
-                    retry_after
-                    if retry_after is not None
-                    else delay_seconds_for_attempt(attempt)
-                )
-                continue
-            if not response.ok:
-                raise_for_failed_response(response)
-            return response_payload(response)
-        raise RuntimeError(f'eToro GET failed after retries | url={url}')
+        response = get_with_retries(
+            url=url,
+            params=params,
+            headers=lambda: self.headers,
+            governor=governor,
+            max_attempts=default_get_max_attempts(),
+            logger=logger,
+            operation='eToro',
+        )
+        if not response.ok:
+            raise_for_failed_response(response)
+        return response_payload(response)
 
     def _get_governor(self) -> EtoroGetRateGovernor:
         governor = getattr(self, '_get_rate_governor', None)
