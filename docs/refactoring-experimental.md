@@ -118,6 +118,10 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
     only when baseline, requested and executed quantities match broker
     evidence. Journal writes, quantity application, retry persistence and risk
     halts remain in the executor.
+20. Consolidate the three unavailable broker-reconciliation outcomes behind
+    one error and halt-precedence handler. Invalid context retains the previous
+    issue list; transport failures and malformed responses still record their
+    own issue details. Stronger existing risk halts remain authoritative.
 
 ## Retirement evidence
 

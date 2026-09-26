@@ -668,14 +668,7 @@ class V3BrokerExecutor:
         self._broker_reconciliation_in_flight = False
         context = completion.context
         if not isinstance(context, _BrokerReconciliationContext):
-            self._broker_reconciliation_errors += 1
-            self._last_broker_reconciliation_status = "invalid_context"
-            if (
-                self.halted_reason is None
-                or self.halted_reason
-                in _RECONCILIATION_FAILURE_OVERRIDABLE_HALT_REASONS
-            ):
-                self.halted_reason = "broker_reconciliation_unavailable"
+            self._record_reconciliation_unavailable("invalid_context")
             return
 
         current_context = self._broker_reconciliation_context()
@@ -691,32 +684,17 @@ class V3BrokerExecutor:
 
         previous_status = self._last_broker_reconciliation_status
         if completion.error is not None:
-            self._broker_reconciliation_errors += 1
-            self._last_broker_reconciliation_status = "unavailable"
-            self._last_broker_reconciliation_issues = (
-                f"{type(completion.error).__name__}:{completion.error}",
+            self._record_reconciliation_unavailable(
+                "unavailable",
+                (f"{type(completion.error).__name__}:{completion.error}",),
             )
-            if (
-                self.halted_reason is None
-                or self.halted_reason
-                in _RECONCILIATION_FAILURE_OVERRIDABLE_HALT_REASONS
-            ):
-                self.halted_reason = "broker_reconciliation_unavailable"
             return
 
         units_by_position = completion.value
         if not isinstance(units_by_position, dict):
-            self._broker_reconciliation_errors += 1
-            self._last_broker_reconciliation_status = "invalid_response"
-            self._last_broker_reconciliation_issues = (
-                "broker_units_response_not_mapping",
+            self._record_reconciliation_unavailable(
+                "invalid_response", ("broker_units_response_not_mapping",),
             )
-            if (
-                self.halted_reason is None
-                or self.halted_reason
-                in _RECONCILIATION_FAILURE_OVERRIDABLE_HALT_REASONS
-            ):
-                self.halted_reason = "broker_reconciliation_unavailable"
             return
 
         issues, reductions_observed = self._compare_broker_units(context, units_by_position)
@@ -748,6 +726,19 @@ class V3BrokerExecutor:
         if self.halted_reason in _RECONCILIATION_RECOVERABLE_HALT_REASONS:
             self.halted_reason = None
         self._refresh_stale_confirmation_halt(_utc_now())
+
+    def _record_reconciliation_unavailable(
+        self, status: str, issues: tuple[str, ...] | None = None,
+    ) -> None:
+        self._broker_reconciliation_errors += 1
+        self._last_broker_reconciliation_status = status
+        if issues is not None:
+            self._last_broker_reconciliation_issues = issues
+        if (
+            self.halted_reason is None
+            or self.halted_reason in _RECONCILIATION_FAILURE_OVERRIDABLE_HALT_REASONS
+        ):
+            self.halted_reason = "broker_reconciliation_unavailable"
 
     def _compare_broker_units(
         self, context: _BrokerReconciliationContext,

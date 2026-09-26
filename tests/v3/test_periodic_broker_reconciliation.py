@@ -2,6 +2,8 @@ import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from app.brokers.base import BrokerCloseExecution
 from app.runtime.broker_task_runner import BrokerTaskCompletion, BrokerTaskLane
 from app.v3.book import InventoryBook
@@ -157,6 +159,36 @@ def test_matching_periodic_reconciliation_keeps_new_risk_enabled(tmp_path):
     assert metrics["attempts"] == 1
     assert metrics["last_status"] == "ok"
     assert metrics["last_issues"] == []
+
+
+@pytest.mark.parametrize("outcome, status, issues", [
+    ("invalid_context", "invalid_context", ["previous"]),
+    ("transport_error", "unavailable", ["TimeoutError:read timed out"]),
+    ("invalid_response", "invalid_response", ["broker_units_response_not_mapping"]),
+])
+@pytest.mark.parametrize("prior_halt", [None, "external_broker_activity_ack_required"])
+def test_unavailable_reconciliation_preserves_halt_precedence_and_issue_details(
+    tmp_path, outcome, status, issues, prior_halt,
+):
+    executor, _, _ = _executor(tmp_path, units={"p1": 1.0})
+    executor.halted_reason = prior_halt
+    executor._last_broker_reconciliation_issues = ("previous",)
+    executor._broker_reconciliation_in_flight = True
+    executor._handle_broker_reconciliation(BrokerTaskCompletion(
+        task_id="check", kind="v3_broker_reconciliation", lane=BrokerTaskLane.QUERY,
+        context=(None if outcome == "invalid_context" else executor._broker_reconciliation_context()),
+        value=([] if outcome == "invalid_response" else None),
+        error=(TimeoutError("read timed out") if outcome == "transport_error" else None),
+    ))
+
+    metrics = executor.confirmation_metrics()["broker_reconciliation"]
+    assert metrics["errors"] == 1
+    assert metrics["last_status"] == status
+    assert metrics["last_issues"] == issues
+    assert not metrics["in_flight"]
+    assert executor.halted_reason == (
+        prior_halt or "broker_reconciliation_unavailable"
+    )
 
 
 def test_periodic_broker_unit_increase_halts_then_exact_match_recovers(tmp_path):
