@@ -706,17 +706,10 @@ class GoblinV3Runtime:
                 portfolio=portfolio,
                 allow_new_risk=market.entry_allowed,
             )
-            intents = tuple(
-                intent
-                for intent in decision.intents
-                if intent.reduce_only or market.entry_allowed
-            )
-            self.intent_book.replace_symbol(inventory.symbol, intents)
-            self.metrics["intents_planned"] += len(intents)
-            self._journal_decision(
+            self._apply_planned_decision(
                 inventory.symbol,
                 decision,
-                intents,
+                allow_new_risk=market.entry_allowed,
                 extra={"role": "active_inventory"},
             )
 
@@ -741,17 +734,10 @@ class GoblinV3Runtime:
                 market=ranked.market,
                 portfolio=portfolio,
             )
-            intents = tuple(
-                intent
-                for intent in decision.intents
-                if intent.reduce_only or ranked.market.entry_allowed
-            )
-            self.intent_book.replace_symbol(ranked.market.symbol, intents)
-            self.metrics["intents_planned"] += len(intents)
-            self._journal_decision(
+            self._apply_planned_decision(
                 ranked.market.symbol,
                 decision,
-                intents,
+                allow_new_risk=ranked.market.entry_allowed,
                 extra={
                     "role": "flat_forager",
                     "forager_score": ranked.score,
@@ -796,23 +782,36 @@ class GoblinV3Runtime:
                 market=market,
                 inventory=inventory,
             )
-            intents = tuple(intent for intent in decision.intents if intent.reduce_only)
             # Resting intents are one-candle strategy objects. A fresh,
             # authoritative no-equity proof therefore replaces the prior exact
             # or proof intent even when the new result is empty. This prevents a
             # stale SELL from surviving a later candle that no longer proves an
             # exit under the frozen geometry.
-            self.intent_book.replace_symbol(inventory.symbol, intents)
-            self.metrics["intents_planned"] += len(intents)
-            self._journal_decision(
+            self._apply_planned_decision(
                 inventory.symbol,
                 decision,
-                intents,
+                allow_new_risk=False,
                 extra={
                     "role": "active_inventory",
                     "planning_mode": "equity_independent_proof",
                 },
             )
+
+    def _apply_planned_decision(
+        self,
+        symbol: str,
+        decision: DecisionBatch,
+        *,
+        allow_new_risk: bool,
+        extra: dict[str, object],
+    ) -> None:
+        intents = tuple(
+            intent for intent in decision.intents
+            if intent.reduce_only or allow_new_risk
+        )
+        self.intent_book.replace_symbol(symbol, intents)
+        self.metrics["intents_planned"] += len(intents)
+        self._journal_decision(symbol, decision, intents, extra=extra)
 
     def _record_incomplete_decision_window(
         self,

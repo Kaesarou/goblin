@@ -122,6 +122,11 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
     one error and halt-precedence handler. Invalid context retains the previous
     issue list; transport failures and malformed responses still record their
     own issue details. Stronger existing risk halts remain authoritative.
+21. Apply V3 planner decisions through one runtime path for active inventories,
+    ranked flat symbols and equity-independent exits. Each path still supplies
+    its own new-risk authority and journal role; without an equity reference,
+    the helper retains only reduce-only intents and replaces stale exits even
+    when the fresh proof returns no intent.
 
 ## Retirement evidence
 
