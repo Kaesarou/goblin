@@ -50,7 +50,7 @@ class InventoryReplayEngine:
         feat_names=('ema_readiness','forager_vol_2274','activity_310','vol1m_604','vol1h_683','ret5','ret15','ret30','ret60','range15','range60','ema_ratio','dist_lower','session_frac');feat_arrays={n:df[n].to_numpy(float) for n in feat_names};quality=df.quality_degraded.to_numpy(bool) if 'quality_degraded' in df else np.zeros(len(df),dtype=bool);entry_ok=df.entry_allowed.to_numpy(bool) if 'entry_allowed' in df else np.ones(len(df),dtype=bool)
         balance=self.starting_balance;pos={};pentry={};pclose={};latest=np.zeros(len(syms));fills=[];eqrows=[];cycle_seq={};gross=fees=0.;peak=balance;maxdd=0.;maxexp=maxsingle=0.;ds={};de={};forced=0
         for a,b in zip(starts,ends):
-            ts=pd.Timestamp(int(ts_ns[a]),tz='UTC');ids=sym_ids[a:b].astype(int);filled=set()
+            ts=pd.Timestamp(int(ts_ns[a]),tz='UTC');filled=set()
             # Fill and consume resting closes then entries for current symbols.
             for idx in range(a,b):
                 i=int(sym_ids[idx]);pn=pclose.pop(i,None)
@@ -136,15 +136,6 @@ def _market(r,entry_allowed,research_proxy):
     close=float(r.close);return MarketState(str(r.symbol),pd.Timestamp(r.opened_at).to_pydatetime(),close,close,close,float(r.ema_lower),float(r.ema_upper),float(r.vol1m_604) if math.isfinite(float(r.vol1m_604)) else 0,float(r.vol1h_683) if math.isfinite(float(r.vol1h_683)) else 0,f,q,entry_allowed)
 def _entry_touched(i,b):return i.limit_price is not None and float(b.low)<float(i.limit_price)
 def _close_touched(i,b):return i.limit_price is not None and float(b.high)>float(i.limit_price)
-def _ext(i,b):
-    lo=float(b.low);hi=float(b.high);c=float(b.close)
-    tmin=i.trailing_min_since_open;tmaxmin=i.trailing_max_since_min;tmax=i.trailing_max_since_open;tminmax=i.trailing_min_since_max
-    if tmin is None or lo<tmin:tmin=lo;tmaxmin=c
-    else:tmaxmin=max(tmaxmin if tmaxmin is not None else c,hi)
-    if tmax is None or hi>tmax:tmax=hi;tminmax=c
-    else:tminmax=min(tminmax if tminmax is not None else c,lo)
-    mil=min(x for x in (i.min_price_since_last_entry,lo) if x is not None);mal=max(x for x in (i.max_price_since_last_entry,hi) if x is not None);mio=min(x for x in (i.min_price_since_open,lo) if x is not None);mao=max(x for x in (i.max_price_since_open,hi) if x is not None)
-    return replace(i,trailing_min_since_open=tmin,trailing_max_since_min=tmaxmin,trailing_max_since_open=tmax,trailing_min_since_max=tminmax,min_price_since_last_entry=mil,max_price_since_last_entry=mal,min_price_since_open=mio,max_price_since_open=mao,mfe_pct=max(i.mfe_pct,mao/i.average_entry_price-1),mae_pct=min(i.mae_pct,mio/i.average_entry_price-1))
 def _market_arrays(symbol,ts,idx,close,ema_lo,ema_hi,v1m,v1h,feat_arrays,quality,entry_ok,entry_allowed,research_proxy):
     f={n:float(a[idx]) for n,a in feat_arrays.items()};q=np.isfinite(ema_lo[idx]) and np.isfinite(ema_hi[idx])
     if not research_proxy:q=q and not bool(quality[idx]) and bool(entry_ok[idx])

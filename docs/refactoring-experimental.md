@@ -40,6 +40,10 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
    account-notional reconciliation. Request payloads, identifiers, position
    metadata and returned `OpenPositionResult` remain unchanged. Validation:
    41 focused broker/V3 tests and the full 928-test suite pass.
+5. Replay cleanup: remove an unused symbol-id slice and an obsolete duplicate
+   trailing-extrema helper from the V3 Point-M replay. The active
+   `_ext_values` implementation is unchanged; Point-M behavior is preserved.
+   Validation: the full 928-test suite passes.
 
 ## Retirement evidence
 
