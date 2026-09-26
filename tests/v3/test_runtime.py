@@ -5,11 +5,11 @@ from types import SimpleNamespace
 from app.market.data_quality import MarketDataStatus
 from app.market.models import Candle, MarketSnapshot
 from app.market_data.models import MarketDataSource
+from app.v3.decision_window import V3DecisionWindowCoordinator
 from app.v3.features import OnlineFeatureSnapshot
 from app.v3.models import DecisionBatch, DecisionReason, DecisionRecord
 from app.v3.runtime import (
     GoblinV3Runtime,
-    V3DecisionWindowCoordinator,
     _decision_quote_for_candle,
 )
 
@@ -104,6 +104,46 @@ def test_decision_window_freezes_snapshot_at_candle_finalization():
     assert batch.finalization_reason == "all_symbols_completed"
     assert batch.snapshots["AIR.PA"].bid == 100.0
     assert batch.snapshots["SAN.PA"].bid == 50.0
+
+
+def test_decision_window_grace_expiration_excludes_late_symbols():
+    coordinator = V3DecisionWindowCoordinator(grace_seconds=5)
+    first = _feature("AIR.PA")
+    assert coordinator.record(
+        feature=first,
+        snapshot=_snapshot("AIR.PA", 100.0),
+        quality_ok=True,
+        expected_symbols={"AIR.PA", "SAN.PA"},
+    )
+    assert coordinator.pop_ready(now=first.asof + timedelta(seconds=4)) == ()
+
+    (batch,) = coordinator.pop_ready(now=first.asof + timedelta(seconds=5))
+    assert batch.finalization_reason == "grace_expired"
+    assert batch.completed_symbols == ("AIR.PA",)
+    assert batch.missing_symbols == ("SAN.PA",)
+    assert not coordinator.record(
+        feature=_feature("SAN.PA"),
+        snapshot=_snapshot("SAN.PA", 50.0),
+        quality_ok=True,
+        expected_symbols={"AIR.PA", "SAN.PA"},
+    )
+
+
+def test_decision_window_reset_removes_symbol_from_expected_set():
+    coordinator = V3DecisionWindowCoordinator(grace_seconds=5)
+    first = _feature("AIR.PA")
+    coordinator.record(
+        feature=first,
+        snapshot=_snapshot("AIR.PA", 100.0),
+        quality_ok=True,
+        expected_symbols={"AIR.PA", "SAN.PA"},
+    )
+    coordinator.reset_symbol("SAN.PA")
+
+    (batch,) = coordinator.pop_ready(now=first.asof)
+    assert batch.finalization_reason == "all_symbols_completed"
+    assert batch.expected_symbols == ("AIR.PA",)
+    assert batch.missing_symbols == ()
 
 
 def test_closed_candle_prefers_its_explicit_quote_over_future_latest_quote():

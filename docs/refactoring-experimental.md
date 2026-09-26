@@ -88,6 +88,10 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
     handling; the close-confirmation `_get_once` remains strictly single-shot.
     Both clients now have parity tests for retryable status and transport
     errors.
+14. Extract the independent V3 decision-window coordinator and batch types
+    from the runtime into `app/v3/decision_window.py`. Keep the same ordering,
+    grace timeout, symbol reset and late-event refusal. Runtime callers and
+    tests use the new direct module; no compatibility facade is retained.
 
 ## Retirement evidence
 
