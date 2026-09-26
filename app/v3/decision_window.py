@@ -102,6 +102,35 @@ class V3DecisionWindowCoordinator:
         return tuple(result)
 
 
+def decision_quote_for_candle(*, result, latest_snapshot, candle):
+    """Return the newest causal quote and whether it belongs to this M1 bucket.
+
+    A rollover event may already have advanced ``latest_snapshot`` into the next
+    minute. The closed candle therefore owns its explicit ``decision_snapshot``.
+    Older quotes are allowed only as non-authoritative provenance for carried
+    candles; future quotes are never relabelled onto the closed state.
+    """
+    explicit = getattr(result, "decision_snapshot", None)
+    if explicit is not None:
+        timestamp = _utc(explicit.timestamp)
+        opened_at = _utc(candle.opened_at)
+        closed_at = _utc(candle.closed_at)
+        if opened_at <= timestamp < closed_at:
+            return explicit, True
+        if timestamp < closed_at:
+            return explicit, False
+        return None, False
+
+    if latest_snapshot is None:
+        return None, False
+    timestamp = _utc(latest_snapshot.timestamp)
+    closed_at = _utc(candle.closed_at)
+    if timestamp >= closed_at:
+        return None, False
+    opened_at = _utc(candle.opened_at)
+    return latest_snapshot, opened_at <= timestamp < closed_at
+
+
 def _utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)

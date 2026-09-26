@@ -5,13 +5,10 @@ from types import SimpleNamespace
 from app.market.data_quality import MarketDataStatus
 from app.market.models import Candle, MarketSnapshot
 from app.market_data.models import MarketDataSource
-from app.v3.decision_window import V3DecisionWindowCoordinator
+from app.v3.decision_window import V3DecisionWindowCoordinator, decision_quote_for_candle
 from app.v3.features import OnlineFeatureSnapshot
 from app.v3.models import DecisionBatch, DecisionReason, DecisionRecord
-from app.v3.runtime import (
-    GoblinV3Runtime,
-    _decision_quote_for_candle,
-)
+from app.v3.runtime import GoblinV3Runtime
 
 UTC = timezone.utc
 NOW = datetime(2026, 8, 25, 7, 0, tzinfo=UTC)
@@ -160,7 +157,7 @@ def test_closed_candle_prefers_its_explicit_quote_over_future_latest_quote():
     )
     result = SimpleNamespace(decision_snapshot=causal)
 
-    selected, in_bucket = _decision_quote_for_candle(
+    selected, in_bucket = decision_quote_for_candle(
         result=result,
         latest_snapshot=future,
         candle=candle,
@@ -177,7 +174,7 @@ def test_future_quote_is_never_relabelled_when_closed_bucket_quote_is_missing():
         110.0,
         timestamp=NOW + timedelta(minutes=1, seconds=5),
     )
-    selected, in_bucket = _decision_quote_for_candle(
+    selected, in_bucket = decision_quote_for_candle(
         result=SimpleNamespace(decision_snapshot=None),
         latest_snapshot=future,
         candle=candle,
@@ -193,7 +190,7 @@ def test_older_quote_can_complete_carried_state_but_has_no_trade_authority():
         99.5,
         timestamp=NOW - timedelta(seconds=5),
     )
-    selected, in_bucket = _decision_quote_for_candle(
+    selected, in_bucket = decision_quote_for_candle(
         result=SimpleNamespace(decision_snapshot=None),
         latest_snapshot=older,
         candle=candle,

@@ -27,6 +27,7 @@ from app.v3.decision_window import (
 from app.v3.decision_window import (
     V3DecisionWindowCoordinator as _DecisionWindowCoordinator,
 )
+from app.v3.decision_window import decision_quote_for_candle as _decision_quote
 from app.v3.features import OnlineFeatureEngine, OnlineFeatureSnapshot
 from app.v3.forager import ForagerCandidate, NoVolumeForager
 from app.v3.intents import RestingIntentBook
@@ -567,7 +568,7 @@ class GoblinV3Runtime:
             close=candle.close,
         )
 
-        decision_snapshot, quote_in_bucket = _decision_quote_for_candle(
+        decision_snapshot, quote_in_bucket = _decision_quote(
             result=result,
             latest_snapshot=self.latest_snapshots.get(symbol),
             candle=candle,
@@ -1369,35 +1370,6 @@ class GoblinV3Runtime:
         except Exception:
             self.metrics["errors"] += 1
             logger.exception("V3 research boundary failed")
-
-
-def _decision_quote_for_candle(*, result, latest_snapshot, candle):
-    """Return the newest causal quote and whether it belongs to this M1 bucket.
-
-    A rollover event may already have advanced ``latest_snapshot`` into the next
-    minute. The closed candle therefore owns its explicit ``decision_snapshot``.
-    Older quotes are allowed only as non-authoritative provenance for carried
-    candles; future quotes are never relabelled onto the closed state.
-    """
-    explicit = getattr(result, "decision_snapshot", None)
-    if explicit is not None:
-        timestamp = _utc(explicit.timestamp)
-        opened_at = _utc(candle.opened_at)
-        closed_at = _utc(candle.closed_at)
-        if opened_at <= timestamp < closed_at:
-            return explicit, True
-        if timestamp < closed_at:
-            return explicit, False
-        return None, False
-
-    if latest_snapshot is None:
-        return None, False
-    timestamp = _utc(latest_snapshot.timestamp)
-    closed_at = _utc(candle.closed_at)
-    if timestamp >= closed_at:
-        return None, False
-    opened_at = _utc(candle.opened_at)
-    return latest_snapshot, opened_at <= timestamp < closed_at
 
 
 def _utc(value: datetime) -> datetime:

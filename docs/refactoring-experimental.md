@@ -98,6 +98,10 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
     unchanged. Profit exits still collapse a sub-10-USD residual to full close;
     other reduce-only purposes are not silently collapsed. Close submission,
     reservations and confirmation remain owned by `V3BrokerExecutor`.
+16. Keep causal decision-quote selection with the extracted M1 window module.
+    A future quote remains forbidden, an in-bucket quote remains authoritative,
+    and an older quote can only supply non-authoritative provenance. Runtime
+    and tests import the helper directly from its owner.
 
 ## Retirement evidence
 
