@@ -60,10 +60,9 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
    Historical signal scoring remains available through the exercised scorer
    modules and candidate-ranking path. Validation: the full 907-test suite
    remains green.
-8. Remove unused V3 imports and test-only dead assignments. The package keeps
-   its configuration exports while no longer importing planner/recoverability
-   classes as unused side effects. Validation: Ruff unused-symbol checks and
-   the full 907-test suite pass.
+8. Remove unused V3 imports and test-only dead assignments. The package no
+   longer imports planner/recoverability classes as unused side effects.
+   Validation: Ruff unused-symbol checks and the full 907-test suite pass.
 9. Normalize production import ordering, standard-library collection imports,
    quoted annotations and UTC aliases across the application. This is a
    mechanical Python 3.12 cleanup; no strategy or broker contract changes are
@@ -74,6 +73,9 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
     GETs still use their original retry paths and bucket assignments. Added
     tests for numeric/missing hints, fallback delay and a market-data 429
     cooling down the shared account bucket. Validation: 914 tests pass.
+11. Remove the implicit wildcard re-export of V3 configuration from
+    `app.v3`. Production, scripts and tests import their configuration from
+    `app.v3.config` directly; no caller depends on package-level aliases.
 
 ## Retirement evidence
 
