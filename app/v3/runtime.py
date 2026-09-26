@@ -1121,16 +1121,22 @@ class GoblinV3Runtime:
                 if old_key is not None:
                     ended_keys.add(old_key)
         if transitions:
-            self._flush_decision_windows(
-                _utc(now) + timedelta(seconds=DECISION_WINDOW_GRACE_SECONDS),
-            )
+            # Other sessions may share the closing minute. Finalize their due
+            # candles before checking windows, and use the real clock for the
+            # decision grace: ending EU must not expire an active US window.
+            for symbol in self.symbols:
+                if symbol not in transitions:
+                    self._finalize_symbol_candles(symbol, now)
+            self._flush_decision_windows(now)
         for symbol in transitions:
             self.candle_builders[symbol].reset()
             self.multi_timeframe_service.reset_symbol(symbol, clear_history=False)
             self.market_data_validator.reset_symbol(symbol)
             self.fallback_validator.reset_symbol(symbol)
             self.coordinator.reset_symbol(symbol, now=now)
-            self.windows.reset_symbol(symbol)
+            # A final candle can still be waiting for a symbol in another
+            # session. Keep its frozen feature in the pending window until the
+            # shared window completes or its real grace period expires.
             if self.research_pipeline is not None:
                 self.research_pipeline.reset_symbol(symbol)
             self.latest_snapshots.pop(symbol, None)
