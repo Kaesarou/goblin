@@ -64,6 +64,11 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
    its configuration exports while no longer importing planner/recoverability
    classes as unused side effects. Validation: Ruff unused-symbol checks and
    the full 907-test suite pass.
+9. Normalize production import ordering, standard-library collection imports,
+   quoted annotations and UTC aliases across the application. This is a
+   mechanical Python 3.12 cleanup; no strategy or broker contract changes are
+   involved. Validation: the full 907-test suite and the targeted Ruff checks
+   pass.
 
 ## Retirement evidence
 
