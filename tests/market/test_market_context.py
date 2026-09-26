@@ -159,6 +159,45 @@ def test_side_neutral_research_context_excludes_equal_and_future_market_data():
     assert not hasattr(context, 'alignment')
 
 
+def test_live_and_research_aggregate_the_same_eligible_returns():
+    service = MarketContextService(
+        instrument_registry=RegistryStub(),
+        benchmark_symbols={AssetClass.EQUITY_US: ('SPY',)},
+        sector_by_symbol={'AAPL': 'TECH', 'MSFT': 'TECH'},
+    )
+    decisions = {'AAPL': decision(), 'MSFT': decision()}
+    context_assets = {'SPY': AssetClass.EQUITY_US}
+    service.update(
+        snapshots={
+            'AAPL': snapshot('AAPL', 100.0),
+            'MSFT': snapshot('MSFT', 200.0),
+            'SPY': snapshot('SPY', 500.0),
+        },
+        session_decisions=decisions,
+        context_asset_classes=context_assets,
+    )
+    later = NOW + timedelta(minutes=1)
+    service.update(
+        snapshots={
+            'AAPL': snapshot('AAPL', 101.0, later),
+            'MSFT': snapshot('MSFT', 198.0, later),
+            'SPY': snapshot('SPY', 501.0, later),
+        },
+        session_decisions=decisions,
+        context_asset_classes=context_assets,
+    )
+    cutoff = later + timedelta(seconds=1)
+
+    live = service.build_candidate_context(symbol='AAPL', side='BUY', as_of=cutoff)
+    research = service.build_side_neutral_research_context(symbol='AAPL', as_of=cutoff)
+
+    assert live.breadth == research.breadth
+    assert live.sector == research.sector
+    assert live.breadth.advancing_count == 1
+    assert live.breadth.declining_count == 1
+    assert live.sector.median_session_return_percent == 0.0
+
+
 def test_side_neutral_context_requires_receive_time_strictly_before_cutoff():
     service = MarketContextService(
         instrument_registry=RegistryStub(),

@@ -127,6 +127,12 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
     its own new-risk authority and journal role; without an equity reference,
     the helper retains only reduce-only intents and replaces stale exits even
     when the fresh proof returns no intent.
+22. Share breadth and sector aggregation between live candidate context and
+    side-neutral research context. Each path still selects and validates its
+    own snapshots and returns: research requires both broker and receive times
+    strictly before the cutoff; live retains its existing freshness policy.
+    Availability thresholds, direction, rounding and median are calculated
+    once from the selected returns.
 
 ## Retirement evidence
 
