@@ -9,7 +9,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from app.market.data_quality import MarketDataStatus, MarketDataValidator
-from app.market.models import MarketSnapshot
+from app.market.models import Candle, MarketSnapshot
 from app.market_data.coordinator import MarketDataCoordinator
 from app.market_data.models import MarketDataEvent, MarketDataSource
 from app.runtime.broker_task_runner import BrokerTaskLane, BrokerTaskRunner
@@ -20,6 +20,7 @@ from app.runtime.runtime_policy import (
     WS_POSITION_SILENCE_SECONDS,
 )
 from app.runtime.session_runtime import session_timestamp_rejection_reason
+from app.runtime.trading_session_window import TradingSessionDecision
 from app.v3.book import InventoryBook
 from app.v3.decision_window import (
     V3DecisionWindowBatch as _DecisionWindowBatch,
@@ -512,43 +513,9 @@ class GoblinV3Runtime:
             quality_degraded=result.quality.degraded,
         )
         session = self._session_at(symbol, candle.opened_at)
-        invalid_session = session_timestamp_rejection_reason(
-            decision=session, timestamp=candle.opened_at,
-        )
-        if (invalid_session is not None or
-                (not session.session_24_7 and session.session_end_time is not None
-                 and _utc(candle.closed_at) > _utc(session.session_end_time))):
-            self.metrics["candle_session_rejections"] += 1
-            self._record_maintenance_error(
-                f"candle_session:{symbol}", "v3_candle_session_rejected",
-                {"symbol": symbol, "opened_at": candle.opened_at,
-                 "reason": invalid_session or "candle_crosses_session_end"},
-            )
-            return
-
-        last_processed_opened_at = self.feature_engine.last_opened_at(symbol)
-        if (
-            last_processed_opened_at is not None
-            and _utc(candle.opened_at) <= _utc(last_processed_opened_at)
+        if not self._candle_is_processable(
+            symbol=symbol, candle=candle, session=session, source=source,
         ):
-            # The restart cache is authoritative for causal features. A newly
-            # constructed candle builder can replay the last already-persisted M1
-            # after a process restart; treating that as a fresh feature update used
-            # to crash the runtime with a non-causal-order exception. Skip the
-            # replay before MTF/book/feature mutation and keep an explicit audit
-            # event rather than silently mutating state twice.
-            self.metrics["candle_replay_skips"] += 1
-            self.trade_journal.write(
-                "v3_candle_replay_skipped",
-                {
-                    "symbol": symbol,
-                    "opened_at": candle.opened_at,
-                    "closed_at": candle.closed_at,
-                    "last_processed_opened_at": last_processed_opened_at,
-                    "finalization_source": source,
-                    "reason": "already_processed_feature_state",
-                },
-            )
             return
 
         self._clear_maintenance_error(
@@ -631,6 +598,50 @@ class GoblinV3Runtime:
                     "finalization_source": source,
                 },
             )
+
+    def _candle_is_processable(
+        self, *, symbol: str, candle: Candle,
+        session: TradingSessionDecision, source: str,
+    ) -> bool:
+        invalid_session = session_timestamp_rejection_reason(
+            decision=session, timestamp=candle.opened_at,
+        )
+        if (invalid_session is not None or
+                (not session.session_24_7 and session.session_end_time is not None
+                 and _utc(candle.closed_at) > _utc(session.session_end_time))):
+            self.metrics["candle_session_rejections"] += 1
+            self._record_maintenance_error(
+                f"candle_session:{symbol}", "v3_candle_session_rejected",
+                {"symbol": symbol, "opened_at": candle.opened_at,
+                 "reason": invalid_session or "candle_crosses_session_end"},
+            )
+            return False
+
+        last_processed_opened_at = self.feature_engine.last_opened_at(symbol)
+        if (
+            last_processed_opened_at is not None
+            and _utc(candle.opened_at) <= _utc(last_processed_opened_at)
+        ):
+            # The restart cache is authoritative for causal features. A newly
+            # constructed candle builder can replay the last already-persisted M1
+            # after a process restart; treating that as a fresh feature update used
+            # to crash the runtime with a non-causal-order exception. Skip the
+            # replay before MTF/book/feature mutation and keep an explicit audit
+            # event rather than silently mutating state twice.
+            self.metrics["candle_replay_skips"] += 1
+            self.trade_journal.write(
+                "v3_candle_replay_skipped",
+                {
+                    "symbol": symbol,
+                    "opened_at": candle.opened_at,
+                    "closed_at": candle.closed_at,
+                    "last_processed_opened_at": last_processed_opened_at,
+                    "finalization_source": source,
+                    "reason": "already_processed_feature_state",
+                },
+            )
+            return False
+        return True
 
     def _flush_decision_windows(self, now: datetime) -> None:
         for batch in self.windows.pop_ready(now=now):

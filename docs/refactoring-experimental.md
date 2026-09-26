@@ -141,6 +141,11 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
     already reconciled. Shared idempotency and execution validation still run
     first; each path retains its original journal-before-book ordering,
     instrument cleanup, retry retirement and risk-halt behavior.
+25. Isolate the V3 candle preflight from feature, MTF, inventory and decision
+    state mutation. Session rejection still precedes replayed-candle detection;
+    accepted candles retain the same mutation and journal order. A regression
+    checks that a replayed candle outside its session is rejected before any
+    feature or MTF mutation.
 
 ## Retirement evidence
 
