@@ -146,6 +146,10 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
     accepted candles retain the same mutation and journal order. A regression
     checks that a replayed candle outside its session is rejected before any
     feature or MTF mutation.
+26. Enable the existing pytest workflow for pull requests targeting the
+    experimental branch. Production push triggers remain restricted to
+    `develop` and `main`; this lets the refactor PR exercise its merge result
+    in GitHub Actions as well as the local suite.
 
 ## Retirement evidence
 
