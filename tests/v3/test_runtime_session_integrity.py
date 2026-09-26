@@ -65,6 +65,48 @@ def test_clock_finalization_is_capped_by_last_real_snapshot_session(tmp_path):
     assert candles(runtime)[-1].closed_at == FRIDAY.replace(hour=17, minute=0, second=0)
 
 
+@pytest.mark.parametrize("transition_delay_seconds", [0, 6])
+def test_eu_close_preserves_shared_us_decision_window(
+    tmp_path, transition_delay_seconds,
+):
+    runtime = runtime_for_test(tmp_path, with_eu=True)
+    boundary = datetime(2026, 9, 21, 15, 30, tzinfo=timezone.utc)
+    quote_time = boundary - timedelta(seconds=30)
+    runtime._refresh_sessions(quote_time)
+    for symbol in ("AIR.PA", "AAPL"):
+        runtime._handle_event(
+            MarketDataEvent(symbol, MarketDataSource.WEBSOCKET, quote_time,
+                            _snapshot(symbol, 105, timestamp=quote_time)),
+            quote_time,
+        )
+
+    batches = []
+    process = runtime._process_decision_window
+
+    def capture(batch):
+        batches.append(batch)
+        process(batch)
+
+    runtime._process_decision_window = capture
+    runtime._refresh_sessions(boundary + timedelta(seconds=transition_delay_seconds))
+
+    if transition_delay_seconds == 0:
+        assert not batches
+        assert set(runtime.windows._windows[boundary].feature_by_symbol) == {"AIR.PA"}
+        runtime._finalize_clocked_candles(boundary + timedelta(seconds=1))
+        runtime._flush_decision_windows(boundary + timedelta(seconds=1))
+
+    assert len(batches) == 1
+    assert batches[0].closed_at == boundary
+    assert batches[0].completed_symbols == ("AAPL", "AIR.PA")
+    assert batches[0].missing_symbols == ()
+    assert batches[0].finalization_reason == "all_symbols_completed"
+    assert not any(name == "v3_decision_window_late_symbol"
+                   for name, _ in runtime.trade_journal.events)
+    assert not any(name == "v3_decision_window_incomplete"
+                   for name, _ in runtime.trade_journal.events)
+
+
 def result_for(opened_at):
     candle = Candle("AAPL", 60, 105, 106, 104, 105, None, opened_at,
                     opened_at+timedelta(minutes=1), 1)

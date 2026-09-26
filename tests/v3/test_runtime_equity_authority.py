@@ -23,23 +23,31 @@ from tests.v3.test_planner import _planner
 from tests.v3.test_runtime import NOW, RecordingJournal, _feature, _snapshot
 
 
-def runtime_for_test(tmp_path):
-    settings = Settings(BROKER="etoro_demo", WATCHLIST="AAPL", EQUITY_US_SYMBOLS="AAPL",
-                        EQUITY_EU_SYMBOLS="", CRYPTO_SYMBOLS="", TRADING_SESSION_TIMEZONE="UTC")
+def runtime_for_test(tmp_path, *, with_eu=False):
+    symbols = ["AAPL", "AIR.PA"] if with_eu else ["AAPL"]
+    settings = Settings(BROKER="etoro_demo", WATCHLIST=",".join(symbols), EQUITY_US_SYMBOLS="AAPL",
+                        EQUITY_EU_SYMBOLS="AIR.PA" if with_eu else "",
+                        CRYPTO_SYMBOLS="", TRADING_SESSION_TIMEZONE="UTC")
     registry = InstrumentRegistry(settings)
     config = etoro5_research_config()
     runtime = GoblinV3Runtime(
-        settings=settings, symbols=["AAPL"], run_id="integrity-test", instrument_registry=registry,
+        settings=settings, symbols=symbols, run_id="integrity-test", instrument_registry=registry,
         execution_broker=SimpleNamespace(), rest_market_data=SimpleNamespace(),
         live_market_data=SimpleNamespace(requires_websocket_health=False),
-        candle_builders={"AAPL": QualityAwareCandleBuilder()},
-        trading_session_service=TradingSessionService({AssetClass.EQUITY_US: AssetTradingSessionConfig(
-            AssetClass.EQUITY_US, parse_trading_sessions("07:00-17:00"))}, "UTC"),
+        candle_builders={symbol: QualityAwareCandleBuilder() for symbol in symbols},
+        trading_session_service=TradingSessionService({
+            AssetClass.EQUITY_US: AssetTradingSessionConfig(
+                AssetClass.EQUITY_US, parse_trading_sessions("07:00-17:00")),
+            AssetClass.EQUITY_EU: AssetTradingSessionConfig(
+                AssetClass.EQUITY_EU, parse_trading_sessions("07:00-15:30")),
+        }, "UTC"),
         market_context_service=SimpleNamespace(observe_accepted_snapshot=lambda snapshot: None,
                                                reset_session=lambda key: None),
         multi_timeframe_service=FullSessionMultiTimeframeService(),
         market_data_validator=MarketDataValidator(), planner=_planner(config), config=config,
-        feature_engine=OnlineFeatureEngine({"AAPL": AssetClass.EQUITY_US}),
+        feature_engine=OnlineFeatureEngine({
+            symbol: registry.resolve(symbol).asset_class for symbol in symbols
+        }),
         event_store=InventoryEventStore(tmp_path / "runtime.sqlite"),
         runtime_state_store=V3RuntimeStateStore(tmp_path / "runtime.sqlite"),
         trade_journal=RecordingJournal(), market_journal=RecordingJournal(),
