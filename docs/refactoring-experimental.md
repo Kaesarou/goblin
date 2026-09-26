@@ -69,6 +69,11 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
    mechanical Python 3.12 cleanup; no strategy or broker contract changes are
    involved. Validation: the full 907-test suite and the targeted Ruff checks
    pass.
+10. Consolidate eToro HTTP retry-hint parsing and 429 cooldown policy in the
+    existing retry-policy module. Account, order-lookup and REST market-data
+    GETs still use their original retry paths and bucket assignments. Added
+    tests for numeric/missing hints, fallback delay and a market-data 429
+    cooling down the shared account bucket. Validation: 914 tests pass.
 
 ## Retirement evidence
 

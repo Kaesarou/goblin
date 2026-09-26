@@ -12,15 +12,16 @@ from app.brokers.etoro.endpoint_paths import (
     instrument_search_path,
 )
 from app.brokers.etoro.get_rate_governor import (
-    ETORO_GET_429_FALLBACK_SECONDS,
     EtoroGetRateGovernor,
 )
 from app.brokers.etoro.http_failure import raise_for_failed_response
 from app.brokers.etoro.http_headers_builder import build_headers
 from app.brokers.etoro.http_response_payload import response_payload
 from app.brokers.etoro.http_retry_policy import (
+    apply_429_cooldown,
     default_get_max_attempts,
     is_retryable_http_status,
+    retry_after_seconds,
 )
 from app.brokers.etoro.http_url_builder import build_http_url
 from app.brokers.etoro.instrument_cache import remember_instrument_id
@@ -146,13 +147,8 @@ class EtoroRestMarketDataClient:
                 time.sleep(delay_seconds_for_attempt(attempt))
                 continue
 
-            retry_after = _retry_after_seconds(response)
-            if response.status_code == 429:
-                self._get_rate_governor.defer(
-                    retry_after
-                    if retry_after is not None
-                    else ETORO_GET_429_FALLBACK_SECONDS
-                )
+            retry_after = retry_after_seconds(response)
+            apply_429_cooldown(response, self._get_rate_governor)
             if (
                 is_retryable_http_status(response.status_code)
                 and attempt < max_attempts
@@ -252,14 +248,3 @@ class EtoroRestMarketDataClient:
             encoding='utf-8',
         )
         temporary.replace(path)
-
-
-def _retry_after_seconds(response) -> float | None:
-    value = response.headers.get('Retry-After')
-    if value in (None, ''):
-        return None
-    try:
-        seconds = float(value)
-    except (TypeError, ValueError):
-        return None
-    return max(0.0, seconds)

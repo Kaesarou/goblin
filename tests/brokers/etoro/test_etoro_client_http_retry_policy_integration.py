@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
-import requests
 import pytest
+import requests
 
 from app.brokers.etoro.attempt_delay import delay_seconds_for_attempt
 from app.brokers.etoro.etoro_client import EtoroClient
@@ -10,6 +10,7 @@ from app.brokers.etoro.get_rate_governor import (
     EtoroGetRateGovernor,
 )
 from app.brokers.etoro.http_retry_policy import is_retryable_http_status
+from app.brokers.etoro.market_data_client import EtoroRestMarketDataClient
 
 
 class FakeClock:
@@ -170,3 +171,35 @@ def test_429_cooldown_is_applied_only_to_the_bucket_receiving_it(monkeypatch, li
     assert clock.governor_sleeps == []
     assert limited.snapshot()["cooldown_remaining_seconds"] == 90
     assert other.snapshot()["cooldown_remaining_seconds"] == 0
+
+
+def test_market_data_429_cools_down_shared_account_bucket(tmp_path, monkeypatch):
+    client, clock = build_uninitialized_client()
+    market_data = EtoroRestMarketDataClient(
+        api_key="api-key",
+        user_key="user-key",
+        instrument_id_cache_path=str(tmp_path / "instruments.json"),
+        get_rate_governor=client._get_rate_governor,
+    )
+    client._order_lookup_get_rate_governor = EtoroGetRateGovernor(
+        clock=clock.now, sleeper=clock.sleep
+    )
+    calls = []
+    responses = [FakeResponse(429, headers={"Retry-After": "11"}), FakeResponse(200, {"ok": True})]
+
+    def fake_get(*args, **kwargs):
+        calls.append(clock.now())
+        return responses.pop(0)
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(
+        "app.brokers.etoro.market_data_client.default_get_max_attempts",
+        lambda: 1,
+    )
+
+    with pytest.raises(requests.HTTPError):
+        market_data._get("/rates")
+    assert client._order_lookup_get_rate_governor.snapshot()["cooldown_remaining_seconds"] == 0
+    assert client._get_once("/portfolio") == {"ok": True}
+    assert calls == [0.0, 11.0]
+    assert clock.governor_sleeps == [11.0]
