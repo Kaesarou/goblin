@@ -1,12 +1,12 @@
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 
 class RuntimeHeartbeat:
     def __init__(self, interval_minutes: int):
         self.interval = timedelta(minutes=max(1, interval_minutes))
-        self.last_emitted_at = datetime.now(timezone.utc)
+        self.last_emitted_at = datetime.now(UTC)
 
     def maybe_emit(
         self,
@@ -18,7 +18,7 @@ class RuntimeHeartbeat:
         active_symbols: int,
         now: datetime | None = None,
     ) -> bool:
-        current_time = now or datetime.now(timezone.utc)
+        current_time = now or datetime.now(UTC)
         if current_time - self.last_emitted_at < self.interval:
             return False
 

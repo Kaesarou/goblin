@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 
 from app.config.settings import Settings, get_settings
@@ -225,7 +225,7 @@ def _build_research_pipeline(
 
 
 def main() -> None:
-    started_at = datetime.now(timezone.utc)
+    started_at = datetime.now(UTC)
     run_id = build_run_id(started_at)
     run_status = "running"
     settings = get_settings()
@@ -421,7 +421,7 @@ def main() -> None:
             run_paths.state_start,
             runtime=runtime,
             phase="start",
-            asof=datetime.now(timezone.utc),
+            asof=datetime.now(UTC),
         )
         checkpoint_started = True
         runtime.run()
@@ -450,7 +450,7 @@ def main() -> None:
                     run_paths.state_end,
                     runtime=runtime,
                     phase="end",
-                    asof=datetime.now(timezone.utc),
+                    asof=datetime.now(UTC),
                 )
             except Exception:
                 logger.exception("V3 end checkpoint write failed")
@@ -460,7 +460,7 @@ def main() -> None:
             _write_disabled_research_summary(
                 path=run_paths.research_summary,
                 run_id=run_id,
-                updated_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(UTC),
             )
         trade_journal.write(
             "runtime_stopped",

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import math
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
-from typing import Iterable
+from datetime import UTC, datetime, timedelta, timezone
 
 import requests
 
@@ -12,8 +12,8 @@ from app.brokers.base import (
     BrokerCloseExecution,
     ClosePositionRejectedError,
     ClosePositionSubmissionUnknownError,
-    OpenPositionResult,
     OpenPositionRejectedError,
+    OpenPositionResult,
 )
 from app.market.models import MarketSnapshot
 from app.runtime.broker_task_runner import BrokerTaskCompletion, BrokerTaskLane
@@ -23,7 +23,6 @@ from app.v3.external_account_gate import gate_active, record_external_broker_act
 from app.v3.models import IntentPurpose, OrderIntent
 from app.v3.persistence import InventoryEvent, InventoryEventStore
 from app.v3.state_store import CloseRetryState, V3RuntimeStateStore
-
 
 POINT_M_DUST_NOTIONAL_USD = 10.0
 CONFIRMATION_INITIAL_DELAY_SECONDS = 10.0
@@ -1958,13 +1957,13 @@ def _confirmation_backoff_seconds(
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _restored_close_intent(payload: dict, occurred_at: datetime) -> OrderIntent:

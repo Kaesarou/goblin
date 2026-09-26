@@ -1,6 +1,6 @@
 import json
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +34,7 @@ class DailySummaryAggregator:
         self.journal_detail_level = normalize_detail_level(
             journal_detail_level
         )
-        self.started_at = started_at or datetime.now(timezone.utc)
+        self.started_at = started_at or datetime.now(UTC)
         self.ended_at = None
         self.max_items = max_items
         self.event_counts = Counter()
@@ -351,7 +351,7 @@ class DailySummaryAggregator:
             self.pending_invalidations_by_symbol[str(symbol)] += 1
 
     def finalize(self):
-        self.ended_at = datetime.now(timezone.utc)
+        self.ended_at = datetime.now(UTC)
         return self.to_dict()
 
     def write(self, path):

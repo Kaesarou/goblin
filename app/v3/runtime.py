@@ -4,9 +4,9 @@ import logging
 import math
 import time
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import Mapping
 
 from app.market.data_quality import MarketDataStatus, MarketDataValidator
 from app.market.models import MarketSnapshot

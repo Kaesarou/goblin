@@ -1,7 +1,7 @@
 import logging
 import time
 from collections.abc import Iterable
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from uuid import uuid4
 
 import requests
@@ -20,13 +20,13 @@ from app.brokers.etoro.broker_environment import broker_environment_from_name
 from app.brokers.etoro.close_order_details_parser import extract_close_execution
 from app.brokers.etoro.close_order_payload_builder import build_close_order_payload
 from app.brokers.etoro.endpoint_paths import (
+    aggregate_portfolio_path,
     close_order_lookup_path,
     close_position_path,
     demo_portfolio_path,
     instrument_search_path,
     open_order_path,
     order_lookup_path,
-    aggregate_portfolio_path,
     real_portfolio_path,
 )
 from app.brokers.etoro.get_rate_governor import (
@@ -142,7 +142,7 @@ class EtoroClient(BrokerClient):
             payload.get('leverage'),
             payload,
         )
-        submitted_at = datetime.now(timezone.utc)
+        submitted_at = datetime.now(UTC)
         order_response = self._post(self._open_order_path(), payload)
         order_id = self._extract_order_id(order_response)
         reference_id = self._extract_reference_id(order_response)
@@ -258,7 +258,7 @@ class EtoroClient(BrokerClient):
                 cause=exc,
             ) from exc
 
-        submitted_at = datetime.now(timezone.utc)
+        submitted_at = datetime.now(UTC)
         try:
             response = self._post(
                 self._close_position_path(position_id),
@@ -315,7 +315,7 @@ class EtoroClient(BrokerClient):
                 reference_id=reference_id,
             )
 
-        accepted_at = datetime.now(timezone.utc)
+        accepted_at = datetime.now(UTC)
         logger.info(
             'eToro close submitted | position_id=%s | close_order_id=%s | '
             'reference_id=%s | units_to_deduct=%s',

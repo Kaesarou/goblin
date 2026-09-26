@@ -17,8 +17,8 @@ from app.brokers.etoro.order_response_parser import (
     is_order_executed,
     is_order_rejected,
 )
-from app.brokers.etoro.pnl_position_amount import position_amount_usd
 from app.brokers.etoro.pending_orders_preflight import pending_open_order_descriptions
+from app.brokers.etoro.pnl_position_amount import position_amount_usd
 from app.brokers.etoro.portfolio_position_parser import extract_open_position_units
 
 logger = logging.getLogger(__name__)

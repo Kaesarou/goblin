@@ -1,6 +1,6 @@
 from collections import Counter
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 
 from app.market.candle_builder import CandleBuilder
 from app.market.models import MarketSnapshot
@@ -76,7 +76,7 @@ class QualityAwareCandleBuilder:
         snapshot = event.snapshot
         if snapshot is None:
             return None
-        bucket = snapshot.timestamp.astimezone(timezone.utc).replace(
+        bucket = snapshot.timestamp.astimezone(UTC).replace(
             second=0,
             microsecond=0,
         )

@@ -3,7 +3,7 @@ import json
 import logging
 import shutil
 from collections.abc import Iterable
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -95,7 +95,7 @@ class JsonlJournal:
                 'run_id': self.run_id,
                 'stream': self.stream_name,
                 'sequence': next_sequence,
-                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'timestamp': datetime.now(UTC).isoformat(),
                 'event_type': event_type,
                 'payload': serialize_value(payload),
             }
@@ -155,7 +155,7 @@ class JsonlJournal:
                     'run_id': self.run_id,
                     'stream': self.stream_name,
                     'sequence': first_sequence + offset,
-                    'timestamp': datetime.now(timezone.utc).isoformat(),
+                    'timestamp': datetime.now(UTC).isoformat(),
                     'event_type': event_type,
                     'payload': serialize_value(payload),
                 }

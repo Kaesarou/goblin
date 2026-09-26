@@ -1,8 +1,12 @@
 from __future__ import annotations
+
 import math
-from dataclasses import dataclass,replace
-import numpy as np,pandas as pd
-from app.v3.models import InventoryState,MarketState,PortfolioState,IntentPurpose
+from dataclasses import dataclass, replace
+
+import numpy as np
+import pandas as pd
+
+from app.v3.models import IntentPurpose, InventoryState, MarketState, PortfolioState
 
 MIN_NOTIONAL=10.0
 
@@ -162,5 +166,5 @@ def _minmax_low(x):
     if not np.isfinite(mn) or not np.isfinite(mx) or mx-mn<=1e-15:return np.ones_like(x,dtype=float)
     return (mx-x)/(mx-mn)
 def _force_intent(inv,ts,px):
-    from app.v3.models import OrderIntent,ExecutionStyle
+    from app.v3.models import ExecutionStyle, OrderIntent
     return OrderIntent(f'force:{inv.inventory_id}:{ts}',IntentPurpose.RISK_REDUCTION,inv.symbol,'SELL',inv.total_units*px,ts.to_pydatetime(),ExecutionStyle.MARKET,inventory_id=inv.inventory_id,reduce_only=True,metadata={'close_fraction_of_units':1.0,'force_close':True})

@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 from app.market.models import Candle, MarketSnapshot
 from app.market.timeframes import BASE_TIMEFRAME
@@ -168,10 +168,10 @@ class CandleBuilder:
         bucket_epoch = epoch_seconds - (
             epoch_seconds % self.timeframe_seconds
         )
-        return datetime.fromtimestamp(bucket_epoch, tz=timezone.utc)
+        return datetime.fromtimestamp(bucket_epoch, tz=UTC)
 
     @staticmethod
     def _as_utc(value: datetime) -> datetime:
         if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc)
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)

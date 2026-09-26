@@ -60,6 +60,10 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
    Historical signal scoring remains available through the exercised scorer
    modules and candidate-ranking path. Validation: the full 907-test suite
    remains green.
+8. Remove unused V3 imports and test-only dead assignments. The package keeps
+   its configuration exports while no longer importing planner/recoverability
+   classes as unused side effects. Validation: Ruff unused-symbol checks and
+   the full 907-test suite pass.
 
 ## Retirement evidence
 

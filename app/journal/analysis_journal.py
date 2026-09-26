@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 from app.execution.scoring.managed_outcome_model_contract import (
@@ -47,7 +47,7 @@ class AnalysisJournal:
         self.partial_summary_interval = timedelta(
             minutes=max(1, partial_summary_interval_minutes)
         )
-        self._last_partial_summary_at = datetime.now(timezone.utc)
+        self._last_partial_summary_at = datetime.now(UTC)
         self._session_state_by_symbol: dict[str, tuple[Any, ...]] = {}
         self.summary = AnalysisReadySummaryAggregator(
             run_id=run_id,
@@ -221,7 +221,7 @@ class AnalysisJournal:
     def _maybe_write_partial_summary(self) -> None:
         if not self.write_partial_summary or not self.partial_summary_path:
             return
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if (
             now - self._last_partial_summary_at
             < self.partial_summary_interval

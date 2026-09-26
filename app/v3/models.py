@@ -1,8 +1,10 @@
 from __future__ import annotations
+
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from enum import StrEnum
-from typing import Mapping
+
 
 class InventoryStatus(StrEnum): ACTIVE='active'; EXITING='exiting'; CLOSED='closed'
 class IntentPurpose(StrEnum):
@@ -12,8 +14,8 @@ class DecisionReason(StrEnum):
     OPPORTUNITY='opportunity'; NO_OPPORTUNITY='no_opportunity'; RECOVERABILITY_ACCEPTED='recoverability_accepted'; RECOVERABILITY_REJECTED='recoverability_rejected'; MAX_ENTRY_FILLS='max_entry_fills'; SYMBOL_EXPOSURE_CAP='symbol_exposure_cap'; PORTFOLIO_EXPOSURE_CAP='portfolio_exposure_cap'; MARKET_DATA_INVALID='market_data_invalid'; ECONOMICS_REJECTED='economics_rejected'; TRAILING_EXIT='trailing_exit'; UNSTUCK='unstuck'; HEDGE_REQUIRED='hedge_required'; HEDGE_NOT_REQUIRED='hedge_not_required'; NO_ACTION='no_action'
 
 def _as_utc(v):
-    if v.tzinfo is None:return v.replace(tzinfo=timezone.utc)
-    return v.astimezone(timezone.utc)
+    if v.tzinfo is None:return v.replace(tzinfo=UTC)
+    return v.astimezone(UTC)
 
 @dataclass(frozen=True)
 class MarketState:

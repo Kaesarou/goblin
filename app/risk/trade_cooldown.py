@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 from app.execution.position_close_reason import PositionCloseReason
 from app.execution.position_models import ExitPriceSource
@@ -174,6 +174,6 @@ def build_closed_trade_memory_entry(
         explicit_costs_deducted=explicit_costs_deducted,
         net_pnl=net_pnl,
         net_pnl_percent=net_pnl_percent,
-        created_at=created_at or datetime.now(timezone.utc),
+        created_at=created_at or datetime.now(UTC),
         session_key=session_key,
     )

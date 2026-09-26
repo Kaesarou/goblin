@@ -1,7 +1,7 @@
 import json
 import logging
 from collections.abc import Callable, Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from types import MappingProxyType
 from uuid import uuid4
 
@@ -209,7 +209,7 @@ def _prices(payload: dict) -> tuple[float, float, float] | None:
         symbol='TMP',
         payload=payload,
         source_timestamp=None,
-        received_at=datetime.now(timezone.utc),
+        received_at=datetime.now(UTC),
     )
     if snapshot is None:
         return None
@@ -264,5 +264,5 @@ def _optional_datetime(value: object) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)

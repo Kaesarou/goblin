@@ -6,7 +6,6 @@ from typing import Any
 from app.market.multi_timeframe import MultiTimeframeContext
 from app.market.timeframes import TimeframeDirection, TimeframeMaturity
 
-
 MULTI_TIMEFRAME_SCORER_VERSION = 'multi_timeframe_score_v2'
 
 

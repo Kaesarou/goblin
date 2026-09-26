@@ -15,6 +15,8 @@ from app.risk.trade_cost_model import TradeCostEstimate, TradeCostModel
 from app.strategies.signals import Signal
 from app.utils.commons import (
     normalize_symbol,
+)
+from app.utils.commons import (
     spread_percent as calculate_spread_percent,
 )
 

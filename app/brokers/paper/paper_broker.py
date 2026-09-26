@@ -1,7 +1,7 @@
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from uuid import uuid4
 
 from app.brokers.base import (
@@ -36,7 +36,7 @@ class PaperBrokerClient(BrokerClient):
         take_profit: float,
     ) -> OpenPositionResult:
         position_id = f'paper-{uuid4()}'
-        opened_at = datetime.now(timezone.utc)
+        opened_at = datetime.now(UTC)
         self.positions[position_id] = {
             'position_id': position_id,
             'symbol': symbol.strip().upper(),
@@ -66,7 +66,7 @@ class PaperBrokerClient(BrokerClient):
         position_id: str,
         units_to_deduct: float | None = None,
     ) -> ClosePositionSubmission:
-        submitted_at = datetime.now(timezone.utc)
+        submitted_at = datetime.now(UTC)
         position = self.positions.get(position_id)
         if position is None:
             raise ClosePositionRejectedError(
@@ -81,7 +81,7 @@ class PaperBrokerClient(BrokerClient):
         partial = units_to_deduct is not None
         if not partial:
             self.positions.pop(position_id, None)
-        accepted_at = datetime.now(timezone.utc)
+        accepted_at = datetime.now(UTC)
         close_order_id = f'paper-close-{uuid4()}'
         logger.info(
             'Paper close recorded | position_id=%s | close_order_id=%s | '

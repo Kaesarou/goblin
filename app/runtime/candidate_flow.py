@@ -1,7 +1,7 @@
 import logging
 from collections import defaultdict
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 
 from app.execution.candidate_economics import (
     EvaluatedTradeCandidate,
@@ -121,7 +121,7 @@ def apply_trade_cooldown_guard(
     cooldown_guard: TradeCooldownGuard,
     trade_journal: JsonlJournal,
 ) -> list[TradeCandidate]:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     cooldown_guard.store.delete_expired(now)
     result = cooldown_guard.filter_candidates(
         candidates=candidates,

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 
 VERSION = 1
@@ -50,7 +50,7 @@ def record_external_broker_activity(
     payload = {
         "version": VERSION,
         "reason": "external_broker_activity",
-        "observed_at_utc": datetime.now(timezone.utc).isoformat(),
+        "observed_at_utc": datetime.now(UTC).isoformat(),
         "observed_issues": list(issues),
         "operator_acknowledgment_required": True,
     }

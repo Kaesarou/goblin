@@ -92,7 +92,7 @@ class FixedTradeCooldownGuard:
         config_for_candidate: Callable[['TradeCandidate'], TradeCooldownConfig],
         now: datetime,
     ) -> FixedTradeCooldownFilterResult:
-        selected_candidates: list['TradeCandidate'] = []
+        selected_candidates: list[TradeCandidate] = []
         rejected_candidates: list[RejectedFixedCooldownCandidate] = []
 
         for candidate in candidates:

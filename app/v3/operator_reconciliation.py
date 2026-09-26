@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import math
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 
 from app.v3.book import InventoryBook
 from app.v3.live_execution import _units_close
@@ -55,7 +55,7 @@ def acknowledge_broker_reconciliation(
     actual = broker.get_open_position_units((position_id,)).get(position_id)
     if isinstance(actual, bool) or not isinstance(actual, (int, float)) or not math.isfinite(actual) or actual < 0 or not _units_close(actual, expected_broker_units):
         raise ValueError("Current broker quantity does not strictly match expected units")
-    now = observed_at or datetime.now(timezone.utc)
+    now = observed_at or datetime.now(UTC)
     if now.tzinfo is None or any(event.occurred_at > now for event in events):
         raise ValueError("Acknowledgment must follow the ledger with an aware timestamp")
     payload = {
