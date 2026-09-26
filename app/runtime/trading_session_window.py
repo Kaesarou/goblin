@@ -1,10 +1,9 @@
-from datetime import datetime, time, timedelta, timezone
+from datetime import UTC, datetime, time, timedelta, timezone
 from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
 from app.config.settings import Settings
 from app.instruments.models import AssetClass
-
 
 SESSION_CLOSED = 'session_closed'
 SESSION_TRADABLE = 'session_tradable'
@@ -218,7 +217,7 @@ class TradingSessionService:
 
     def _to_local_time(self, now: datetime) -> datetime:
         if now.tzinfo is None:
-            now = now.replace(tzinfo=timezone.utc)
+            now = now.replace(tzinfo=UTC)
         return now.astimezone(self.timezone)
 
 

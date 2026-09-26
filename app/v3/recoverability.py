@@ -3,10 +3,10 @@ from __future__ import annotations
 import bisect
 import json
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
-from typing import Mapping
 
 from app.v3.models import RecoverabilityAssessment
 
@@ -26,12 +26,12 @@ class LinearRecoverabilityArtifact:
     score_quantiles: tuple[float, ...]
 
     @classmethod
-    def from_json(cls, path: str | Path) -> "LinearRecoverabilityArtifact":
+    def from_json(cls, path: str | Path) -> LinearRecoverabilityArtifact:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
         return cls.from_payload(payload)
 
     @classmethod
-    def from_payload(cls, payload: Mapping[str, object]) -> "LinearRecoverabilityArtifact":
+    def from_payload(cls, payload: Mapping[str, object]) -> LinearRecoverabilityArtifact:
         return cls(
             model_version=str(payload["model_version"]),
             feature_manifest_version=str(payload["feature_manifest_version"]),
@@ -52,7 +52,7 @@ class RecoverabilityScorer:
         self.artifact = artifact
 
     @classmethod
-    def from_default_artifact(cls) -> "RecoverabilityScorer":
+    def from_default_artifact(cls) -> RecoverabilityScorer:
         resource = files("app.v3.artifacts").joinpath("recoverability_long_logit_v1.json")
         payload = json.loads(resource.read_text(encoding="utf-8"))
         return cls(LinearRecoverabilityArtifact.from_payload(payload))

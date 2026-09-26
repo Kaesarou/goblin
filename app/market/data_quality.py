@@ -1,9 +1,9 @@
 import math
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from enum import StrEnum
-from typing import Mapping
 
 from app.market.models import MarketSnapshot
 
@@ -459,7 +459,7 @@ def quote_quality_contract_metadata() -> dict[str, float | int | str]:
 
 
 def _validation_time(request_started_at: datetime | None) -> datetime:
-    wall_clock = datetime.now(timezone.utc)
+    wall_clock = datetime.now(UTC)
     if request_started_at is None:
         return wall_clock
     explicit = _as_utc(request_started_at)
@@ -539,5 +539,5 @@ def _round_optional(value: float | None) -> float | None:
 
 def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)

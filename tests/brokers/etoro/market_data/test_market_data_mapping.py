@@ -55,24 +55,21 @@ def test_etoro_market_data_uses_mid_price_when_last_is_missing():
     assert snapshots['AAPL'].last == 200.0
 
 
-def test_etoro_market_data_accepts_alternative_rate_key_names():
-    snapshots = to_market_snapshots(
-        rates_payload={
-            'rates': [
-                {
-                    'instrumentId': 1001,
-                    'bidPrice': '199.5',
-                    'askPrice': '200.5',
-                    'lastPrice': '200.25',
-                },
-            ],
-        },
-        symbol_by_instrument_id={1001: 'AAPL'},
-    )
-
-    assert snapshots['AAPL'].bid == 199.5
-    assert snapshots['AAPL'].ask == 200.5
-    assert snapshots['AAPL'].last == 200.25
+def test_etoro_market_data_requires_documented_rate_field_names():
+    with pytest.raises(ValueError, match='required int'):
+        to_market_snapshots(
+            rates_payload={
+                'rates': [
+                    {
+                        'instrumentId': 1001,
+                        'bidPrice': '199.5',
+                        'askPrice': '200.5',
+                        'lastPrice': '200.25',
+                    },
+                ],
+            },
+            symbol_by_instrument_id={1001: 'AAPL'},
+        )
 
 
 def test_etoro_market_data_raises_when_instrument_symbol_is_not_cached():

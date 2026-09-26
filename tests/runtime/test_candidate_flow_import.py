@@ -1,9 +1,6 @@
 from app.runtime import candidate_flow
-from app.runtime.async_candidate_execution import (
-    AsyncCandidateExecutionCoordinator,
-)
 
 
-def test_runtime_exposes_only_async_candidate_execution_path():
-    assert AsyncCandidateExecutionCoordinator is not None
+def test_historical_candidate_flow_does_not_expose_broker_execution():
+    assert callable(candidate_flow.select_trade_candidates_with_strategy_profile)
     assert not hasattr(candidate_flow, 'execute_ranked_candidates')

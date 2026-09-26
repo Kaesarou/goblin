@@ -1,7 +1,7 @@
 import logging
 import time
 from collections.abc import Iterable
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from uuid import uuid4
 
 import requests
@@ -20,13 +20,13 @@ from app.brokers.etoro.broker_environment import broker_environment_from_name
 from app.brokers.etoro.close_order_details_parser import extract_close_execution
 from app.brokers.etoro.close_order_payload_builder import build_close_order_payload
 from app.brokers.etoro.endpoint_paths import (
+    aggregate_portfolio_path,
     close_order_lookup_path,
     close_position_path,
     demo_portfolio_path,
     instrument_search_path,
     open_order_path,
     order_lookup_path,
-    aggregate_portfolio_path,
     real_portfolio_path,
 )
 from app.brokers.etoro.get_rate_governor import (
@@ -83,6 +83,7 @@ class EtoroClient(BrokerClient):
     """
 
     etoro_api_base_url = 'https://public-api.etoro.com'
+    account_equity_source = ACCOUNT_EQUITY_SOURCE
 
     def __init__(
         self,
@@ -141,20 +142,42 @@ class EtoroClient(BrokerClient):
             payload.get('leverage'),
             payload,
         )
+        submitted_at = datetime.now(UTC)
         order_response = self._post(self._open_order_path(), payload)
-        order_id = extract_order_id(order_response)
-        reference_id = extract_reference_id(order_response)
+        order_id = self._extract_order_id(order_response)
+        reference_id = self._extract_reference_id(order_response)
         logger.info('eToro order submitted | order_id=%s | reference_id=%s', order_id, reference_id)
-        order_details = self._wait_for_executed_order(
-            order_id,
-            require_position_details=True,
-        )
-        executed_positions = extract_executed_position_details_list(order_details)
+
+        try:
+            order_details = self._wait_for_executed_order(
+                order_id,
+                require_position_details=True,
+            )
+        except Exception as exc:
+            translated = self._translate_open_confirmation_error(
+                order_id=order_id,
+                reference_id=reference_id,
+                symbol=symbol,
+                side=normalized_side,
+                amount=amount,
+                submitted_at=submitted_at,
+                cause=exc,
+            )
+            if translated is None:
+                raise
+            raise translated from exc
+
+        executed_positions = self._extract_executed_position_details_list(order_details)
         if len(executed_positions) != 1:
-            raise RuntimeError(
-                'eToro order executed with unsupported position execution '
-                f'count: order_id={order_id}, '
-                f'count={len(executed_positions)}, details={order_details}'
+            raise self._invalid_open_execution_error(
+                order_id=order_id,
+                reference_id=reference_id,
+                symbol=symbol,
+                side=normalized_side,
+                amount=amount,
+                submitted_at=submitted_at,
+                details=order_details,
+                execution_count=len(executed_positions),
             )
         executed_position = executed_positions[0]
         remember_position_instrument_id(
@@ -162,12 +185,58 @@ class EtoroClient(BrokerClient):
             position_id=executed_position.position_id,
             instrument_id=instrument_id,
         )
+        account_notional = self._resolve_open_notional(
+            position_id=executed_position.position_id,
+            requested=float(amount),
+            reported=executed_position.executed_notional,
+        )
         return OpenPositionResult(
             position_id=executed_position.position_id,
             executed_entry_price=executed_position.executed_entry_price,
             executed_units=executed_position.executed_units,
-            executed_notional=executed_position.executed_notional,
+            executed_notional=account_notional,
         )
+
+    def _translate_open_confirmation_error(
+        self,
+        *,
+        order_id: str,
+        reference_id: str | None,
+        symbol: str,
+        side: str,
+        amount: float,
+        submitted_at: datetime,
+        cause: Exception,
+    ) -> Exception | None:
+        """Translate confirmation failures when an adapter needs stronger semantics."""
+        return None
+
+    def _invalid_open_execution_error(
+        self,
+        *,
+        order_id: str,
+        reference_id: str | None,
+        symbol: str,
+        side: str,
+        amount: float,
+        submitted_at: datetime,
+        details: dict,
+        execution_count: int,
+    ) -> Exception:
+        return RuntimeError(
+            'eToro order executed with unsupported position execution '
+            f'count: order_id={order_id}, count={execution_count}, '
+            f'details={details}'
+        )
+
+    def _resolve_open_notional(
+        self,
+        *,
+        position_id: str,
+        requested: float,
+        reported: float | None,
+    ) -> float | None:
+        return reported
 
     def close_position(
         self,
@@ -189,7 +258,7 @@ class EtoroClient(BrokerClient):
                 cause=exc,
             ) from exc
 
-        submitted_at = datetime.now(timezone.utc)
+        submitted_at = datetime.now(UTC)
         try:
             response = self._post(
                 self._close_position_path(position_id),
@@ -246,7 +315,7 @@ class EtoroClient(BrokerClient):
                 reference_id=reference_id,
             )
 
-        accepted_at = datetime.now(timezone.utc)
+        accepted_at = datetime.now(UTC)
         logger.info(
             'eToro close submitted | position_id=%s | close_order_id=%s | '
             'reference_id=%s | units_to_deduct=%s',
@@ -548,13 +617,6 @@ class EtoroClient(BrokerClient):
 
     def _extract_reference_id(self, payload: dict) -> str | None:
         return extract_reference_id(payload)
-
-    def _is_close_response_accepted(self, payload: dict, position_id: str) -> bool:
-        return is_close_response_accepted(payload, position_id)
-
-    def _is_order_rejected(self, payload: dict) -> bool:
-        return is_order_rejected(payload)
-
 
 def _retry_after_seconds(response) -> float | None:
     value = response.headers.get('Retry-After')

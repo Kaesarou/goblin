@@ -24,19 +24,10 @@ def pending_open_order_descriptions(client) -> tuple[str, ...]:
         raise ValueError("Unsupported eToro account environment for preflight")
 
     payload = client._get(path)
-    for _ in range(4):
-        if not isinstance(payload, dict):
-            raise ValueError("Invalid eToro P&L payload")
-        if "ordersForOpen" in payload or "orders" in payload:
-            break
-        nested = payload.get("data")
-        if not isinstance(nested, dict):
-            nested = payload.get("clientPortfolio")
-        if not isinstance(nested, dict):
-            raise ValueError("Missing authoritative pending-order collections in eToro P&L")
-        payload = nested
-    else:
-        raise ValueError("Excessively nested eToro P&L payload")
+    if not isinstance(payload, dict):
+        raise ValueError("Invalid eToro P&L payload")
+    if "ordersForOpen" not in payload or "orders" not in payload:
+        raise ValueError("Missing authoritative pending-order collections in eToro P&L")
 
     pending: list[str] = []
     for field in ("ordersForOpen", "orders"):
@@ -44,10 +35,10 @@ def pending_open_order_descriptions(client) -> tuple[str, ...]:
         if not isinstance(entries, list) or not all(isinstance(x, dict) for x in entries):
             raise ValueError(f"Missing or invalid eToro P&L {field} collection")
         for index, order in enumerate(entries):
-            identity = next(
-                (str(order[key]) for key in ("orderId", "orderID", "orderId", "id", "orderForOpenID")
-                 if order.get(key) is not None),
-                f"index-{index}",
+            identity = (
+                str(order["orderId"])
+                if order.get("orderId") is not None
+                else f"index-{index}"
             )
             pending.append(f"{field}:{identity}")
     return tuple(pending)

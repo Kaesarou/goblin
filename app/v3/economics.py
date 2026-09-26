@@ -1,6 +1,9 @@
 from dataclasses import dataclass
+
 from app.v3.config import EconomicsPolicy
 from app.v3.models import CostEstimate
+
+
 @dataclass(frozen=True)
 class BrokerCostSchedule:
     commission_pct_per_fill:float=0; fixed_fee_per_fill:float=0; slippage_pct_per_fill:float=0; annual_financing_pct:float=0; annual_borrow_pct:float=0

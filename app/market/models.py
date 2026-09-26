@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from enum import StrEnum
 
 EXECUTABLE_PRICE_CONTRACT_VERSION = 'side_aware_executable_prices_v2'
@@ -72,7 +72,7 @@ class MarketSnapshot:
         price_source: PriceSource = PriceSource.BROKER_LAST,
         timestamp_source: TimestampSource = TimestampSource.LOCAL_RECEIVE_TIME,
     ) -> 'MarketSnapshot':
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         return cls(
             symbol=symbol,
             bid=bid,
@@ -104,5 +104,5 @@ class Candle:
 
 def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)

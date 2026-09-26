@@ -106,8 +106,7 @@ def test_pro_rata_allocator_preserves_fraction_per_leg():
     assert plan.planned_units == pytest.approx(inventory.total_units * 0.84)
 
 
-def test_partial_exit_fill_keeps_broker_leg_and_rebuilds(tmp_path):
-    store = InventoryEventStore(tmp_path / "events.sqlite")
+def test_partial_exit_fill_keeps_broker_leg_and_rebuilds():
     book = InventoryBook()
     book.apply_entry_fill(
         inventory_id="inv",

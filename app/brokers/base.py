@@ -14,6 +14,22 @@ class OpenPositionResult:
 
 
 @dataclass(frozen=True)
+class BrokerAccountPreflight:
+    """Authoritative account exposure, including orders not yet in positions."""
+
+    position_units: dict[str, float | None]
+    pending_open_orders: tuple[str, ...] = ()
+
+
+class OpenPositionRejectedError(RuntimeError):
+    """Structured terminal broker evidence proves the open had no fill.
+
+    HTTP failures, timeouts and exception text alone do not prove rejection.
+    Adapters may subclass this to preserve broker-specific diagnostics.
+    """
+
+
+@dataclass(frozen=True)
 class ClosePositionSubmission:
     position_id: str
     close_order_id: str | None
@@ -86,6 +102,22 @@ class BrokerClient(ABC):
     Market-data access is deliberately excluded. Paper, demo and live execution
     all consume the same independent eToro market-data pipeline.
     """
+
+    account_equity_source = "broker_account_equity"
+
+    @property
+    def requires_external_activity_ack(self) -> bool:
+        """Whether an external-activity gate survives account/ledger resets."""
+        return False
+
+    def get_account_preflight(self) -> BrokerAccountPreflight | None:
+        """Read uncached account exposure before reconciling ledger-owned legs.
+
+        External-account adapters must return authoritative positions and pending
+        opens, raising on incomplete data. None means this capability is not
+        provided (e.g. local paper execution); it is not proof of a flat account.
+        """
+        return None
 
     @abstractmethod
     def get_account_equity(self) -> float:

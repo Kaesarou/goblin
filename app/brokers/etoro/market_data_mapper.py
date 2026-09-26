@@ -1,8 +1,3 @@
-from app.brokers.etoro.scalar_extractors import (
-    extract_float,
-    extract_int,
-    extract_optional_float,
-)
 from app.market.models import MarketSnapshot, PriceSource
 
 
@@ -27,17 +22,14 @@ def to_market_snapshots(
     rates = rates_payload['rates']
 
     for rate in rates:
-        instrument_id = extract_int(rate, ('instrumentID', 'instrumentId'))
+        instrument_id = _required_int(rate, 'instrumentID')
         symbol = symbol_by_instrument_id.get(instrument_id)
         if symbol is None:
             raise ValueError(f'Unable to find cached symbol by instrument_id={instrument_id}.')
-        bid = extract_float(rate, ('Bid', 'bid', 'bidPrice'))
-        ask = extract_float(rate, ('Ask', 'ask', 'askPrice'))
+        bid = _required_float(rate, 'Bid')
+        ask = _required_float(rate, 'Ask')
 
-        last = extract_optional_float(
-            rate,
-            ('Last', 'last', 'lastPrice', 'Price', 'price', 'lastExecution'),
-        )
+        last = _optional_float(rate.get('Last'))
         price_source = PriceSource.BROKER_LAST
         if last is None:
             last = (bid + ask) / 2
@@ -52,3 +44,27 @@ def to_market_snapshots(
         )
 
     return result
+
+
+def _required_float(payload: dict, field: str) -> float:
+    value = payload.get(field)
+    if value is None:
+        raise ValueError(
+            f'Unable to extract required float field={field}. Payload={payload}'
+        )
+    return float(value)
+
+
+def _required_int(payload: dict, field: str) -> int:
+    value = payload.get(field)
+    if value is None:
+        raise ValueError(
+            f'Unable to extract required int field={field}. Payload={payload}'
+        )
+    return int(value)
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None:
+        return None
+    return float(value)

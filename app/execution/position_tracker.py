@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from typing import Any
 
 from app.brokers.base import BrokerCloseExecution
@@ -79,7 +79,7 @@ class PositionTracker:
             entry_price_source=entry_price_source,
             stop_loss=float(trade_plan.stop_loss),
             take_profit=float(trade_plan.take_profit),
-            opened_at=opened_at or datetime.now(timezone.utc),
+            opened_at=opened_at or datetime.now(UTC),
             initial_stop_loss=float(trade_plan.stop_loss),
             highest_executable_price=pnl_entry_price,
             lowest_executable_price=pnl_entry_price,

@@ -4,7 +4,7 @@ import queue
 import threading
 import time
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from uuid import uuid4
 
 from app.brokers.etoro.websocket_protocol import (
@@ -293,7 +293,7 @@ class EtoroWebSocketMarketDataFeed(LiveMarketDataFeed):
                 if text == '\x00':
                     self._null_frames += 1
                     continue
-                received_at = datetime.now(timezone.utc)
+                received_at = datetime.now(UTC)
                 for event in parse_websocket_events(
                     text,
                     symbol_by_instrument_id=symbol_by_instrument_id,

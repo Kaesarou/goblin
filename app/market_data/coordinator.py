@@ -1,6 +1,6 @@
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 
 from app.market_data.models import (
     MarketDataDecision,
@@ -202,7 +202,7 @@ class MarketDataCoordinator:
         state = self._states.setdefault(symbol.strip().upper(), _SymbolState())
         self._mark_stale_if_silent(
             state,
-            now=_as_utc(now or datetime.now(timezone.utc)),
+            now=_as_utc(now or datetime.now(UTC)),
         )
         return state.state == SymbolFeedState.WS_HEALTHY
 
@@ -316,5 +316,5 @@ class MarketDataCoordinator:
 
 def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)

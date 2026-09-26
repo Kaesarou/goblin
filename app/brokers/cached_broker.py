@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import cast
 
 from app.brokers.base import (
+    BrokerAccountPreflight,
     BrokerClient,
     BrokerCloseExecution,
     ClosePositionSubmission,
@@ -27,6 +28,18 @@ class CachedBrokerClient(BrokerClient):
     logging_enabled: bool = False
     account_equity_cache: CacheEntry | None = None
     position_status_cache: dict[str, CacheEntry] = field(default_factory=dict)
+
+    @property
+    def account_equity_source(self) -> str:
+        return self.delegate.account_equity_source
+
+    @property
+    def requires_external_activity_ack(self) -> bool:
+        return self.delegate.requires_external_activity_ack
+
+    def get_account_preflight(self) -> BrokerAccountPreflight | None:
+        # Startup safety must never depend on the equity/position TTL caches.
+        return self.delegate.get_account_preflight()
 
     def get_account_equity(self) -> float:
         now = self._now()

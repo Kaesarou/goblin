@@ -7,7 +7,6 @@ from typing import Any
 from app.instruments.models import AssetClass
 from app.market.market_context import CandidateMarketContext
 
-
 MARKET_CONTEXT_SCORER_VERSION = 'market_context_score_v3'
 
 

@@ -1,7 +1,7 @@
 import json
 import logging
 from collections.abc import Callable, Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from types import MappingProxyType
 from uuid import uuid4
 
@@ -119,13 +119,7 @@ def parse_websocket_events(
         # eToro omits a timestamp on the patch. A timestamp-less PATCH therefore
         # uses received_at / LOCAL_RECEIVE_TIME, while snapshots still use their
         # broker timestamp when provided.
-        source_timestamp = _first_datetime(
-            patch,
-            'Date',
-            'date',
-            'lastUpdate',
-            'LastUpdate',
-        )
+        source_timestamp = _optional_datetime(patch.get('Date'))
         snapshot = _snapshot(
             symbol=symbol,
             payload=merged,
@@ -140,12 +134,7 @@ def parse_websocket_events(
                 snapshot=snapshot,
                 instrument_id=instrument_id,
                 message_id=_optional_string(message.get('id')),
-                price_rate_id=_first_string(
-                    merged,
-                    'PriceRateID',
-                    'priceRateID',
-                    'priceRateId',
-                ),
+                price_rate_id=_optional_string(merged.get('PriceRateID')),
                 connection_id=connection_id,
                 price_changed=(
                     is_snapshot
@@ -190,20 +179,11 @@ def _snapshot(
     source_timestamp: datetime | None,
     received_at: datetime,
 ) -> MarketSnapshot | None:
-    bid = _first_float(payload, 'Bid', 'bid', 'bidPrice')
-    ask = _first_float(payload, 'Ask', 'ask', 'askPrice')
+    bid = _optional_float(payload.get('Bid'))
+    ask = _optional_float(payload.get('Ask'))
     if bid is None or ask is None:
         return None
-    last = _first_float(
-        payload,
-        'LastExecution',
-        'lastExecution',
-        'Last',
-        'last',
-        'lastPrice',
-        'Price',
-        'price',
-    )
+    last = _optional_float(payload.get('LastExecution'))
     price_source = PriceSource.BROKER_LAST
     if last is None:
         last = (bid + ask) / 2
@@ -229,7 +209,7 @@ def _prices(payload: dict) -> tuple[float, float, float] | None:
         symbol='TMP',
         payload=payload,
         source_timestamp=None,
-        received_at=datetime.now(timezone.utc),
+        received_at=datetime.now(UTC),
     )
     if snapshot is None:
         return None
@@ -257,26 +237,6 @@ def _instrument_id(topic: object) -> int | None:
         return None
 
 
-def _first_float(payload: dict, *keys: str) -> float | None:
-    for key in keys:
-        value = payload.get(key)
-        if value is None or isinstance(value, bool):
-            continue
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            continue
-    return None
-
-
-def _first_string(payload: dict, *keys: str) -> str | None:
-    for key in keys:
-        value = _optional_string(payload.get(key))
-        if value is not None:
-            return value
-    return None
-
-
 def _optional_string(value: object) -> str | None:
     if value is None:
         return None
@@ -284,19 +244,25 @@ def _optional_string(value: object) -> str | None:
     return result or None
 
 
-def _first_datetime(payload: dict, *keys: str) -> datetime | None:
-    for key in keys:
-        value = payload.get(key)
-        if not isinstance(value, str) or not value.strip():
-            continue
-        normalized = value.strip()
-        if normalized.endswith('Z'):
-            normalized = f'{normalized[:-1]}+00:00'
-        try:
-            parsed = datetime.fromisoformat(normalized)
-        except ValueError:
-            continue
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
-    return None
+def _optional_float(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = value.strip()
+    if normalized.endswith('Z'):
+        normalized = f'{normalized[:-1]}+00:00'
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)

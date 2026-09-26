@@ -1,46 +1,24 @@
 from app.brokers.etoro.payload_collections import keep_dict_items
-from app.brokers.etoro.scalar_extractors import extract_optional_int
-from app.brokers.etoro.string_extractors import extract_optional_string
 
-
-INSTRUMENT_ITEMS_KEYS = ('items', 'data', 'Data', 'Items', 'instruments', 'rates')
-INSTRUMENT_SYMBOL_KEYS = ('internalSymbolFull',)
 INSTRUMENT_DISPLAY_NAME_KEY = 'internalInstrumentDisplayName'
 INSTRUMENT_CURRENT_RATE_KEY = 'currentRate'
-INSTRUMENT_ID_KEYS = (
-    'internalInstrumentId',
-    'instrumentId',
-    'InstrumentID',
-    'instrumentID',
-    'id',
-)
 
 
 def normalize_symbol(symbol: str) -> str:
     return symbol.upper()
 
 
-def extract_items(payload: dict | list) -> list[dict]:
-    if isinstance(payload, list):
-        return keep_dict_items(payload)
-
-    for key in INSTRUMENT_ITEMS_KEYS:
-        value = payload.get(key)
-
-        if isinstance(value, list):
-            return keep_dict_items(value)
-
-        if isinstance(value, dict):
-            return [value]
-
-    return []
+def extract_items(payload: dict) -> list[dict]:
+    items = payload.get('items')
+    return keep_dict_items(items) if isinstance(items, list) else []
 
 
 def extract_instrument_symbol(instrument: dict) -> str | None:
-    return extract_optional_string(instrument, INSTRUMENT_SYMBOL_KEYS)
+    symbol = instrument.get('internalSymbolFull')
+    return None if symbol is None else str(symbol)
 
 
-def resolve_exact_instrument_id(symbol: str, payload: dict | list) -> int:
+def resolve_exact_instrument_id(symbol: str, payload: dict) -> int:
     normalized_symbol = normalize_symbol(symbol)
     items = extract_items(payload)
 
@@ -69,7 +47,8 @@ def resolve_exact_instrument_id(symbol: str, payload: dict | list) -> int:
 
 
 def extract_instrument_id(instrument: dict) -> int | None:
-    return extract_optional_int(instrument, INSTRUMENT_ID_KEYS)
+    instrument_id = instrument.get('internalInstrumentId')
+    return None if instrument_id is None else int(instrument_id)
 
 
 def candidate_summaries(items: list[dict]) -> list[dict]:

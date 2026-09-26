@@ -23,7 +23,7 @@ class DemoBroker:
     def _get(self, path):
         self.calls.append(("pnl_get", path))
         return {"clientPortfolio": {"positions": [{
-            "positionId": "p-7", "amount": 300.0,
+            "positionID": "p-7", "amount": 300.0,
         }]}}
 
     def open_position(self, *_args, **_kwargs):

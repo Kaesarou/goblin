@@ -1,6 +1,5 @@
 """A queued manual CLOSE is never proof that an old DEMO position filled."""
 
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -27,7 +26,7 @@ class Broker:
     def _get(self, path):
         assert path == "/api/v1/trading/info/demo/pnl"
         self.pending_current = next(self.pending, [])
-        return {"clientPortfolio": {"ordersForOpen": self.pending_current, "orders": []}}
+        return {"ordersForOpen": self.pending_current, "orders": []}
 
 
 def _open_position():

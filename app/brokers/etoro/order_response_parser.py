@@ -1,24 +1,5 @@
 from dataclasses import dataclass
 
-from app.brokers.etoro.payload_collections import keep_dict_items
-from app.brokers.etoro.scalar_extractors import extract_optional_float, extract_optional_int
-from app.brokers.etoro.string_extractors import extract_optional_string
-
-
-ORDER_ID_KEYS = ('orderId', 'OrderId', 'orderID', 'OrderID')
-ORDER_ID_NESTED_KEYS = ('orderForClose', 'OrderForClose', 'data', 'Data', 'order', 'Order')
-REFERENCE_ID_KEYS = ('referenceId', 'ReferenceId', 'referenceID', 'ReferenceID')
-ORDER_ERROR_CODE_KEYS = ('errorCode',)
-POSITION_ID_KEYS = ('positionId', 'PositionId', 'positionID', 'PositionID')
-POSITION_EXECUTION_KEYS = ('positionExecutions', 'positions')
-POSITION_NESTED_KEYS = ('position', 'Position', 'data', 'Data', 'order', 'Order')
-CLOSE_STATUS_ID_KEYS = ('statusID', 'statusId')
-AVG_PRICE_KEYS = ('avgPrice',)
-OPENING_UNITS_KEYS = ('units', 'Units')
-INVESTED_AMOUNT_ACCOUNT_KEYS = (
-    'investedAmountCurrency',
-    'InvestedAmountCurrency',
-)
 EXECUTED_STATUS_NAMES = ('executed', 'filled')
 REJECTED_STATUS_NAMES = ('rejected', 'failed', 'cancelled', 'canceled', 'error')
 
@@ -32,51 +13,29 @@ class ExecutedPositionDetails:
 
 
 def extract_order_id(payload: dict) -> str:
-    order_id = extract_optional_string(payload, ORDER_ID_KEYS)
+    # Open submission responses expose orderId; close submission responses
+    # expose orderForClose.orderID. These are separate documented contracts,
+    # not interchangeable case/shape guesses.
+    order_id = payload.get('orderId')
     if order_id is not None:
-        return order_id
-
-    for key in ORDER_ID_NESTED_KEYS:
-        value = payload.get(key)
-        if isinstance(value, dict):
-            try:
-                return extract_order_id(value)
-            except ValueError:
-                pass
+        return str(order_id)
+    order_for_close = payload.get('orderForClose')
+    if isinstance(order_for_close, dict):
+        order_id = order_for_close.get('orderID')
+        if order_id is not None:
+            return str(order_id)
 
     raise ValueError(f'Unable to extract order id from eToro response: {payload}')
 
 
 def extract_reference_id(payload: dict) -> str | None:
-    return extract_optional_string(payload, REFERENCE_ID_KEYS)
+    reference_id = payload.get('referenceId')
+    return None if reference_id is None else str(reference_id)
 
 
 def extract_position_id(payload: dict) -> str | None:
-    return extract_optional_string(payload, POSITION_ID_KEYS)
-
-
-def extract_position_id_from_order_details(payload: dict) -> str | None:
-    direct_position_id = extract_position_id(payload)
-    if direct_position_id is not None:
-        return direct_position_id
-
-    for key in POSITION_EXECUTION_KEYS:
-        positions = payload.get(key)
-        if not isinstance(positions, list):
-            continue
-        for position in keep_dict_items(positions):
-            position_id = extract_position_id(position)
-            if position_id is not None:
-                return position_id
-
-    for key in POSITION_NESTED_KEYS:
-        value = payload.get(key)
-        if isinstance(value, dict):
-            position_id = extract_position_id_from_order_details(value)
-            if position_id is not None:
-                return position_id
-
-    return None
+    position_id = payload.get('positionId')
+    return None if position_id is None else str(position_id)
 
 
 def extract_executed_position_details(payload: dict) -> ExecutedPositionDetails | None:
@@ -92,17 +51,16 @@ def extract_executed_position_details_list(payload: dict) -> list[ExecutedPositi
         return []
 
     executed_positions: list[ExecutedPositionDetails] = []
-    for execution in keep_dict_items(position_executions):
+    for execution in position_executions:
+        if not isinstance(execution, dict):
+            continue
         position_id = extract_position_id(execution)
         opening_data = execution.get('openingData')
         if position_id is None or not isinstance(opening_data, dict):
             continue
-        avg_price = extract_optional_float(opening_data, AVG_PRICE_KEYS)
-        units = extract_optional_float(opening_data, OPENING_UNITS_KEYS)
-        invested_amount = extract_optional_float(
-            execution,
-            INVESTED_AMOUNT_ACCOUNT_KEYS,
-        )
+        avg_price = _optional_float(opening_data.get('avgPrice'))
+        units = _optional_float(opening_data.get('units'))
+        invested_amount = _optional_float(execution.get('investedAmountCurrency'))
         # V3 opens by cash amount. eToro is authoritative for the resulting units;
         # deriving units locally from amount / avgPrice is unsafe for FX-converted
         # equities and broker rounding. The account-currency invested amount is
@@ -135,12 +93,12 @@ def has_executed_position_details(payload: dict) -> bool:
 
 
 def extract_order_error_code(payload: dict) -> int | None:
-    error_code = extract_optional_int(payload, ORDER_ERROR_CODE_KEYS)
+    error_code = _optional_int(payload.get('errorCode'))
     if error_code is not None:
         return error_code
     status = payload.get('status')
     if isinstance(status, dict):
-        return extract_optional_int(status, ORDER_ERROR_CODE_KEYS)
+        return _optional_int(status.get('errorCode'))
     return None
 
 
@@ -185,7 +143,7 @@ def is_order_rejected(payload: dict) -> bool:
     # terminal failures return statusID=4 with positions=[]; treating those as
     # merely "execution unavailable" leaves the broker leg mutation locked
     # forever. Status 4 is therefore terminal even when errorCode is absent/zero.
-    top_level_status_id = extract_optional_int(payload, CLOSE_STATUS_ID_KEYS)
+    top_level_status_id = _optional_int(payload.get('statusID'))
     if top_level_status_id == 4:
         return True
 
@@ -207,8 +165,20 @@ def is_close_response_accepted(payload: dict, position_id: str) -> bool:
     order_for_close = payload.get('orderForClose')
     if not isinstance(order_for_close, dict):
         return False
-    response_position_id = extract_position_id(order_for_close)
+    response_position_id = order_for_close.get('positionID')
     if str(response_position_id) != str(position_id):
         return False
-    status_id = extract_optional_int(order_for_close, CLOSE_STATUS_ID_KEYS)
+    status_id = _optional_int(order_for_close.get('statusID'))
     return status_id == 1
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None:
+        return None
+    return float(value)
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    return int(value)

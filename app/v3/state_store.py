@@ -5,7 +5,7 @@ import math
 import sqlite3
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -330,7 +330,7 @@ class V3RuntimeStateStore:
 def _required_utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("Persisted authority timestamps must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 def _feature_state_payload(state: Any) -> dict[str, Any]:
