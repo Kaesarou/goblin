@@ -18,6 +18,12 @@ from app.brokers.base import (
 from app.market.models import MarketSnapshot
 from app.runtime.broker_task_runner import BrokerTaskCompletion, BrokerTaskLane
 from app.v3.book import InventoryBook
+from app.v3.close_recovery import (
+    _CloseContext,
+    _PendingCloseConfirmation,
+    _ReconciledCloseQuantity,
+    replay_close_events,
+)
 from app.v3.execution import ProRataPartialCloseAllocator, assess_inventory_close
 from app.v3.external_account_gate import gate_active, record_external_broker_activity
 from app.v3.models import IntentPurpose, OrderIntent
@@ -69,36 +75,6 @@ class _OpenContext:
 
 
 @dataclass(frozen=True)
-class _CloseContext:
-    action_id: str
-    intent: OrderIntent
-    inventory_id: str
-    position_id: str
-    trigger_price: float
-    requested_units: float
-    full_close: bool
-    pre_close_units: float | None = None  # None identifies legacy action attribution.
-
-
-@dataclass
-class _PendingCloseConfirmation:
-    context: _CloseContext
-    close_order_id: str
-    accepted_at: datetime
-    attempt_count: int = 0
-    next_attempt_monotonic: float = 0.0
-    error_active: bool = False
-    last_error_type: str | None = None
-    last_http_status: int | None = None
-    next_attempt_at: datetime | None = None
-    mutation_active: bool = True
-    quantity_resolved: bool = False
-    attribution_confident: bool = False
-    economics_pending: bool = True
-    last_result_state: str = "pending"
-
-
-@dataclass(frozen=True)
 class _BrokerLegExpectation:
     position_id: str
     symbol: str
@@ -111,17 +87,6 @@ class _BrokerLegExpectation:
 @dataclass(frozen=True)
 class _BrokerReconciliationContext:
     expectations: tuple[_BrokerLegExpectation, ...]
-
-
-@dataclass(frozen=True)
-class _ReconciledCloseQuantity:
-    action_id: str
-    inventory_id: str
-    position_id: str
-    reconciled_book_units: float
-    broker_units: float
-    entry_price_basis: float
-    attribution_confident: bool
 
 
 class V3BrokerExecutor:
@@ -528,82 +493,23 @@ class V3BrokerExecutor:
         self, events: Iterable[InventoryEvent], *,
         utc_now: datetime | None = None, monotonic_now: float | None = None,
     ) -> None:
-        contexts: dict[str, _CloseContext] = {}
-        accepted: dict[str, _PendingCloseConfirmation] = {}
-        resolved: set[str] = set()
-        quantities: dict[str, _ReconciledCloseQuantity] = {}
-        for event in events:
-            payload = event.payload
-            action_id = str(payload.get("action_id", ""))
-            if event.event_type in {"CLOSE_SUBMISSION_STARTED", "CLOSE_SUBMISSION_ACCEPTED"} and action_id:
-                position_id = str(payload["position_id"])
-                full_close = bool(payload.get("full_close", True))
-                requested = float(payload.get("requested_units", 0.0))
-                if full_close and requested <= 0:
-                    requested = self._current_leg_units(position_id)
-                previous = contexts.get(action_id)
-                context = _CloseContext(
-                    action_id=action_id,
-                    intent=_restored_close_intent(payload, event.occurred_at),
-                    inventory_id=event.inventory_id, position_id=position_id,
-                    trigger_price=float(payload["trigger_price"]),
-                    requested_units=requested, full_close=full_close,
-                    pre_close_units=(float(payload["pre_close_units"])
-                                     if payload.get("pre_close_units") is not None
-                                     else previous.pre_close_units if previous else None),
-                )
-                contexts[action_id] = context
-                if event.event_type == "CLOSE_SUBMISSION_ACCEPTED":
-                    accepted[action_id] = _PendingCloseConfirmation(
-                        context, str(payload["close_order_id"]), event.occurred_at,
-                    )
-            elif event.event_type == "BROKER_QUANTITY_RECONCILED":
-                position_id = str(payload["position_id"])
-                confident = bool(payload.get("attribution_confident", False))
-                ids = [str(value) for value in payload.get("action_ids", [])]
-                if not confident:
-                    self._unattributed_reconciled_position_ids.add(position_id)
-                if len(ids) == 1:
-                    quantities.setdefault(ids[0], _ReconciledCloseQuantity(
-                        ids[0], event.inventory_id, position_id,
-                        float(payload["reconciled_book_units"]), float(payload["broker_units"]),
-                        float(payload["entry_price_basis"]), confident,
-                    ))
-            elif event.event_type == "BROKER_RECONCILIATION_ACKNOWLEDGED":
-                self._unattributed_reconciled_position_ids.discard(str(payload["position_id"]))
-                resolved.update(str(value) for value in payload["abandoned_action_ids"])
-            elif event.event_type in {
-                "EXIT_FILLED",
-                "EXIT_ECONOMICS_CONFIRMED",
-                "CLOSE_SUBMISSION_FAILED",
-                "CLOSE_EXECUTION_REJECTED",
-            } and action_id:
-                resolved.add(action_id)
-                if event.event_type == "EXIT_ECONOMICS_CONFIRMED":
-                    position_id = str(payload["position_id"])
-                    if payload.get("attribution_confident", True):
-                        quantity = quantities.get(action_id)
-                        if (
-                            quantity is not None
-                            and not quantity.attribution_confident
-                            and _units_close(
-                                self._current_leg_units(position_id),
-                                quantity.broker_units,
-                            )
-                        ):
-                            self._unattributed_reconciled_position_ids.discard(position_id)
-                    else:
-                        self._unattributed_reconciled_position_ids.add(position_id)
-
-        self._resolved_close_action_ids.update(resolved)
+        replay = replay_close_events(
+            events,
+            current_leg_units=self._current_leg_units,
+            units_close=_units_close,
+            unattributed_position_ids=self._unattributed_reconciled_position_ids,
+        )
+        self._unattributed_reconciled_position_ids.clear()
+        self._unattributed_reconciled_position_ids.update(replay.unattributed_position_ids)
+        self._resolved_close_action_ids.update(replay.resolved)
         saved_retries = self.runtime_state_store.load_close_retries()
         now = _as_utc(utc_now or _utc_now())
         mono = time.monotonic() if monotonic_now is None else monotonic_now
-        for action_id, context in contexts.items():
-            if action_id in resolved:
+        for action_id, context in replay.contexts.items():
+            if action_id in replay.resolved:
                 continue
-            pending = accepted.get(action_id)
-            quantity = quantities.get(action_id)
+            pending = replay.accepted.get(action_id)
+            quantity = replay.quantities.get(action_id)
             if pending is not None:
                 if quantity is not None:
                     self._reconciled_close_quantities[action_id] = quantity
@@ -1893,25 +1799,3 @@ def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
-
-
-def _restored_close_intent(payload: dict, occurred_at: datetime) -> OrderIntent:
-    from app.v3.models import ExecutionStyle
-
-    purpose_value = str(payload.get("purpose", IntentPurpose.PROFIT_EXIT.value))
-    try:
-        purpose = IntentPurpose(purpose_value)
-    except ValueError:
-        purpose = IntentPurpose.PROFIT_EXIT
-    return OrderIntent(
-        intent_id=str(payload["intent_id"]),
-        purpose=purpose,
-        symbol=str(payload["symbol"]),
-        side="SELL",
-        notional=0.0,
-        created_at=occurred_at,
-        execution_style=ExecutionStyle.MARKET,
-        inventory_id=None,
-        reduce_only=True,
-        metadata={"restored": True},
-    )

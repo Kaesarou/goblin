@@ -107,6 +107,11 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
     leg mutation, retry record and economic-fill bookkeeping before refreshing
     stale-confirmation halts. The confirmed path retains its separate
     unattributed-reconciliation halt precedence.
+18. Extract ledger close-event replay and its context types to
+    `app/v3/close_recovery.py`. The executor still owns retry deadlines, broker
+    mutation locks and halt decisions, while the replay step reconstructs
+    accepted actions, reconciled quantities, resolved actions and unattributed
+    positions without mutating the executor or retry store.
 
 ## Retirement evidence
 
