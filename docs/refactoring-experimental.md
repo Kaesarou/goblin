@@ -76,6 +76,11 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
 11. Remove the implicit wildcard re-export of V3 configuration from
     `app.v3`. Production, scripts and tests import their configuration from
     `app.v3.config` directly; no caller depends on package-level aliases.
+12. Lock the preregistered ETORO5 profile in a contract test: 5 inventories
+    and fills, 4%/15% exposure caps, 84% close, 0.411 effective WEL,
+    0.0033291 initial exposure, recoverability and hedge OFF. All other
+    strategy thresholds and risk fields must match frozen RR5; live-capital
+    refusal and Point-M golden tests remain in place.
 
 ## Retirement evidence
 

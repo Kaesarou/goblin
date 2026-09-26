@@ -1,3 +1,4 @@
+from dataclasses import fields
 from datetime import datetime, timezone
 
 import pytest
@@ -11,7 +12,12 @@ from app.config.settings import Settings
 from app.instruments.instrument_registry import InstrumentRegistry
 from app.journal.run_paths import build_run_journal_paths
 from app.main import _assert_v3_execution_mode
-from app.v3.config import RecoverabilityConfig, etoro5_research_config, rr5_research_config
+from app.v3.config import (
+    EconomicsPolicy,
+    RecoverabilityConfig,
+    etoro5_research_config,
+    rr5_research_config,
+)
 from app.v3.live_execution import (
     BROKER_RECONCILIATION_INTERVAL_SECONDS,
     CONFIRMATION_STALE_HALT_SECONDS,
@@ -127,6 +133,7 @@ def test_v3_manifest_declares_authority_and_replayable_log_budget(tmp_path):
 
 def test_etoro5_strategy_contract_remains_frozen():
     config = etoro5_research_config()
+    reference = rr5_research_config()
 
     assert config.strategy.name == "INVENTORY_RR5_ETORO5_V1"
     assert config.risk.max_inventories == 5
@@ -134,4 +141,15 @@ def test_etoro5_strategy_contract_remains_frozen():
     assert config.strategy.close_qty_pct == pytest.approx(0.84)
     assert config.risk.max_symbol_exposure_pct == pytest.approx(0.04)
     assert config.risk.max_portfolio_exposure_pct == pytest.approx(0.15)
+    assert config.strategy.effective_wallet_exposure_limit_pct == pytest.approx(0.411)
+    assert config.strategy.initial_exposure_pct == pytest.approx(0.0033291)
+    assert config.recoverability.enabled is False
+    assert config.hedge.enabled is False
+    assert config.economics.policy == EconomicsPolicy.RESEARCH_GROSS_EDGE
+    for field in fields(config.strategy):
+        if field.name not in {"name", "effective_wallet_exposure_limit_pct", "initial_exposure_pct"}:
+            assert getattr(config.strategy, field.name) == getattr(reference.strategy, field.name)
+    for field in fields(config.risk):
+        if field.name != "max_inventories":
+            assert getattr(config.risk, field.name) == getattr(reference.risk, field.name)
     assert POINT_M_DUST_NOTIONAL_USD == 10.0
