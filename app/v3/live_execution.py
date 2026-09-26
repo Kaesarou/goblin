@@ -1781,21 +1781,19 @@ class V3BrokerExecutor:
         ))
 
     def _finalize_rejected_close_action(self, context: _CloseContext) -> None:
-        self._pending_close_confirmations.pop(context.action_id, None)
-        self._release_close_mutation(context)
-        self._resolved_close_action_ids.add(context.action_id)
-        self.runtime_state_store.delete_close_retry(context.action_id)
-        self._pending_economic_fill_action_ids.discard(context.action_id)
-        self._reconciled_close_quantities.pop(context.action_id, None)
+        self._retire_close_action(context)
         self._refresh_stale_confirmation_halt(_utc_now())
 
-    def _finalize_confirmed_close_action(self, context: _CloseContext) -> None:
+    def _retire_close_action(self, context: _CloseContext) -> None:
         self._pending_close_confirmations.pop(context.action_id, None)
         self._release_close_mutation(context)
         self._resolved_close_action_ids.add(context.action_id)
         self.runtime_state_store.delete_close_retry(context.action_id)
         self._pending_economic_fill_action_ids.discard(context.action_id)
         self._reconciled_close_quantities.pop(context.action_id, None)
+
+    def _finalize_confirmed_close_action(self, context: _CloseContext) -> None:
+        self._retire_close_action(context)
         if self._unattributed_reconciled_position_ids:
             if self.halted_reason in {
                 None,

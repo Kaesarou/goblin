@@ -102,6 +102,11 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
     A future quote remains forbidden, an in-bucket quote remains authoritative,
     and an older quote can only supply non-authoritative provenance. Runtime
     and tests import the helper directly from its owner.
+17. Retire a resolved close action through one shared cleanup path for broker
+    rejection and confirmed execution. Both outcomes still release the active
+    leg mutation, retry record and economic-fill bookkeeping before refreshing
+    stale-confirmation halts. The confirmed path retains its separate
+    unattributed-reconciliation halt precedence.
 
 ## Retirement evidence
 
