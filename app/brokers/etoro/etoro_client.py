@@ -142,20 +142,42 @@ class EtoroClient(BrokerClient):
             payload.get('leverage'),
             payload,
         )
+        submitted_at = datetime.now(timezone.utc)
         order_response = self._post(self._open_order_path(), payload)
-        order_id = extract_order_id(order_response)
-        reference_id = extract_reference_id(order_response)
+        order_id = self._extract_order_id(order_response)
+        reference_id = self._extract_reference_id(order_response)
         logger.info('eToro order submitted | order_id=%s | reference_id=%s', order_id, reference_id)
-        order_details = self._wait_for_executed_order(
-            order_id,
-            require_position_details=True,
-        )
-        executed_positions = extract_executed_position_details_list(order_details)
+
+        try:
+            order_details = self._wait_for_executed_order(
+                order_id,
+                require_position_details=True,
+            )
+        except Exception as exc:
+            translated = self._translate_open_confirmation_error(
+                order_id=order_id,
+                reference_id=reference_id,
+                symbol=symbol,
+                side=normalized_side,
+                amount=amount,
+                submitted_at=submitted_at,
+                cause=exc,
+            )
+            if translated is None:
+                raise
+            raise translated from exc
+
+        executed_positions = self._extract_executed_position_details_list(order_details)
         if len(executed_positions) != 1:
-            raise RuntimeError(
-                'eToro order executed with unsupported position execution '
-                f'count: order_id={order_id}, '
-                f'count={len(executed_positions)}, details={order_details}'
+            raise self._invalid_open_execution_error(
+                order_id=order_id,
+                reference_id=reference_id,
+                symbol=symbol,
+                side=normalized_side,
+                amount=amount,
+                submitted_at=submitted_at,
+                details=order_details,
+                execution_count=len(executed_positions),
             )
         executed_position = executed_positions[0]
         remember_position_instrument_id(
@@ -163,12 +185,58 @@ class EtoroClient(BrokerClient):
             position_id=executed_position.position_id,
             instrument_id=instrument_id,
         )
+        account_notional = self._resolve_open_notional(
+            position_id=executed_position.position_id,
+            requested=float(amount),
+            reported=executed_position.executed_notional,
+        )
         return OpenPositionResult(
             position_id=executed_position.position_id,
             executed_entry_price=executed_position.executed_entry_price,
             executed_units=executed_position.executed_units,
-            executed_notional=executed_position.executed_notional,
+            executed_notional=account_notional,
         )
+
+    def _translate_open_confirmation_error(
+        self,
+        *,
+        order_id: str,
+        reference_id: str | None,
+        symbol: str,
+        side: str,
+        amount: float,
+        submitted_at: datetime,
+        cause: Exception,
+    ) -> Exception | None:
+        """Translate confirmation failures when an adapter needs stronger semantics."""
+        return None
+
+    def _invalid_open_execution_error(
+        self,
+        *,
+        order_id: str,
+        reference_id: str | None,
+        symbol: str,
+        side: str,
+        amount: float,
+        submitted_at: datetime,
+        details: dict,
+        execution_count: int,
+    ) -> Exception:
+        return RuntimeError(
+            'eToro order executed with unsupported position execution '
+            f'count: order_id={order_id}, count={execution_count}, '
+            f'details={details}'
+        )
+
+    def _resolve_open_notional(
+        self,
+        *,
+        position_id: str,
+        requested: float,
+        reported: float | None,
+    ) -> float | None:
+        return reported
 
     def close_position(
         self,

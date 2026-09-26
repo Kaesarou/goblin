@@ -34,6 +34,12 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
    intact. Move research non-interference/failure tests onto the actual V3 runtime.
    Correct the README so historical strategy descriptions are not presented as
    the active policy.
+4. eToro open submission: share one `EtoroClient.open_position` pipeline. The
+   resilient adapter now supplies only three policy hooks: uncertain
+   confirmation translation, ambiguous execution translation and suspicious
+   account-notional reconciliation. Request payloads, identifiers, position
+   metadata and returned `OpenPositionResult` remain unchanged. Validation:
+   41 focused broker/V3 tests and the full 928-test suite pass.
 
 ## Retirement evidence
 
