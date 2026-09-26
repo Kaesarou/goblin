@@ -4,7 +4,6 @@ from dataclasses import dataclass
 import math
 from typing import Iterable
 
-from app.v3.features import OnlineFeatureSnapshot
 from app.v3.models import MarketState
 
 

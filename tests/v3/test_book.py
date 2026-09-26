@@ -8,7 +8,7 @@ NOW = datetime(2026, 8, 25, tzinfo=timezone.utc)
 
 def test_inventory_book_aggregates_broker_legs_and_recomputes_after_close():
     book = InventoryBook()
-    first = book.apply_entry_fill(
+    book.apply_entry_fill(
         inventory_id="AAPL:1", symbol="AAPL", position_id="p1",
         units=1.0, price=100.0, fee=1.0, filled_at=NOW,
     )
