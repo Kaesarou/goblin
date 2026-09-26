@@ -27,6 +27,30 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
    broker (the deployment manifest retains its eToro provenance). Contract tests
    cover another broker, nested caches, rejection, unavailable preflight and
    unchanged paper/demo/live metadata.
+3. Retire 25 unreachable V1 live modules (runtime, executor, old strategy,
+   manifest writer and position/pending-close store writers). Keep historical
+   scoring, candidate selection, position lifecycle, replay, deserialization,
+   calibration and research dependencies. V3 legacy-SQLite startup guards remain
+   intact. Move research non-interference/failure tests onto the actual V3 runtime.
+   Correct the README so historical strategy descriptions are not presented as
+   the active policy.
+
+## Retirement evidence
+
+The dependency audit parsed absolute and relative Python imports, including
+package imports, starting from `app.main`, `app.runtime.restart_guard`, all
+scripts, all V3 modules, all backtesting modules and all research modules.
+The 25 removed application modules had no reachable consumer; their remaining
+consumers were only V1-specific tests. CLI entrypoints in Docker/Compose, shell
+scripts, workflows and documentation were also checked. No dynamic imports or
+plugin entrypoints target these modules.
+
+Test accounting: 1,034 passing after checkpoint 2 minus 94 retired V1-only tests
+minus 12 byte-identical duplicate portfolio-parser tests = **928 passing**.
+The other portfolio-parser test file is retained unchanged. Four research tests
+are retained and now exercise V3 instead of a fabricated V1 runtime. No active
+V3 safety/strategy test was removed. Removed code and tests remain recoverable
+from the baseline commit above.
 
 ## Validation
 

@@ -1,76 +1,47 @@
 # Goblin!
 
-> A deterministic intraday trading bot that lives in a cave, watches markets all day, and refuses to confuse activity with opportunity.
-
-**Goblin!** is an experimental and auditable trading engine written in Python. It validates broker data, builds deterministic market structure, detects directional setups, estimates trading costs, models the race between take profit and stop loss, then applies explicit risk controls before an order can reach the broker.
+Goblin is an experimental, auditable inventory trading engine written in Python.
+The active application is **V3**, using the frozen `INVENTORY_RR5_ETORO5_V1`
+profile. It consumes validated quotes, builds causal M1 features, plans inventory
+entries/exits and records broker-confirmed fills in an append-only SQLite ledger.
 
 > [!WARNING]
-> Goblin is research software, not financial advice. Use `paper` or `etoro_demo` while the strategy is being calibrated. Real-money trading can lose capital.
+> Research/demo only. The V3 bootstrap allows `paper` and `etoro_demo`, rejects
+> `etoro_live`, and restricts its universe to US/EU equities. No profitability
+> or real-money trading authority is implied.
 
-## Core principles
+## Active application
 
-- **Deterministic execution** — the same accepted data and versioned configuration must produce the same decision.
-- **Demo first** — an edge is never assumed from a handful of trades.
-- **Validated data only** — rejected or quarantined snapshots cannot create candles or entries.
-- **Activity and direction remain separate** — `P_TOUCH` estimates whether a barrier will be reached; segmented `P_DIRECTION` estimates which barrier wins.
-- **Costs are part of the trade** — the conditional break-even probability uses net TP gain and net SL loss.
-- **One active policy** — no shadow selector, legacy score, hidden fallback or compatibility shim participates in runtime decisions.
-- **Every decision leaves evidence** — raw data, bars, candidates, model inputs, routes, summaries and manifests are retained.
-- **Doing nothing is valid** — zero trades can still be the correct outcome.
+- `app/main.py` composes the application; `app/runtime/restart_guard.py` remains
+  the container entrypoint and owns the persistent restart circuit breaker.
+- `app/v3/runtime.py` coordinates quotes, causal candles, shared EU/US decision
+  windows, sessions, persisted features and the read-only research sidecar.
+- `app/v3/planner.py`, `book.py`, `risk.py` and `economics.py` own the frozen
+  inventory strategy shared by runtime and replay.
+- `app/v3/live_execution.py` translates intents into broker mutations, preserves
+  per-symbol BUY reservations across uncertain outcomes/restarts, and reconciles
+  close quantities separately from confirmed economic fills.
+- `app/brokers/base.py` defines execution, account preflight, equity provenance
+  and rejection contracts. Concrete payload parsing belongs to broker adapters.
+- `app/runtime/factories.py` builds independent execution and market-data clients.
+  Paper execution currently consumes the same eToro market-data pipeline.
+- `app/research/` and audit journals retain causal observations without changing
+  the strategy. Legacy replay/calibration tools remain available offline.
 
-## Current capabilities
+See [V3 inventory architecture](docs/v3-inventory-recoverability.md),
+[broker integrity](docs/v3-runtime-broker-integrity.md), and
+[experimental refactoring checkpoints](docs/refactoring-experimental.md).
 
-Goblin currently includes:
+## Historical directional research (V1/V2)
 
-- one active, code-versioned `BalancedStrategyConfig`;
-- local paper, eToro demo and eToro live broker adapters;
-- crypto, US-equity and European-equity support;
-- canonical M1 candles and deterministic M5/M15/M30/H1 bars;
-- benchmark, breadth, sector and relative-strength context;
-- deterministic BUY and SELL trend/breakout candidates;
-- named fixed TP/SL profiles, structural pending stops and TP feasibility;
-- a frozen two-stage outcome model;
-- four trained equity direction segments and two explicit provisional crypto segments;
-- the frozen `MANAGED_EDGE_V1` selector applied before top-N;
-- side-aware executable position economics: BUY exits at bid, SELL exits at ask;
-- one shared live/replay lifecycle for breakeven, trailing, TP, SL, stale and force close;
-- broker close-fill reconciliation with explicit uncertain-close states;
-- canonical typed close reasons and cooldown policies;
-- versioned baseline and delayed-equity breakeven profiles;
-- SQLite position/cooldown persistence and JSONL audit journals;
-- a read-only, side-neutral five-minute market-research sidecar with bounded
-  eToro microstructure and payload-schema observability;
-- a broad pytest suite validated by GitHub Actions.
+The sections below document the earlier directional experiments and retained
+replay/calibration contracts. They are **not the active V3 trading policy**.
+The unused V1 live orchestrator, pending-entry workflow and position-store
+writers have been retired. Shared historical scoring, lifecycle, replay and
+archive deserialization remain available; V3 still refuses active legacy
+SQLite positions rather than migrating or deleting them.
 
-## Decision pipeline
-
-```mermaid
-flowchart TD
-    A[Broker snapshots] --> B[MarketDataValidator]
-    B -->|accepted| C[Canonical M1]
-    B --> D[Market context]
-    C --> E[TrendStrategy]
-    C --> F[MTF aggregation]
-    E --> G[TradeCandidate BUY or SELL]
-    D --> G
-    F --> G
-    G --> H[Named TP/SL and costs]
-    H --> I[TP feasibility and entry route]
-    I -->|READY| J[P_TOUCH frozen activity model]
-    I -->|WAIT| K[PendingEntryManager]
-    I -->|SKIP| L[Counterfactual journal]
-    J --> M[Segmented P_DIRECTION diagnostics]
-    M --> N[MANAGED_EDGE_V1]
-    N --> O[Managed probability and net-return gates]
-    O --> P[Rank eligible then top-N]
-    K --> G
-    P --> Q[RiskManager]
-    Q --> R[TradeExecutor]
-    R --> S[Managed position lifecycle]
-    S --> L
-```
-
-## Diagnostic outcome probabilities
+### Diagnostic outcome probabilities
 
 For a candidate whose side, TP, SL and horizon already exist:
 
@@ -120,7 +91,7 @@ P_DIRECTION final
 
 The journal retains the raw probability, prior, final probability, segment, feature family, training status and source segment.
 
-## Managed edge and selection
+### Historical managed edge and selection
 
 The conditional direction break-even estimate remains journalled:
 
@@ -156,7 +127,7 @@ Selection order:
 The former minimum-`P_TP`, maximum-`P_TOUCH` and direction-edge vetoes do not
 exist. The top-N policy and the absence of portfolio backfill remain deliberate.
 
-## Evidence behind V2
+### Evidence behind V2
 
 The direction dataset contains all 3,527 labelled candidates from 22, 23, 24, 27 and 28 July 2026, including selected and rejected candidates. It contains 1,547 decisive paths: 475 `TP_FIRST` and 1,072 `SL_FIRST`.
 
@@ -169,7 +140,7 @@ P_DIRECTION Brier: 0.202
 
 A stricter train-22–24/test-27–28 check produced approximately AUC 0.588 and Brier 0.217. These figures justify a demo experiment, not a profitability claim. The five-point margin was exploratory and must remain frozen during the next three complete demo sessions.
 
-## Fixed profiles and managed exits
+### Historical fixed profiles and managed exits
 
 | Profile | Side | TP | SL | Stale horizon |
 |---|---|---:|---:|---:|
@@ -189,7 +160,7 @@ Two explicit breakeven profiles exist:
 
 | Profile | Crypto | EU equities | US equities | Status |
 |---|---:|---:|---:|---|
-| `corrected_baseline_v1` | 0.20% | 0.55% | 0.60% | live default |
+| `corrected_baseline_v1` | 0.20% | 0.55% | 0.60% | historical default |
 | `delayed_equity_trigger_v1` | 0.20% | 0.65% | 0.70% | selectable experiment |
 
 The buffer, trailing, TP/SL, stale horizon, sizing, risk and selector are identical
@@ -221,9 +192,9 @@ python scripts/replay_breakeven_profiles.py PLAN.json report.json \
   --output-markdown report.md --validate-archives
 ```
 
-## Analysis contract
+## Historical analysis contracts
 
-Run-manifest schema V14 records:
+The V1/V2 run-manifest schema V14 recorded:
 
 - model and feature-contract versions;
 - activity and direction dataset hashes;
