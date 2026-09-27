@@ -31,6 +31,10 @@ Verified on 2026-09-27:
 
 ## Progress
 
+Checkpoint 1: HTTP transport, market-data REST fallback and both authenticated
+WebSocket protocols implemented; 16 transport/quote tests pass locally. No
+runtime broker selection is changed by this checkpoint.
+
 Implementation in progress. Required validation includes disconnected streams,
 out-of-order events, partial fills, uncertain submissions, repeated confirmation,
 multiple legs of one symbol, restart recovery and external account activity.
