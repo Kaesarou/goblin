@@ -234,7 +234,12 @@ class AlpacaBrokerClient(BrokerClient):
                 self._updated.clear()
                 observed = self._lookup(client_id)
 
-    def close_position(self, position_id, units_to_deduct=None) -> ClosePositionSubmission:
+    def prepare_close_order_id(self, action_id: str) -> str:
+        return "goblin-" + uuid4().hex
+
+    def close_position(
+        self, position_id, units_to_deduct=None, *, client_order_id=None,
+    ) -> ClosePositionSubmission:
         with self._mutation_lock:
             try:
                 self._assert_mutation_allowed()
@@ -257,7 +262,7 @@ class AlpacaBrokerClient(BrokerClient):
                 )
                 if qty <= 0 or qty > remaining:
                     raise ValueError("Alpaca close exceeds remaining leg quantity")
-                client_id = "goblin-" + uuid4().hex
+                client_id = text(client_order_id) if client_order_id is not None else "goblin-" + uuid4().hex
                 request = {
                     "symbol": symbol,
                     "side": "sell",

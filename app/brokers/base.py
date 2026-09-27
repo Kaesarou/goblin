@@ -135,11 +135,22 @@ class BrokerClient(ABC):
     ) -> OpenPositionResult:
         raise NotImplementedError
 
+    def prepare_close_order_id(self, action_id: str) -> str | None:
+        """Choose a lookup identity before submission, without network I/O.
+
+        The executor persists this identity before dispatch. Supporting adapters
+        must accept it as ``client_order_id`` and never resubmit it on recovery.
+        None retains the broker-assigned identity flow.
+        """
+        return None
+
     @abstractmethod
     def close_position(
         self,
         position_id: str,
         units_to_deduct: float | None = None,
+        *,
+        client_order_id: str | None = None,
     ) -> ClosePositionSubmission:
         """Submit one full or partial close request and return on acceptance.
 

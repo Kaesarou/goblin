@@ -20,6 +20,7 @@ class _CloseContext:
     requested_units: float
     full_close: bool
     pre_close_units: float | None = None  # None identifies legacy action attribution.
+    client_order_id: str | None = None
 
 
 @dataclass
@@ -58,6 +59,7 @@ class CloseEventReplay:
     resolved: set[str]
     quantities: dict[str, _ReconciledCloseQuantity]
     unattributed_position_ids: set[str]
+    unknown_action_ids: set[str]
 
 
 def reconciled_reduction_attributable(
@@ -117,6 +119,7 @@ def replay_close_events(
     resolved: set[str] = set()
     quantities: dict[str, _ReconciledCloseQuantity] = {}
     unattributed = set(unattributed_position_ids)
+    unknown: set[str] = set()
     for event in events:
         payload = event.payload
         action_id = str(payload.get("action_id", ""))
@@ -136,12 +139,31 @@ def replay_close_events(
                 pre_close_units=(float(payload["pre_close_units"])
                                  if payload.get("pre_close_units") is not None
                                  else previous.pre_close_units if previous else None),
+                client_order_id=(payload.get("client_order_id")
+                                 or (previous.client_order_id if previous else None)),
             )
             contexts[action_id] = context
             if event.event_type == "CLOSE_SUBMISSION_ACCEPTED":
                 accepted[action_id] = _PendingCloseConfirmation(
                     context, str(payload["close_order_id"]), event.occurred_at,
                 )
+                unknown.discard(action_id)
+            elif context.client_order_id:
+                # A crash can precede both the POST response and the V3 completion.
+                # Resume reads only; the start event never authorizes another POST.
+                accepted[action_id] = _PendingCloseConfirmation(
+                    context, context.client_order_id, event.occurred_at,
+                )
+                unknown.add(action_id)
+        elif event.event_type == "CLOSE_SUBMISSION_UNKNOWN" and action_id:
+            unknown.add(action_id)
+            context = contexts.get(action_id)
+            if context is not None:
+                close_id = payload.get("close_order_id") or context.client_order_id
+                if close_id:
+                    accepted[action_id] = _PendingCloseConfirmation(
+                        context, str(close_id), event.occurred_at,
+                    )
         elif event.event_type == "BROKER_QUANTITY_RECONCILED":
             position_id = str(payload["position_id"])
             confident = bool(payload.get("attribution_confident", False))
@@ -180,7 +202,7 @@ def replay_close_events(
                 else:
                     unattributed.add(position_id)
 
-    return CloseEventReplay(contexts, accepted, resolved, quantities, unattributed)
+    return CloseEventReplay(contexts, accepted, resolved, quantities, unattributed, unknown - resolved)
 
 
 def _restored_close_intent(payload: dict, occurred_at: datetime) -> OrderIntent:

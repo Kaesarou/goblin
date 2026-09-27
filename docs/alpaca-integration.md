@@ -55,6 +55,13 @@ The factory constructs both streams and REST clients without connecting or
 submitting orders. The generic market-data interface no longer requires eToro
 numeric instrument IDs. Alpaca credentials are excluded from manifest snapshots.
 
+Checkpoint 4: V3 persists the Alpaca close client identity in its start event
+before dispatch. Unknown submissions retain their leg reservation and schedule
+read-only confirmation, including after a crash before the completion event.
+Terminal fill/no-fill evidence releases the reservation exactly once and clears
+only the halt owned by that uncertainty. Missing evidence never retries a POST.
+Existing brokers without preassigned identities retain their recovery guards.
+
 ## Environment configuration
 
 ```dotenv
@@ -100,6 +107,10 @@ credential/cache isolation, demo/live endpoint and journal separation, secret
 redaction, cache restart/refresh behavior and both stream lifecycles. No network
 connection is made during factory construction.
 
+Checkpoint 4 adds V3/journal integration tests for lost responses, crashes before
+completion, nested broker caches, dispatch failures and terminal rejections.
+Partial-fill portfolio reconciliation remains the next integration checkpoint.
+
 Automated tests cover both WebSocket protocols (including binary JSON trade
 updates), authentication/subscription failures, reconnect/resubscribe, ordering,
 queue overflow, HTTP rate limits and no mutation retries, multiple legs of a
@@ -118,9 +129,9 @@ The existing eToro/paper behavior and strategy are unchanged. Remaining work:
    with ETFs or present legacy eToro cost estimates as Alpaca actual costs.
 2. Test the factory-connected streams, startup, shutdown and REST fallback
    through the complete V3 runtime (not only the adapter lifecycle).
-3. Extend generic V3 close recovery to retain the client ID from an unknown
-   submission. Currently V3 halts on that exception without scheduling an ID
-   lookup. The adapter's recovery tests alone do not cover this runtime gap.
+3. Validate missing-order evidence and partial-fill portfolio reconciliation
+   alongside the new V3 recovery path. Unknown submissions with no persisted
+   identity still require manual reconciliation, including unknown BUYs.
 4. Exercise partial SELL fills/cancellations during V3 quantity reconciliation,
    including crashes between adapter persistence and V3 events. The existing
    attribution rules assume the requested reduction; intermediate partial fills

@@ -129,6 +129,7 @@ class V3BrokerExecutor:
         self._reconciled_close_quantities: dict[str, _ReconciledCloseQuantity] = {}
         self._unattributed_reconciled_position_ids: set[str] = set()
         self.halted_reason: str | None = None
+        self._unknown_close_action_ids: set[str] = set()
         self._confirmation_attempts = 0
         self._mutation_confirmation_attempts = 0
         self._economics_confirmation_attempts = 0
@@ -345,12 +346,15 @@ class V3BrokerExecutor:
                     or action_id in self._pending_close_confirmations
                     or action_id in self._resolved_close_action_ids):
                 continue
+            prepare_identity = getattr(self.broker, "prepare_close_order_id", None)
+            client_order_id = prepare_identity(action_id) if prepare_identity else None
             self._append(
                 event_type="CLOSE_SUBMISSION_STARTED",
                 inventory_id=inventory.inventory_id,
                 event_id=f"{action_id}:close-start",
                 payload={
                     "action_id": action_id,
+                    "client_order_id": client_order_id,
                     "intent_id": intent.intent_id,
                     "position_id": request.position_id,
                     "symbol": intent.symbol,
@@ -383,21 +387,40 @@ class V3BrokerExecutor:
                 requested_units=request.units,
                 full_close=request.full_close,
                 pre_close_units=self._current_leg_units(request.position_id),
-            )
-            self.task_runner.submit(
-                kind="close_position",
-                task_id=f"v3-close:{action_id}",
-                context=context,
-                operation=lambda current=context: self._submit_broker_close(current),
-                lane=BrokerTaskLane.CLOSE,
+                client_order_id=client_order_id,
             )
             self._pending_actions.add(action_id)
             self._active_close_mutations_by_position[request.position_id] = action_id
             self._active_close_context_by_action[action_id] = context
+            try:
+                self.task_runner.submit(
+                    kind="close_position",
+                    task_id=f"v3-close:{action_id}",
+                    context=context,
+                    operation=lambda current=context: self._submit_broker_close(current),
+                    lane=BrokerTaskLane.CLOSE,
+                )
+            except Exception as exc:
+                # Dispatch can raise after enqueueing the mutation. Preserve the
+                # reservation and recover by reads, just as for a lost response.
+                self._handle_close_submission(BrokerTaskCompletion(
+                    task_id=f"v3-close:{action_id}", kind="close_position",
+                    lane=BrokerTaskLane.CLOSE, context=context,
+                    error=ClosePositionSubmissionUnknownError(
+                        position_id=context.position_id, submitted_at=_utc_now(),
+                        cause=exc, close_order_id=client_order_id,
+                    ),
+                ))
             scheduled = True
         return scheduled
 
     def _submit_broker_close(self, context: _CloseContext):
+        if context.client_order_id is not None:
+            return self.broker.close_position(
+                context.position_id,
+                units_to_deduct=None if context.full_close else context.requested_units,
+                client_order_id=context.client_order_id,
+            )
         if context.full_close:
             return self.broker.close_position(context.position_id)
         return self.broker.close_position(
@@ -504,6 +527,7 @@ class V3BrokerExecutor:
         self._unattributed_reconciled_position_ids.clear()
         self._unattributed_reconciled_position_ids.update(replay.unattributed_position_ids)
         self._resolved_close_action_ids.update(replay.resolved)
+        self._unknown_close_action_ids.update(replay.unknown_action_ids)
         saved_retries = self.runtime_state_store.load_close_retries()
         now = _as_utc(utc_now or _utc_now())
         mono = time.monotonic() if monotonic_now is None else monotonic_now
@@ -540,6 +564,8 @@ class V3BrokerExecutor:
             self.runtime_state_store.delete_close_retry(action_id)
         if self._unattributed_reconciled_position_ids:
             self.halted_reason = "broker_quantity_reduction_unattributed"
+        elif self._unknown_close_action_ids and self.halted_reason is None:
+            self.halted_reason = "close_submission_outcome_unknown"
 
     def _current_leg_units(self, position_id: str) -> float:
         for inventory in self.book.inventories:
@@ -1270,8 +1296,24 @@ class V3BrokerExecutor:
     def _handle_close_submission(self, completion: BrokerTaskCompletion) -> list[str]:
         context = completion.context
         assert isinstance(context, _CloseContext)
+        payload = {
+            "action_id": context.action_id,
+            "intent_id": context.intent.intent_id,
+            "position_id": context.position_id,
+            "symbol": context.intent.symbol,
+            "purpose": context.intent.purpose.value,
+            "trigger_price": context.trigger_price,
+            "requested_units": context.requested_units,
+            "pre_close_units": context.pre_close_units,
+            "full_close": context.full_close,
+            "client_order_id": context.client_order_id,
+        }
         if completion.error is not None:
             unknown = isinstance(completion.error, ClosePositionSubmissionUnknownError)
+            close_order_id = (
+                completion.error.close_order_id or context.client_order_id
+                if unknown else None
+            )
             if not unknown:
                 self._release_close_mutation(context)
             self._append(
@@ -1283,17 +1325,21 @@ class V3BrokerExecutor:
                 inventory_id=context.inventory_id,
                 event_id=f"{context.action_id}:close-error",
                 payload={
-                    "action_id": context.action_id,
-                    "position_id": context.position_id,
-                    "requested_units": context.requested_units,
-                    "pre_close_units": context.pre_close_units,
-                    "full_close": context.full_close,
+                    **payload,
+                    "close_order_id": close_order_id,
                     "error": str(completion.error),
                     "error_type": type(completion.error).__name__,
                 },
             )
             if unknown:
-                self.halted_reason = "close_submission_outcome_unknown"
+                self._unknown_close_action_ids.add(context.action_id)
+                if self.halted_reason is None:
+                    self.halted_reason = "close_submission_outcome_unknown"
+                if close_order_id:
+                    self._track_close_confirmation(
+                        context, str(close_order_id), completion.error.submitted_at,
+                        result_state="submission_unknown",
+                    )
             return []
 
         submission = completion.value
@@ -1311,48 +1357,39 @@ class V3BrokerExecutor:
         close_order_id = getattr(submission, "close_order_id", None)
         if not close_order_id:
             self.halted_reason = "close_accepted_without_order_id"
+            self._unknown_close_action_ids.add(context.action_id)
             self._append(
                 event_type="CLOSE_SUBMISSION_UNKNOWN",
                 inventory_id=context.inventory_id,
                 event_id=f"{context.action_id}:close-unknown",
-                payload={
-                    "action_id": context.action_id,
-                    "position_id": context.position_id,
-                    "requested_units": context.requested_units,
-                    "pre_close_units": context.pre_close_units,
-                    "full_close": context.full_close,
-                },
+                payload=payload,
             )
+            if context.client_order_id:
+                self._track_close_confirmation(context, context.client_order_id, _utc_now(),
+                                               result_state="submission_unknown")
             return []
 
         accepted_at = getattr(submission, "accepted_at", None) or _utc_now()
-        pending = _PendingCloseConfirmation(
-            context=context,
-            close_order_id=str(close_order_id),
-            accepted_at=accepted_at,
-            next_attempt_monotonic=time.monotonic() + CONFIRMATION_INITIAL_DELAY_SECONDS,
-        )
-        self._pending_close_confirmations[context.action_id] = pending
-        self._defer_confirmation(pending, delay=CONFIRMATION_INITIAL_DELAY_SECONDS,
-                                 result_state="submitted")
         self._append(
             event_type="CLOSE_SUBMISSION_ACCEPTED",
             inventory_id=context.inventory_id,
             event_id=f"{context.action_id}:close-accepted",
             payload={
-                "action_id": context.action_id,
-                "intent_id": context.intent.intent_id,
-                "position_id": context.position_id,
-                "symbol": context.intent.symbol,
-                "purpose": context.intent.purpose.value,
-                "trigger_price": context.trigger_price,
-                "requested_units": context.requested_units,
-                "pre_close_units": context.pre_close_units,
-                "full_close": context.full_close,
+                **payload,
                 "close_order_id": str(close_order_id),
             },
         )
+        self._track_close_confirmation(context, str(close_order_id), accepted_at)
         return []
+
+    def _track_close_confirmation(
+        self, context: _CloseContext, close_order_id: str, accepted_at: datetime,
+        *, result_state: str = "submitted",
+    ) -> None:
+        pending = _PendingCloseConfirmation(context, close_order_id, accepted_at)
+        self._pending_close_confirmations[context.action_id] = pending
+        self._defer_confirmation(pending, delay=CONFIRMATION_INITIAL_DELAY_SECONDS,
+                                 result_state=result_state)
 
     def _handle_close_lookup(self, completion: BrokerTaskCompletion) -> list[str]:
         pending = completion.context
@@ -1691,6 +1728,11 @@ class V3BrokerExecutor:
         self.runtime_state_store.delete_close_retry(context.action_id)
         self._pending_economic_fill_action_ids.discard(context.action_id)
         self._reconciled_close_quantities.pop(context.action_id, None)
+        self._unknown_close_action_ids.discard(context.action_id)
+        if not self._unknown_close_action_ids and self.halted_reason in {
+            "close_submission_outcome_unknown", "close_accepted_without_order_id",
+        }:
+            self.halted_reason = None
 
     def _finalize_confirmed_close_action(self, context: _CloseContext) -> None:
         self._retire_close_action(context)

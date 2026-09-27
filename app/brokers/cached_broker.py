@@ -77,14 +77,21 @@ class CachedBrokerClient(BrokerClient):
         self.invalidate_account_and_positions()
         return result
 
+    def prepare_close_order_id(self, action_id: str) -> str | None:
+        return self.delegate.prepare_close_order_id(action_id)
+
     def close_position(
         self,
         position_id: str,
         units_to_deduct: float | None = None,
+        *,
+        client_order_id: str | None = None,
     ) -> ClosePositionSubmission:
+        identity = {"client_order_id": client_order_id} if client_order_id is not None else {}
         submission = self.delegate.close_position(
             position_id,
             units_to_deduct=units_to_deduct,
+            **identity,
         )
         self.invalidate_account_and_positions()
         return submission
