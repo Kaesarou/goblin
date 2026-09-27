@@ -99,8 +99,9 @@ class ClosePositionSubmissionUnknownError(RuntimeError):
 class BrokerClient(ABC):
     """Execution and account contract.
 
-    Market-data access is deliberately excluded. Paper, demo and live execution
-    all consume the same independent eToro market-data pipeline.
+    Market-data access is deliberately excluded. The runtime factory selects
+    the independent market-data provider from BROKER; local paper execution
+    retains the eToro market-data pipeline.
     """
 
     account_equity_source = "broker_account_equity"
