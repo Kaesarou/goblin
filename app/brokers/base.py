@@ -6,11 +6,23 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class BrokerOpenOrder:
+    """Journal-backed BUY identity; status alone is never execution proof."""
+
+    order_id: str
+    position_id: str
+    symbol: str
+    requested_notional: float
+    status: str | None = None
+
+
+@dataclass(frozen=True)
 class OpenPositionResult:
     position_id: str
     executed_entry_price: float | None = None
     executed_units: float | None = None
     executed_notional: float | None = None
+    order: BrokerOpenOrder | None = None
 
 
 @dataclass(frozen=True)
@@ -20,6 +32,7 @@ class BrokerAccountPreflight:
     position_units: dict[str, float | None]
     pending_open_orders: tuple[str, ...] = ()
     pending_close_orders: dict[str, str] = field(default_factory=dict)  # order ID -> leg ID
+    open_orders: dict[str, BrokerOpenOrder] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -147,7 +160,23 @@ class BrokerClient(ABC):
         amount: float,
         stop_loss: float,
         take_profit: float,
+        *,
+        client_order_id: str | None = None,
     ) -> OpenPositionResult:
+        raise NotImplementedError
+
+    def prepare_open_order_id(self, action_id: str) -> str | None:
+        """Choose a durable lookup identity before submitting a BUY, without I/O."""
+        return None
+
+    def get_open_execution(
+        self, order_id: str, symbol: str, requested_notional: float,
+    ) -> OpenPositionResult | None:
+        """Look up terminal execution for this exact request, without resubmission.
+
+        None means pending or absent, not rejected. Only authoritative terminal
+        zero-fill evidence may raise OpenPositionRejectedError.
+        """
         raise NotImplementedError
 
     def prepare_close_order_id(self, action_id: str) -> str | None:

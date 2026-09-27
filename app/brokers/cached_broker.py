@@ -67,16 +67,26 @@ class CachedBrokerClient(BrokerClient):
         amount: float,
         stop_loss: float,
         take_profit: float,
+        *,
+        client_order_id: str | None = None,
     ):
+        identity = {"client_order_id": client_order_id} if client_order_id is not None else {}
         result = self.delegate.open_position(
             symbol,
             side,
             amount,
             stop_loss,
             take_profit,
+            **identity,
         )
         self.invalidate_account_and_positions()
         return result
+
+    def prepare_open_order_id(self, action_id: str) -> str | None:
+        return self.delegate.prepare_open_order_id(action_id)
+
+    def get_open_execution(self, order_id: str, symbol: str, requested_notional: float):
+        return self.delegate.get_open_execution(order_id, symbol, requested_notional)
 
     def prepare_close_order_id(self, action_id: str) -> str | None:
         return self.delegate.prepare_close_order_id(action_id)

@@ -76,6 +76,13 @@ persisted retry/backoff deadlines, including 429/timeouts. Late completions cann
 reopen resolved actions, and rejected actions cannot reuse an already journaled
 start with a different client identity.
 
+Checkpoint 6: the execution contract now supports preassigned BUY client IDs and
+read-only recovery of the exact symbol/notional request. Alpaca returns durable
+order identity/status alongside terminal execution, including partial fills after
+cancellation. Startup preflight exposes owned BUY identities even when the order
+is no longer pending. A missing order or nonterminal fill never proves rejection.
+V3 consumption of this recovery/evidence contract is the next checkpoint.
+
 ## Environment configuration
 
 ```dotenv

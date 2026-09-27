@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 import time
 from datetime import UTC, datetime
@@ -15,6 +16,7 @@ from app.brokers.base import (
     BrokerAccountPreflight,
     BrokerClient,
     BrokerCloseExecution,
+    BrokerOpenOrder,
     BrokerPositionReconciliation,
     ClosePositionRejectedError,
     ClosePositionSubmission,
@@ -163,6 +165,8 @@ class AlpacaBrokerClient(BrokerClient):
             {**{key: float(qty) for key, (_, qty) in legs.items() if qty}, **external},
             tuple(sorted(set(pending))),
             {row["client_id"]: row["position_id"] for row in unresolved if row["side"] == "sell"},
+            {row["client_id"]: self._open_order(row)
+             for row in self.store.rows() if row["side"] == "buy"},
         )
 
     def _open_orders(self) -> list[dict]:
@@ -178,7 +182,12 @@ class AlpacaBrokerClient(BrokerClient):
                 raise ValueError("Invalid Alpaca pending side")
         return orders
 
-    def open_position(self, symbol, side, amount, stop_loss, take_profit) -> OpenPositionResult:
+    def prepare_open_order_id(self, action_id: str) -> str:
+        return "goblin-" + uuid4().hex
+
+    def open_position(
+        self, symbol, side, amount, stop_loss, take_profit, *, client_order_id=None,
+    ) -> OpenPositionResult:
         with self._mutation_lock:
             # V3 controls exits; bracket orders would alter its strategy lifecycle.
             try:
@@ -211,7 +220,7 @@ class AlpacaBrokerClient(BrokerClient):
                     raise ValueError("Alpaca account contains external or pending exposure")
             except (ValueError, InvalidOperation) as exc:
                 raise OpenPositionRejectedError(str(exc)) from exc
-            client_id = "goblin-" + uuid4().hex
+            client_id = text(client_order_id) if client_order_id is not None else "goblin-" + uuid4().hex
             request = {
                 "symbol": symbol,
                 "side": "buy",
@@ -222,24 +231,51 @@ class AlpacaBrokerClient(BrokerClient):
                 "extended_hours": False,
             }
             self.store.reserve(request, position_id=client_id)
+            row = self.store.get(client_id)
             # Exactly one POST. Any exception keeps the durable reservation unknown.
             payload = self.http.request("POST", "/v2/orders", json=request)
             observed = self.store.observe(payload)
             deadline = time.monotonic() + self.fill_timeout_seconds
             while True:
-                if observed and observed["status"] in TERMINAL_STATUSES:
-                    qty = number(observed["filled_qty"])
-                    if not qty:
-                        raise OpenPositionRejectedError("Alpaca confirmed a terminal unfilled BUY")
-                    price = number(observed["filled_avg_price"], positive=True)
-                    return OpenPositionResult(
-                        client_id, float(price), float(qty), float(price * qty)
-                    )
+                execution = self._open_execution(row, observed)
+                if execution is not None:
+                    return execution
                 if time.monotonic() >= deadline:
                     raise TimeoutError("Alpaca BUY outcome pending; reservation retained")
                 self._updated.wait(timeout=0.5)
                 self._updated.clear()
                 observed = self._lookup(client_id)
+
+    @staticmethod
+    def _open_order(row: dict, payload: dict | None = None) -> BrokerOpenOrder:
+        request = json.loads(row["request"])
+        observed = payload or (json.loads(row["response"]) if row["response"] else {})
+        return BrokerOpenOrder(
+            row["client_id"], row["position_id"], row["symbol"],
+            float(number(request["notional"], positive=True)), observed.get("status"),
+        )
+
+    def _open_execution(self, row: dict, payload: dict | None) -> OpenPositionResult | None:
+        if payload is None or payload["status"] not in TERMINAL_STATUSES:
+            return None
+        qty = number(payload["filled_qty"])
+        if not qty:
+            raise OpenPositionRejectedError("Alpaca confirmed a terminal unfilled BUY")
+        price = number(payload["filled_avg_price"], positive=True)
+        notional = number(price * qty, positive=True)
+        return OpenPositionResult(
+            row["position_id"], float(price), float(qty), float(notional),
+            self._open_order(row, payload),
+        )
+
+    def get_open_execution(self, order_id, symbol, requested_notional):
+        row = self.store.get(order_id)
+        requested = number(requested_notional, positive=True).quantize(Decimal("0.01"), ROUND_DOWN)
+        if (row["side"] != "buy" or row["position_id"] != order_id
+                or row["symbol"] != symbol
+                or number(json.loads(row["request"])["notional"]) != requested):
+            raise ValueError("Alpaca open identity does not match the requested BUY")
+        return self._open_execution(row, self._lookup(order_id))
 
     def prepare_close_order_id(self, action_id: str) -> str:
         return "goblin-" + uuid4().hex
