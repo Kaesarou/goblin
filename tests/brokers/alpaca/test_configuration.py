@@ -141,7 +141,7 @@ def test_v3_live_guard_and_temporary_demo_integration_guard_are_explicit():
     for mode in ("alpaca_live", "etoro_live"):
         with pytest.raises(RuntimeError, match="not prospectively validated"):
             _assert_v3_execution_mode(mode)
-    with pytest.raises(RuntimeError, match="close recovery/partial-fill"):
+    with pytest.raises(RuntimeError, match="universe and full-runtime"):
         _assert_v3_execution_mode("alpaca_demo")
 
 

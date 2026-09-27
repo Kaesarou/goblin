@@ -161,11 +161,21 @@ class AlpacaOrderStore:
         return not row["response"] or json.loads(row["response"])["status"] not in TERMINAL_STATUSES
 
     def positions(self) -> dict[str, tuple[str, Decimal]]:
+        return self.position_snapshot()[0]
+
+    def position_snapshot(self, close_order_ids: dict[str, str] | None = None):
+        """Project quantities and attributed fills from one journal snapshot."""
         legs: dict[str, tuple[str, Decimal]] = {}
+        fills: dict[str, Decimal] = {}
+        requested = close_order_ids or {}
         for row in self.rows():
             response = json.loads(row["response"]) if row["response"] else None
             qty = number(response["filled_qty"]) if response else Decimal(0)
             key = row["position_id"]
+            if row["client_id"] in requested:
+                if row["side"] != "sell" or key != requested[row["client_id"]]:
+                    raise ValueError("Alpaca close identity does not own the requested leg")
+                fills[row["client_id"]] = qty
             if row["side"] == "buy":
                 legs[key] = row["symbol"], qty
             elif key in legs:
@@ -175,4 +185,4 @@ class AlpacaOrderStore:
                 raise ValueError("Alpaca SELL has no opening leg")
         if any(qty < 0 for _, qty in legs.values()):
             raise ValueError("Alpaca journal has negative leg exposure")
-        return legs
+        return legs, fills

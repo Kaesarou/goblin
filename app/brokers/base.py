@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -19,6 +19,21 @@ class BrokerAccountPreflight:
 
     position_units: dict[str, float | None]
     pending_open_orders: tuple[str, ...] = ()
+    pending_close_orders: dict[str, str] = field(default_factory=dict)  # order ID -> leg ID
+
+
+@dataclass(frozen=True)
+class BrokerPositionReconciliation:
+    """Actual leg units with cumulative close fills from the same observation.
+
+    Close evidence is keyed by the requested lookup identity and must belong to
+    that leg. It explains an in-flight quantity reduction; it is not a terminal
+    fill or permission to release the mutation. Empty evidence retains portfolio
+    reconciliation for adapters without cumulative order attribution.
+    """
+
+    position_units: dict[str, float | None]
+    close_filled_units: dict[str, float] = field(default_factory=dict)
 
 
 class OpenPositionRejectedError(RuntimeError):
@@ -194,6 +209,12 @@ class BrokerClient(ABC):
     def get_rate_limit_metrics(self) -> dict[str, object]:
         """Return broker read-rate telemetry when the implementation exposes it."""
         return {}
+
+    def get_position_reconciliation(
+        self, position_ids: Iterable[str], *, close_order_ids: dict[str, str],
+    ) -> BrokerPositionReconciliation:
+        """Read quantities and optional order evidence, bypassing caches."""
+        return BrokerPositionReconciliation(self.get_open_position_units(position_ids))
 
     def remember_position_instrument(self, position_id: str, symbol: str) -> None:
         """Restore broker-specific metadata needed to manage a position."""

@@ -64,6 +64,23 @@ def test_read_retries_respect_shared_rate_limit_cooldown():
     assert client.rate_limits == 1
 
 
+@pytest.mark.parametrize("failure", [requests.Timeout(), response(503), response(429)])
+def test_order_lookup_leaves_retries_to_the_persisted_scheduler(failure):
+    calls, sleeps = [], []
+
+    def transport(*args, **kwargs):
+        calls.append((args, kwargs))
+        if isinstance(failure, Exception):
+            raise failure
+        return failure
+
+    client = AlpacaHttpClient("key", "secret", transport=transport, sleep=sleeps.append)
+    with pytest.raises(requests.RequestException):
+        client.request("GET", "/v2/orders:by_client_order_id", params={"client_order_id": "known"})
+    assert len(calls) == 1
+    assert not sleeps
+
+
 def test_quotes_preserve_broker_time_and_explicit_midpoint_provenance():
     snapshot = quote_snapshot("AAPL", QUOTE, received_at=NOW)
     assert (snapshot.bid, snapshot.ask, snapshot.last) == (100, 102, 101)

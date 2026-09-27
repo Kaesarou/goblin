@@ -8,6 +8,7 @@ from app.brokers.base import (
     BrokerAccountPreflight,
     BrokerClient,
     BrokerCloseExecution,
+    BrokerPositionReconciliation,
     ClosePositionSubmission,
 )
 
@@ -123,6 +124,13 @@ class CachedBrokerClient(BrokerClient):
 
     def get_rate_limit_metrics(self) -> dict[str, object]:
         return self.delegate.get_rate_limit_metrics()
+
+    def get_position_reconciliation(
+        self, position_ids: Iterable[str], *, close_order_ids: dict[str, str],
+    ) -> BrokerPositionReconciliation:
+        return self.delegate.get_position_reconciliation(
+            position_ids, close_order_ids=close_order_ids,
+        )
 
     def get_close_execution(
         self,

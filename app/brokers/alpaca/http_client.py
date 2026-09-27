@@ -41,7 +41,9 @@ class AlpacaHttpClient:
     def request(self, method: str, path: str, *, params=None, json=None):
         if not path.startswith("/v2/"):
             raise ValueError("Alpaca API path must be relative to /v2/")
-        attempts = 3 if method == "GET" else 1
+        # V3 owns the persisted close-lookup retry deadline. Inner retries would
+        # multiply attempts and hide 429/timeouts from that scheduler.
+        attempts = 3 if method == "GET" and path != "/v2/orders:by_client_order_id" else 1
         for attempt in range(attempts):
             self._acquire()
             try:

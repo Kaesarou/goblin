@@ -15,6 +15,7 @@ from app.brokers.base import (
     BrokerAccountPreflight,
     BrokerClient,
     BrokerCloseExecution,
+    BrokerPositionReconciliation,
     ClosePositionRejectedError,
     ClosePositionSubmission,
     ClosePositionSubmissionUnknownError,
@@ -120,12 +121,14 @@ class AlpacaBrokerClient(BrokerClient):
             positions[symbol] = number(item.get("qty"), positive=True)
         return positions
 
-    def _reconciled_positions(self, *, allow_external: bool = False):
+    def _reconciled_positions(
+        self, *, allow_external: bool = False, close_order_ids: dict[str, str] | None = None,
+    ):
         if not self._account_verified:
             self._account()
         self._refresh_pending()
         broker = self._broker_positions()
-        legs = self.store.positions()
+        legs, close_fills = self.store.position_snapshot(close_order_ids)
         expected: dict[str, Decimal] = {}
         for symbol, qty in legs.values():
             expected[symbol] = expected.get(symbol, Decimal(0)) + qty
@@ -137,11 +140,11 @@ class AlpacaBrokerClient(BrokerClient):
             if not allow_external or expected.get(symbol, 0):
                 raise ValueError(f"Alpaca aggregate position mismatch for {symbol}")
             external[f"alpaca-external:{symbol}"] = float(abs(difference))
-        return legs, external
+        return legs, external, close_fills
 
     def get_account_preflight(self) -> BrokerAccountPreflight:
         self._account()
-        legs, external = self._reconciled_positions(allow_external=True)
+        legs, external, _ = self._reconciled_positions(allow_external=True)
         orders = self._open_orders()
         known = {row["client_id"] for row in self.store.rows()}
         pending = [
@@ -150,14 +153,16 @@ class AlpacaBrokerClient(BrokerClient):
             if item["client_order_id"] not in known or item["side"] == "buy"
         ]
         # A request whose response was lost might not yet appear in open orders.
+        unresolved = self.store.pending()
         pending.extend(
             row["client_id"]
-            for row in self.store.pending()
-            if row["side"] == "buy" or not row["response"]
+            for row in unresolved
+            if row["side"] == "buy"
         )
         return BrokerAccountPreflight(
             {**{key: float(qty) for key, (_, qty) in legs.items() if qty}, **external},
             tuple(sorted(set(pending))),
+            {row["client_id"]: row["position_id"] for row in unresolved if row["side"] == "sell"},
         )
 
     def _open_orders(self) -> list[dict]:
@@ -198,8 +203,10 @@ class AlpacaBrokerClient(BrokerClient):
                 ):
                     raise ValueError("Alpaca asset is not an active fractional US equity")
                 preflight = self.get_account_preflight()
-                if preflight.pending_open_orders or any(
-                    key.startswith("alpaca-external:") for key in preflight.position_units
+                if (
+                    preflight.pending_open_orders
+                    or any(not row["response"] for row in self.store.pending())
+                    or any(key.startswith("alpaca-external:") for key in preflight.position_units)
                 ):
                     raise ValueError("Alpaca account contains external or pending exposure")
             except (ValueError, InvalidOperation) as exc:
@@ -243,7 +250,7 @@ class AlpacaBrokerClient(BrokerClient):
         with self._mutation_lock:
             try:
                 self._assert_mutation_allowed()
-                legs, _ = self._reconciled_positions()
+                legs, _, _ = self._reconciled_positions()
                 if position_id not in legs:
                     raise ValueError("Unknown Alpaca opening leg")
                 symbol, remaining = legs[position_id]
@@ -321,8 +328,15 @@ class AlpacaBrokerClient(BrokerClient):
         )
 
     def get_open_position_units(self, position_ids) -> dict[str, float | None]:
-        legs, _ = self._reconciled_positions()
+        legs, _, _ = self._reconciled_positions()
         return {key: float(legs[key][1]) if key in legs else None for key in position_ids}
+
+    def get_position_reconciliation(self, position_ids, *, close_order_ids):
+        legs, _, fills = self._reconciled_positions(close_order_ids=close_order_ids)
+        return BrokerPositionReconciliation(
+            {key: float(legs[key][1]) if key in legs else None for key in position_ids},
+            {key: float(qty) for key, qty in fills.items()},
+        )
 
     def is_position_open(self, position_id: str) -> bool:
         units = self.get_open_position_units([position_id])[position_id]

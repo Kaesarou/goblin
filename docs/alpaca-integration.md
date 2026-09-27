@@ -62,6 +62,20 @@ Terminal fill/no-fill evidence releases the reservation exactly once and clears
 only the halt owned by that uncertainty. Missing evidence never retries a POST.
 Existing brokers without preassigned identities retain their recovery guards.
 
+Checkpoint 5: broker reconciliation can provide actual leg units and cumulative
+fills for the requested close identities from one journal snapshot. V3 verifies
+that each reduction matches that action's fill, baseline and requested bounds.
+It keeps the leg locked and the booked exposure conservative until terminal
+execution confirms the actual quantity and economics. Partial cancellations are
+booked once; they are neither mistaken for full execution nor double-debited on
+restart. Adapters without this evidence keep the existing portfolio-attribution
+path. Startup also rejects pending closes with no matching V3 action.
+
+Order lookup uses one HTTP attempt per scheduler dispatch. V3 keeps ownership of
+persisted retry/backoff deadlines, including 429/timeouts. Late completions cannot
+reopen resolved actions, and rejected actions cannot reuse an already journaled
+start with a different client identity.
+
 ## Environment configuration
 
 ```dotenv
@@ -109,7 +123,12 @@ connection is made during factory construction.
 
 Checkpoint 4 adds V3/journal integration tests for lost responses, crashes before
 completion, nested broker caches, dispatch failures and terminal rejections.
-Partial-fill portfolio reconciliation remains the next integration checkpoint.
+Checkpoint 5 validation: **1042 tests passed**, including **110 Alpaca tests**
+and **35 V3/Alpaca recovery integration cases**. Coverage includes growing partial
+fills, partial cancellation/expiry, successive pro-rata closes across multiple
+legs, duplicate/out-of-order stream evidence, delayed reconciliation results,
+untracked closes, external reductions and invalid attribution evidence. These
+tests combine the real adapter, SQLite journals and V3 executor with mocked APIs.
 
 Automated tests cover both WebSocket protocols (including binary JSON trade
 updates), authentication/subscription failures, reconnect/resubscribe, ordering,
@@ -119,23 +138,25 @@ timeout recovery, account changes and external activity. All network calls are
 mocked; no account credentials or real paper/live orders were used.
 
 **Alpaca configuration and factory selection are implemented, but V3 execution
-remains gated.** `alpaca_demo` fails explicitly at bootstrap until the recovery
-integration below is validated. `alpaca_live` uses the same prospective live
+remains gated.** `alpaca_demo` fails explicitly at bootstrap until the universe
+and full-runtime integration below are validated. `alpaca_live` uses the same prospective live
 capital refusal as `etoro_live`. No live authority is granted by configuring it.
-The existing eToro/paper behavior and strategy are unchanged. Remaining work:
+The strategy rules and existing broker quantity-attribution rules are unchanged.
+Remaining work:
 
 1. Complete US-equity universe/benchmark validation and broker-specific manifest metadata.
    Keep live capital disabled and do not silently replace eToro index benchmarks
    with ETFs or present legacy eToro cost estimates as Alpaca actual costs.
 2. Test the factory-connected streams, startup, shutdown and REST fallback
    through the complete V3 runtime (not only the adapter lifecycle).
-3. Validate missing-order evidence and partial-fill portfolio reconciliation
-   alongside the new V3 recovery path. Unknown submissions with no persisted
-   identity still require manual reconciliation, including unknown BUYs.
-4. Exercise partial SELL fills/cancellations during V3 quantity reconciliation,
-   including crashes between adapter persistence and V3 events. The existing
-   attribution rules assume the requested reduction; intermediate partial fills
-   must not release a mutation or leave an unexplained quantity reduction.
+3. Complete operational recovery for unknown BUYs, including partial fills still
+   pending at the BUY timeout. They currently retain the reservation and fail
+   closed; they are not automatically projected into V3 on later execution.
+4. Define operator recovery for permanently missing evidence. A close started
+   before a crash but without an adapter reservation remains locked; a reserved
+   close returning 404 remains pollable, but absence never proves rejection.
+   These crash boundaries are tested and never cause a second POST. Transient
+   REST/stream position races also fail closed rather than guess attribution.
 5. Review the complete integration and validate a separately authorized Alpaca
    paper run. Corporate-action reconciliation, operator recovery tooling and live
-   promotion are not implemented by these first two checkpoints.
+   promotion are not implemented by these checkpoints.

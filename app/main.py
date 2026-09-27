@@ -127,7 +127,7 @@ def _assert_v3_execution_mode(broker: str) -> None:
         )
     if normalized == "alpaca_demo":
         raise RuntimeError(
-            "Alpaca is configured but V3 close recovery/partial-fill integration "
+            "Alpaca is configured but V3 universe and full-runtime integration "
             "is not validated yet; demo execution remains disabled."
         )
     if normalized not in {"paper", "etoro_demo"}:

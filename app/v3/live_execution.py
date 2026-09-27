@@ -10,6 +10,7 @@ import requests
 
 from app.brokers.base import (
     BrokerCloseExecution,
+    BrokerPositionReconciliation,
     ClosePositionRejectedError,
     ClosePositionSubmissionUnknownError,
     OpenPositionRejectedError,
@@ -84,6 +85,7 @@ class _BrokerLegExpectation:
     inventory_id: str
     pending_requested_units: float
     active_action_id: str | None = None
+    close_order_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -502,14 +504,13 @@ class V3BrokerExecutor:
         self._last_broker_reconciliation_monotonic = monotonic_now
         if not context.expectations:
             return 0
-        position_ids = tuple(item.position_id for item in context.expectations)
         self._broker_reconciliation_in_flight = True
         self._broker_reconciliation_attempts += 1
         self.task_runner.submit(
             kind="v3_broker_reconciliation",
             task_id="v3-broker-reconciliation",
             context=context,
-            operation=lambda ids=position_ids: self.broker.get_open_position_units(ids),
+            operation=lambda: self._read_broker_reconciliation(context),
             lane=BrokerTaskLane.QUERY,
         )
         return 1
@@ -591,6 +592,7 @@ class V3BrokerExecutor:
                     )
                 active_id = self._active_close_mutations_by_position.get(leg.position_id)
                 active = self._active_close_context_by_action.get(active_id)
+                pending = self._pending_close_confirmations.get(active_id)
                 pending_units = active.requested_units if active else 0.0
                 expectations.append(
                     _BrokerLegExpectation(
@@ -600,6 +602,8 @@ class V3BrokerExecutor:
                         inventory_id=inventory.inventory_id,
                         pending_requested_units=float(pending_units),
                         active_action_id=active_id,
+                        close_order_id=(pending.close_order_id if pending else
+                                        active.client_order_id if active else None),
                     )
                 )
         return _BrokerReconciliationContext(
@@ -634,7 +638,17 @@ class V3BrokerExecutor:
                 f"pending_broker_open:{description}"
                 for description in preflight.pending_open_orders
             )
-            issues = unexpected + pending_issues
+            known_closes = {
+                item.close_order_id: item.position_id
+                for item in self._broker_reconciliation_context().expectations
+                if item.close_order_id
+            }
+            unknown_closes = tuple(
+                f"untracked_broker_close:{order_id}:position={position_id}"
+                for order_id, position_id in sorted(preflight.pending_close_orders.items())
+                if known_closes.get(order_id) != position_id
+            )
+            issues = unexpected + pending_issues + unknown_closes
             if issues:
                 self._last_broker_reconciliation_issues = issues
                 # Only a genuinely empty ledger may opt into observation-only
@@ -646,6 +660,7 @@ class V3BrokerExecutor:
                     return ()
                 self.halted_reason = (
                     "pending_broker_open_orders" if pending_issues
+                    else "untracked_broker_close_orders" if unknown_closes
                     else "untracked_broker_positions"
                 )
                 return issues
@@ -659,9 +674,7 @@ class V3BrokerExecutor:
 
         self._broker_reconciliation_attempts += 1
         try:
-            units_by_position = self.broker.get_open_position_units(
-                item.position_id for item in context.expectations
-            )
+            units_by_position = self._read_broker_reconciliation(context)
         except Exception:
             self._broker_reconciliation_errors += 1
             self._last_broker_reconciliation_status = "unavailable"
@@ -717,7 +730,7 @@ class V3BrokerExecutor:
             return
 
         units_by_position = completion.value
-        if not isinstance(units_by_position, dict):
+        if not isinstance(units_by_position, (dict, BrokerPositionReconciliation)):
             self._record_reconciliation_unavailable(
                 "invalid_response", ("broker_units_response_not_mapping",),
             )
@@ -766,10 +779,25 @@ class V3BrokerExecutor:
         ):
             self.halted_reason = "broker_reconciliation_unavailable"
 
+    def _read_broker_reconciliation(self, context: _BrokerReconciliationContext):
+        position_ids = tuple(item.position_id for item in context.expectations)
+        reader = getattr(self.broker, "get_position_reconciliation", None)
+        if reader is None:
+            return self.broker.get_open_position_units(position_ids)
+        return reader(position_ids, close_order_ids={
+            item.close_order_id: item.position_id
+            for item in context.expectations if item.close_order_id
+        })
+
     def _compare_broker_units(
         self, context: _BrokerReconciliationContext,
-        units_by_position: dict[str, float | None],
+        observation: dict[str, float | None] | BrokerPositionReconciliation,
     ) -> tuple[tuple[str, ...], bool]:
+        if isinstance(observation, BrokerPositionReconciliation):
+            units_by_position = observation.position_units
+            close_fills = observation.close_filled_units
+        else:
+            units_by_position, close_fills = observation, {}
         issues: list[str] = []
         reductions_observed = False
         for expectation in context.expectations:
@@ -779,6 +807,14 @@ class V3BrokerExecutor:
                 issues.append(f"{expectation.position_id}:broker_units_unavailable_or_invalid")
                 continue
             broker_units = float(value)
+            if expectation.close_order_id in close_fills:
+                # Cumulative evidence explains actual units, even before the
+                # first fill. Keep the book and mutation until terminal lookup.
+                if not self._close_quantity_explained(
+                    expectation, broker_units, close_fills[expectation.close_order_id],
+                ):
+                    issues.append(f"{expectation.position_id}:close_fill_quantity_mismatch")
+                continue
             if _units_close(broker_units, expectation.book_units):
                 continue
             if broker_units < expectation.book_units:
@@ -790,6 +826,19 @@ class V3BrokerExecutor:
                 continue
             issues.append(f"{expectation.position_id}:book={expectation.book_units:.12g}:broker={broker_units:.12g}")
         return tuple(sorted(issues)), reductions_observed
+
+    def _close_quantity_explained(
+        self, expectation: _BrokerLegExpectation, broker_units: float, filled: float,
+    ) -> bool:
+        active = self._active_close_context_by_action.get(expectation.active_action_id)
+        return (
+            isinstance(filled, (int, float)) and not isinstance(filled, bool)
+            and math.isfinite(filled) and filled >= 0
+            and active is not None and active.pre_close_units is not None
+            and _units_close(expectation.book_units, active.pre_close_units)
+            and (filled <= active.requested_units or _units_close(filled, active.requested_units))
+            and _units_close(expectation.book_units - broker_units, filled)
+        )
 
     def _reconcile_broker_quantity_reduction(
         self,
@@ -1296,6 +1345,8 @@ class V3BrokerExecutor:
     def _handle_close_submission(self, completion: BrokerTaskCompletion) -> list[str]:
         context = completion.context
         assert isinstance(context, _CloseContext)
+        if context.action_id in self._resolved_close_action_ids:
+            return []
         payload = {
             "action_id": context.action_id,
             "intent_id": context.intent.intent_id,
@@ -1314,8 +1365,6 @@ class V3BrokerExecutor:
                 completion.error.close_order_id or context.client_order_id
                 if unknown else None
             )
-            if not unknown:
-                self._release_close_mutation(context)
             self._append(
                 event_type=(
                     "CLOSE_SUBMISSION_UNKNOWN"
@@ -1340,6 +1389,8 @@ class V3BrokerExecutor:
                         context, str(close_order_id), completion.error.submitted_at,
                         result_state="submission_unknown",
                     )
+            else:
+                self._retire_close_action(context)
             return []
 
         submission = completion.value
