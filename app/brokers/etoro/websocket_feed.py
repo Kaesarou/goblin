@@ -7,6 +7,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import uuid4
 
+from app.brokers.etoro.market_data_client import EtoroRestMarketDataClient
 from app.brokers.etoro.websocket_protocol import (
     WebSocketPayloadObserver,
     build_authentication_request,
@@ -15,7 +16,7 @@ from app.brokers.etoro.websocket_protocol import (
     parse_websocket_events,
     validate_authentication_response,
 )
-from app.market_data.contracts import LiveMarketDataFeed, RestMarketDataClient
+from app.market_data.contracts import LiveMarketDataFeed
 from app.market_data.models import MarketDataEvent
 
 
@@ -31,7 +32,7 @@ class EtoroWebSocketMarketDataFeed(LiveMarketDataFeed):
         *,
         api_key: str,
         user_key: str,
-        rest_client: RestMarketDataClient,
+        rest_client: EtoroRestMarketDataClient,
         queue_capacity: int,
         global_silence_seconds: float,
         connector: Callable | None = None,

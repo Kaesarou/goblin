@@ -8,8 +8,6 @@ from app.market_data.models import MarketDataEvent
 class RestMarketDataClient(Protocol):
     def get_market_snapshots(self, symbols: list[str]) -> dict[str, MarketSnapshot]: ...
 
-    def resolve_instrument_ids(self, symbols: list[str]) -> dict[str, int]: ...
-
 
 class LiveMarketDataFeed(ABC):
     @abstractmethod

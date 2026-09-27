@@ -120,10 +120,15 @@ def _write_disabled_research_summary(
 
 def _assert_v3_execution_mode(broker: str) -> None:
     normalized = broker.strip().lower()
-    if normalized == "etoro_live":
+    if normalized in {"etoro_live", "alpaca_live"}:
         raise RuntimeError(
             "Goblin V3 is not prospectively validated for live capital. "
             "Use paper or etoro_demo until an explicit promotion decision."
+        )
+    if normalized == "alpaca_demo":
+        raise RuntimeError(
+            "Alpaca is configured but V3 close recovery/partial-fill integration "
+            "is not validated yet; demo execution remains disabled."
         )
     if normalized not in {"paper", "etoro_demo"}:
         raise RuntimeError(f"Unsupported V3 broker mode: {broker}")

@@ -4,6 +4,8 @@ import json
 import threading
 import time
 
+from app.brokers.alpaca.environment import AlpacaEnvironment
+
 
 def _connect(url):
     from websockets.sync.client import connect
@@ -25,13 +27,14 @@ class AlpacaStream:
         feed: str | None = None,
         connector=None,
         silence_seconds=15.0,
+        environment: AlpacaEnvironment = AlpacaEnvironment.DEMO,
     ) -> None:
         if feed not in {None, "iex", "sip"}:
             raise ValueError("Only real-time IEX and SIP feeds are supported")
         self.url = (
             f"wss://stream.data.alpaca.markets/v2/{feed}"
             if feed
-            else "wss://paper-api.alpaca.markets/stream"
+            else AlpacaEnvironment(environment).stream_url
         )
         self._auth = {"action": "auth", "key": api_key, "secret": secret_key}
         self._market = feed is not None

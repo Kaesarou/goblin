@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from decimal import Decimal
 from pathlib import Path
 
+from app.brokers.alpaca.environment import AlpacaEnvironment
 from app.brokers.alpaca.schema import TERMINAL_STATUSES, number, order, text, timestamp
 
 
@@ -18,7 +19,8 @@ class AlpacaOrderStore:
     evidence cannot debit an inventory twice. Keep this DB with the V3 state DB.
     """
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, *, environment=AlpacaEnvironment.DEMO) -> None:
+        self.environment = AlpacaEnvironment(environment)
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
@@ -47,7 +49,7 @@ class AlpacaOrderStore:
                 db.close()
 
     def bind_account(self, account_id: str) -> None:
-        identity = "paper:" + text(account_id)
+        identity = self.environment.account_namespace + ":" + text(account_id)
         with self._transaction() as db:
             old = db.execute("SELECT value FROM alpaca_meta WHERE key='account'").fetchone()
             if old and old["value"] != identity:

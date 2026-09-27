@@ -35,15 +35,22 @@ class AlpacaBrokerClient(BrokerClient):
         api_key: str,
         secret_key: str,
         fill_timeout_seconds: float = 20.0,
+        instrument_cache=None,
     ) -> None:
+        if getattr(http, "environment", store.environment) != store.environment:
+            raise ValueError("Alpaca HTTP and journal environments differ")
         self.http, self.store = http, store
+        self.instrument_cache = instrument_cache
         self.fill_timeout_seconds = fill_timeout_seconds
         self._mutation_lock = threading.RLock()
         self._updated = threading.Event()
         self._stream_error: Exception | None = None
         self._account_verified = False
         self.trade_stream = AlpacaStream(
-            api_key=api_key, secret_key=secret_key, on_message=self._on_trade_update
+            api_key=api_key,
+            secret_key=secret_key,
+            on_message=self._on_trade_update,
+            environment=store.environment,
         )
 
     def _account(self) -> dict:
@@ -176,7 +183,11 @@ class AlpacaBrokerClient(BrokerClient):
                 if notional < 1:
                     raise ValueError("Alpaca fractional order must be at least USD 1")
                 self._assert_mutation_allowed()
-                asset = self.http.request("GET", "/v2/assets/" + symbol)
+                asset = (
+                    self.instrument_cache.get_asset(symbol)
+                    if self.instrument_cache
+                    else self.http.request("GET", "/v2/assets/" + symbol)
+                )
                 if (
                     not isinstance(asset, dict)
                     or asset.get("class") != "us_equity"

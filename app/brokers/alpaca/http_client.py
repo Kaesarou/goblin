@@ -6,7 +6,8 @@ from collections import deque
 
 import requests
 
-PAPER_API_URL = "https://paper-api.alpaca.markets"
+from app.brokers.alpaca.environment import AlpacaEnvironment
+
 DATA_API_URL = "https://data.alpaca.markets"
 
 
@@ -19,13 +20,15 @@ class AlpacaHttpClient:
         secret_key: str,
         *,
         data: bool = False,
+        environment: AlpacaEnvironment = AlpacaEnvironment.DEMO,
         transport=None,
         clock=time.monotonic,
         sleep=time.sleep,
     ) -> None:
         if not api_key.strip() or not secret_key.strip():
             raise ValueError("Alpaca API key and secret are required")
-        self.base_url = DATA_API_URL if data else PAPER_API_URL
+        self.environment = AlpacaEnvironment(environment)
+        self.base_url = DATA_API_URL if data else self.environment.api_url
         self._headers = {"APCA-API-KEY-ID": api_key, "APCA-API-SECRET-KEY": secret_key}
         self._transport = transport or requests.request
         self._clock, self._sleep = clock, sleep

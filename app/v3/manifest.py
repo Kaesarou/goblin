@@ -59,7 +59,7 @@ from app.v3.state_store import (
 )
 
 V3_RUN_MANIFEST_SCHEMA_VERSION = 20
-_SENSITIVE_SETTINGS = {"ETORO_API_KEY", "ETORO_USER_KEY"}
+_SENSITIVE_SETTINGS = {"ETORO_API_KEY", "ETORO_USER_KEY", "ALPACA_API_KEY", "ALPACA_SECRET_KEY"}
 
 
 def build_run_id(started_at: datetime | None = None) -> str:

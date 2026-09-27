@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.execution.breakeven_profile import BreakevenProfileName
 
-BrokerMode = Literal['paper', 'etoro_demo', 'etoro_live']
+BrokerMode = Literal['paper', 'etoro_demo', 'etoro_live', 'alpaca_demo', 'alpaca_live']
 JournalDetailLevel = Literal['minimal', 'normal', 'debug', 'full']
 
 
@@ -76,6 +76,24 @@ class Settings(BaseSettings):
         default='data/etoro_instrument_ids.json',
         alias='ETORO_INSTRUMENT_ID_CACHE_PATH',
     )
+
+    alpaca_api_key: str = Field(default='', alias='ALPACA_API_KEY', repr=False)
+    alpaca_secret_key: str = Field(default='', alias='ALPACA_SECRET_KEY', repr=False)
+    alpaca_instrument_id_cache_path: str = Field(
+        default='data/alpaca_instrument_ids.json', alias='ALPACA_INSTRUMENT_ID_CACHE_PATH',
+    )
+    alpaca_data_feed: Literal['iex', 'sip'] = Field(default='iex', alias='ALPACA_DATA_FEED')
+
+    @field_validator('broker', mode='before')
+    @classmethod
+    def normalize_broker(cls, value):
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip().lower().replace('-', '_')
+        return {
+            'alpacademo': 'alpaca_demo', 'alpacalive': 'alpaca_live',
+            'etorodemo': 'etoro_demo', 'etorolive': 'etoro_live',
+        }.get(normalized, normalized)
 
     watchlist: str = Field(default='', alias='WATCHLIST')
     base_currency: str = Field(default='USD', alias='BASE_CURRENCY')
