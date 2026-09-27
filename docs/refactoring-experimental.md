@@ -50,7 +50,7 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
    `openingData.avgPrice`/`units`, `orderForClose.positionID`/`statusID`,
    `clientPortfolio.positions[].positionID`/`units`, aggregate
    `accountTotals.accountTotalValue`, instrument `items[].internalInstrumentId`,
-   REST rates `instrumentID`/`Bid`/`Ask`/`Last`, P&L root `ordersForOpen`/`orders`,
+   REST rates `instrumentID`/`bid`/`ask`/`lastExecution`, P&L root `ordersForOpen`/`orders`,
    and the canonical WebSocket `Bid`/`Ask`/`LastExecution`/`Date`/
    `PriceRateID` fields. Unused generic scalar/string mapper modules and their
    compatibility tests were removed. Validation: the full 907-test suite
@@ -150,6 +150,11 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
     experimental branch. Production push triggers remain restricted to
     `develop` and `main`; this lets the refactor PR exercise its merge result
     in GitHub Actions as well as the local suite.
+27. Correct the REST rates contract found during final review. The endpoint
+    uses `bid`, `ask` and `lastExecution`; the capitalized WebSocket fields
+    must not be reused here. The corrected existing fixtures fail before the
+    fix and pass afterward, including a last trade distinct from the midpoint
+    and explicit price provenance. Other missing-field checks remain intact.
 
 ## Retirement evidence
 

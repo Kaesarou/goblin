@@ -26,10 +26,11 @@ def to_market_snapshots(
         symbol = symbol_by_instrument_id.get(instrument_id)
         if symbol is None:
             raise ValueError(f'Unable to find cached symbol by instrument_id={instrument_id}.')
-        bid = _required_float(rate, 'Bid')
-        ask = _required_float(rate, 'Ask')
+        # REST rates use lower camel case; WebSocket rates have a separate schema.
+        bid = _required_float(rate, 'bid')
+        ask = _required_float(rate, 'ask')
 
-        last = _optional_float(rate.get('Last'))
+        last = _optional_float(rate.get('lastExecution'))
         price_source = PriceSource.BROKER_LAST
         if last is None:
             last = (bid + ask) / 2
