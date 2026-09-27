@@ -6,6 +6,10 @@ from app.brokers.etoro.pnl_position_amount import position_amount_usd
 from app.brokers.etoro.resilient_client import ResilientEtoroClient
 from app.config.settings import Settings
 
+# P&L nests positions under clientPortfolio and uses positionId (not the
+# portfolio endpoint's positionID):
+# https://api-portal.etoro.com/api-reference/trading--demo/get-account-pnl-and-portfolio-details
+
 
 def _client(monkeypatch, *, instrument_price=100.0, units=3.0,
             order_notional=1.0, pnl=None):
@@ -50,7 +54,7 @@ def test_one_dollar_order_field_uses_exact_pnl_position_usd_amount(monkeypatch):
 def test_european_instrument_amount_stays_usd_not_units_times_euro_price(monkeypatch):
     client, _ = _client(monkeypatch, instrument_price=210.0, units=1.4,
                         pnl={"clientPortfolio": {"positions": [
-                            {"positionID": "position-1", "amount": 327.0},
+                            {"positionId": "position-1", "amount": 327.0},
                         ]}})
     result = client.open_position("SAP.DE", "BUY", 327.0, 100.0, 2_100.0)
     assert result.executed_notional == 327.0

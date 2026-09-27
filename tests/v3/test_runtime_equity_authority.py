@@ -13,11 +13,16 @@ from app.market.data_quality import MarketDataValidator
 from app.market.session_timeframe_service import FullSessionMultiTimeframeService
 from app.market_data.candle_stream import QualityAwareCandleBuilder
 from app.runtime.broker_task_runner import BrokerTaskCompletion, BrokerTaskLane
-from app.runtime.trading_session_window import AssetTradingSessionConfig, TradingSessionService, parse_trading_sessions
+from app.runtime.trading_session_window import (
+    AssetTradingSessionConfig,
+    TradingSessionService,
+    parse_trading_sessions,
+)
 from app.v3.config import etoro5_research_config
+from app.v3.decision_window import V3DecisionWindowBatch
 from app.v3.features import OnlineFeatureEngine
 from app.v3.persistence import InventoryEventStore
-from app.v3.runtime import GoblinV3Runtime, V3DecisionWindowBatch
+from app.v3.runtime import GoblinV3Runtime
 from app.v3.state_store import V3RuntimeStateStore
 from tests.v3.test_planner import _planner
 from tests.v3.test_runtime import NOW, RecordingJournal, _feature, _snapshot
@@ -32,7 +37,8 @@ def runtime_for_test(tmp_path, *, with_eu=False):
     config = etoro5_research_config()
     runtime = GoblinV3Runtime(
         settings=settings, symbols=symbols, run_id="integrity-test", instrument_registry=registry,
-        execution_broker=SimpleNamespace(), rest_market_data=SimpleNamespace(),
+        execution_broker=SimpleNamespace(account_equity_source=ACCOUNT_EQUITY_SOURCE),
+        rest_market_data=SimpleNamespace(),
         live_market_data=SimpleNamespace(requires_websocket_health=False),
         candle_builders={symbol: QualityAwareCandleBuilder() for symbol in symbols},
         trading_session_service=TradingSessionService({

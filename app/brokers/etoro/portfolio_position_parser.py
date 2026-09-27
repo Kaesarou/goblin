@@ -1,22 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
 import math
+from collections.abc import Iterable
 
 from app.brokers.etoro.payload_collections import keep_dict_items
-from app.brokers.etoro.scalar_extractors import extract_optional_float
-from app.brokers.etoro.string_extractors import extract_optional_string
-
-
-POSITION_ID_KEYS = ('positionID', 'positionId', 'PositionID', 'PositionId')
-POSITION_UNITS_KEYS = (
-    'units',
-    'Units',
-    'netUnits',
-    'NetUnits',
-    'unitAmount',
-    'UnitAmount',
-)
 
 
 def extract_open_positions(payload: dict) -> list[dict]:
@@ -26,27 +13,21 @@ def extract_open_positions(payload: dict) -> list[dict]:
         if isinstance(positions, list):
             return keep_dict_items(positions)
 
-    positions = payload.get('positions')
-    if isinstance(positions, list):
-        return keep_dict_items(positions)
-
-    data = payload.get('data')
-    if isinstance(data, dict):
-        return extract_open_positions(data)
-
     return []
 
 
 def extract_position_id(payload: dict) -> str | None:
-    return extract_optional_string(payload, POSITION_ID_KEYS)
+    position_id = payload.get('positionID')
+    return None if position_id is None else str(position_id)
 
 
 def extract_position_units(payload: dict) -> float | None:
-    if any(isinstance(payload.get(key), bool) for key in POSITION_UNITS_KEYS):
+    value = payload.get('units')
+    if isinstance(value, bool):
         raise ValueError('Invalid boolean broker units')
-    units = extract_optional_float(payload, POSITION_UNITS_KEYS)
-    if units is None:
+    if value is None:
         return None
+    units = float(value)
     if not math.isfinite(units) or units < 0:
         raise ValueError('Invalid broker units')
     return float(units)
@@ -102,24 +83,16 @@ def contains_open_position(payload: dict, position_id: str) -> bool:
             continue
 
         is_open = position.get('isOpen')
-        if is_open is False:
-            return False
-
-        return True
+        return is_open is not False
 
     return False
 
 
 def _quantitative_positions(payload: dict) -> list[dict]:
-    current = payload
-    for _ in range(4):
-        if not isinstance(current, dict):
-            break
-        root = current.get('clientPortfolio', current)
-        if isinstance(root, dict) and 'positions' in root:
-            positions = root['positions']
-            if not isinstance(positions, list) or not all(isinstance(p, dict) for p in positions):
-                raise ValueError('Invalid broker positions collection')
-            return positions
-        current = current.get('data')
-    raise ValueError('Missing authoritative broker positions collection')
+    client_portfolio = payload.get('clientPortfolio')
+    if not isinstance(client_portfolio, dict):
+        raise ValueError('Missing authoritative broker positions collection')
+    positions = client_portfolio.get('positions')
+    if not isinstance(positions, list) or not all(isinstance(p, dict) for p in positions):
+        raise ValueError('Invalid broker positions collection')
+    return positions

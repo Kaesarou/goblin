@@ -1,0 +1,214 @@
+# Experimental application simplification
+
+Target: `alpaca-experimental`. Work branch: `refactor/simplify-goblin-for-multibroker`.
+Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
+
+## Constraints
+
+- Preserve `INVENTORY_RR5_ETORO5_V1`: signals, thresholds, sizing, inventory
+  lifecycle, exits, trailing, fees and decision-window timing are unchanged.
+- Preserve durable BUY reservations, unknown-outcome halts, account preflight,
+  external-account acknowledgment, quantitative reconciliation and close retries.
+- No Alpaca implementation, deployment, merge to develop/main, branch cleanup,
+  or live broker calls in this refactor.
+- Keep replay/research tools and historical data formats usable. Delete code
+  only after checking production, scripts, research and test dependencies.
+
+## Checkpoints
+
+1. Consolidate the V3 executor: merge the guarded implementation and its base
+   into `app/v3/live_execution.py`. Remove the `sys.modules` replacement and the
+   unreachable duplicate unknown-error classification. Existing public imports
+   and clock monkeypatches work directly. Validation: 1,026 tests pass.
+2. Broker boundaries: account preflight, durable external-activity policy,
+   equity provenance and structured open rejection are generic contracts.
+   eToro payload parsing stays in its adapter; caching forwards safety reads
+   without TTL reuse. The V3 execution/decision core no longer imports a concrete
+   broker (the deployment manifest retains its eToro provenance). Contract tests
+   cover another broker, nested caches, rejection, unavailable preflight and
+   unchanged paper/demo/live metadata.
+3. Retire 25 unreachable V1 live modules (runtime, executor, old strategy,
+   manifest writer and position/pending-close store writers). Keep historical
+   scoring, candidate selection, position lifecycle, replay, deserialization,
+   calibration and research dependencies. V3 legacy-SQLite startup guards remain
+   intact. Move research non-interference/failure tests onto the actual V3 runtime.
+   Correct the README so historical strategy descriptions are not presented as
+   the active policy.
+4. eToro open submission: share one `EtoroClient.open_position` pipeline. The
+   resilient adapter now supplies only three policy hooks: uncertain
+   confirmation translation, ambiguous execution translation and suspicious
+   account-notional reconciliation. Request payloads, identifiers, position
+   metadata and returned `OpenPositionResult` remain unchanged. Validation:
+   41 focused broker/V3 tests and the full 928-test suite pass.
+5. Replay cleanup: remove an unused symbol-id slice and an obsolete duplicate
+   trailing-extrema helper from the V3 Point-M replay. The active
+   `_ext_values` implementation is unchanged; Point-M behavior is preserved.
+   Validation: the full 928-test suite passes.
+6. eToro payload contracts: replace the old tuple-based key mappers and
+   recursive envelope/case fallbacks with the documented endpoint fields. The
+   adapter now reads `orderId`/`referenceId`, `positionExecutions[].positionId`,
+   `openingData.avgPrice`/`units`, `orderForClose.positionID`/`statusID`,
+   `clientPortfolio.positions[].positionID`/`units`, aggregate
+   `accountTotals.accountTotalValue`, instrument `items[].internalInstrumentId`,
+   REST rates `instrumentID`/`bid`/`ask`/`lastExecution`, P&L
+   `clientPortfolio.ordersForOpen`/`orders` and `positions[].positionId`,
+   and the canonical WebSocket `Bid`/`Ask`/`LastExecution`/`Date`/
+   `PriceRateID` fields. Unused generic scalar/string mapper modules and their
+   compatibility tests were removed. Validation: the full 907-test suite
+   passes.
+7. Application-wide orphan cleanup: remove the unused legacy
+   `BrokerOrderResult` model and the unused `TradeCandidateScorer` façade.
+   Historical signal scoring remains available through the exercised scorer
+   modules and candidate-ranking path. Validation: the full 907-test suite
+   remains green.
+8. Remove unused V3 imports and test-only dead assignments. The package no
+   longer imports planner/recoverability classes as unused side effects.
+   Validation: Ruff unused-symbol checks and the full 907-test suite pass.
+9. Normalize production import ordering, standard-library collection imports,
+   quoted annotations and UTC aliases across the application. This is a
+   mechanical Python 3.12 cleanup; no strategy or broker contract changes are
+   involved. Validation: the full 907-test suite and the targeted Ruff checks
+   pass.
+10. Consolidate eToro HTTP retry-hint parsing and 429 cooldown policy in the
+    existing retry-policy module. Account, order-lookup and REST market-data
+    GETs still use their original retry paths and bucket assignments. Added
+    tests for numeric/missing hints, fallback delay and a market-data 429
+    cooling down the shared account bucket. Validation: 914 tests pass.
+11. Remove the implicit wildcard re-export of V3 configuration from
+    `app.v3`. Production, scripts and tests import their configuration from
+    `app.v3.config` directly; no caller depends on package-level aliases.
+12. Lock the preregistered ETORO5 profile in a contract test: 5 inventories
+    and fills, 4%/15% exposure caps, 84% close, 0.411 effective WEL,
+    0.0033291 initial exposure, recoverability and hedge OFF. All other
+    strategy thresholds and risk fields must match frozen RR5; live-capital
+    refusal and Point-M golden tests remain in place.
+13. Share the duplicated eToro account/order and REST market-data GET retry
+    loop. The common path preserves per-request headers, request timeout,
+    transport/status retry delays, bucket-local 429 cooldown and bounded
+    attempts. Each client retains its own terminal HTTP logging and payload
+    handling; the close-confirmation `_get_once` remains strictly single-shot.
+    Both clients now have parity tests for retryable status and transport
+    errors.
+14. Extract the independent V3 decision-window coordinator and batch types
+    from the runtime into `app/v3/decision_window.py`. Keep the same ordering,
+    grace timeout, symbol reset and late-event refusal. Runtime callers and
+    tests use the new direct module; no compatibility facade is retained.
+15. Separate pure close-plan assessment from asynchronous broker mutation in
+    `app/v3/execution.py`. The existing pro-rata allocator, account-notional
+    dust projection, broker-leg minimum and journal payload values are
+    unchanged. Profit exits still collapse a sub-10-USD residual to full close;
+    other reduce-only purposes are not silently collapsed. Close submission,
+    reservations and confirmation remain owned by `V3BrokerExecutor`.
+16. Keep causal decision-quote selection with the extracted M1 window module.
+    A future quote remains forbidden, an in-bucket quote remains authoritative,
+    and an older quote can only supply non-authoritative provenance. Runtime
+    and tests import the helper directly from its owner.
+17. Retire a resolved close action through one shared cleanup path for broker
+    rejection and confirmed execution. Both outcomes still release the active
+    leg mutation, retry record and economic-fill bookkeeping before refreshing
+    stale-confirmation halts. The confirmed path retains its separate
+    unattributed-reconciliation halt precedence.
+18. Extract ledger close-event replay and its context types to
+    `app/v3/close_recovery.py`. The executor still owns retry deadlines, broker
+    mutation locks and halt decisions, while the replay step reconstructs
+    accepted actions, reconciled quantities, resolved actions and unattributed
+    positions without mutating the executor or retry store.
+19. Centralize pure close attribution checks with the recovered close context.
+    A legacy action retains its historical confidence gate and migration
+    quantity tolerance; a modern action can correct a historical false flag
+    only when baseline, requested and executed quantities match broker
+    evidence. Journal writes, quantity application, retry persistence and risk
+    halts remain in the executor.
+20. Consolidate the three unavailable broker-reconciliation outcomes behind
+    one error and halt-precedence handler. Invalid context retains the previous
+    issue list; transport failures and malformed responses still record their
+    own issue details. Stronger existing risk halts remain authoritative.
+21. Apply V3 planner decisions through one runtime path for active inventories,
+    ranked flat symbols and equity-independent exits. Each path still supplies
+    its own new-risk authority and journal role; without an equity reference,
+    the helper retains only reduce-only intents and replaces stale exits even
+    when the fresh proof returns no intent.
+22. Share breadth and sector aggregation between live candidate context and
+    side-neutral research context. Each path still selects and validates its
+    own snapshots and returns: research requires both broker and receive times
+    strictly before the cutoff; live retains its existing freshness policy.
+    Availability thresholds, direction, rounding and median are calculated
+    once from the selected returns.
+23. Share benchmark-context construction and unavailable fallback after each
+    path chooses its own eligible snapshot, session return and momentum. The
+    live freshness and strict research cutoff remain separate; the resulting
+    direction, spread and snapshot-age calculations now have one owner.
+24. Separate direct close execution from the path where broker quantity was
+    already reconciled. Shared idempotency and execution validation still run
+    first; each path retains its original journal-before-book ordering,
+    instrument cleanup, retry retirement and risk-halt behavior.
+25. Isolate the V3 candle preflight from feature, MTF, inventory and decision
+    state mutation. Session rejection still precedes replayed-candle detection;
+    accepted candles retain the same mutation and journal order. A regression
+    checks that a replayed candle outside its session is rejected before any
+    feature or MTF mutation.
+26. Enable the existing pytest workflow for pull requests targeting the
+    experimental branch. Production push triggers remain restricted to
+    `develop` and `main`; this lets the refactor PR exercise its merge result
+    in GitHub Actions as well as the local suite.
+27. Correct the REST rates contract found during final review. The endpoint
+    uses `bid`, `ask` and `lastExecution`; the capitalized WebSocket fields
+    must not be reused here. The corrected existing fixtures fail before the
+    fix and pass afterward, including a last trade distinct from the midpoint
+    and explicit price provenance. Other missing-field checks remain intact.
+28. Correct pending-order preflight to read the P&L `clientPortfolio` envelope.
+    Update the startup, observation-only and manual-close rearm fixtures to
+    match that endpoint. Missing envelopes, missing collections, null arrays
+    and malformed items still fail closed; a pending order still blocks BUYs.
+29. Keep P&L identity parsing separate from portfolio identity parsing:
+    `clientPortfolio.positions[].positionId` versus `positionID`. Correct the
+    notional-reconciliation and read-only diagnostic fixtures. The suspect
+    1-USD order value is again cross-checked against the exact P&L position;
+    missing, ambiguous or invalid economics never hide a confirmed fill.
+
+## Endpoint contract evidence
+
+Final review on 2026-09-27 found that passing fixtures had repeated three
+incorrect schema assumptions. The affected existing tests now reproduce the
+failures before the fixes and pass afterward. Field names are endpoint-specific:
+
+| Source | Container and fields |
+| --- | --- |
+| [REST rates](https://api-portal.etoro.com/api-reference/market-data/get-instrument-market-rates) | `rates[].instrumentID`, `bid`, `ask`, `lastExecution` |
+| [WebSocket rates](https://api-portal.etoro.com/core/websocket/topics) | `Bid`, `Ask`, `LastExecution`, `Date`, `PriceRateID` |
+| [P&L](https://api-portal.etoro.com/api-reference/trading--demo/get-account-pnl-and-portfolio-details) | `clientPortfolio.ordersForOpen`, `clientPortfolio.orders`, `clientPortfolio.positions[].positionId` / `amount` |
+| [Portfolio](https://api-portal.etoro.com/api-reference/trading--demo/get-demo-portfolio-breakdown) | `clientPortfolio.positions[].positionID` / `units` |
+
+Tests use synthetic values with these documented shapes. They make no live
+broker calls and do not substitute the P&L identity contract for `/portfolio`.
+
+## Retirement evidence
+
+The dependency audit parsed absolute and relative Python imports, including
+package imports, starting from `app.main`, `app.runtime.restart_guard`, all
+scripts, all V3 modules, all backtesting modules and all research modules.
+The 25 removed application modules had no reachable consumer; their remaining
+consumers were only V1-specific tests. CLI entrypoints in Docker/Compose, shell
+scripts, workflows and documentation were also checked. No dynamic imports or
+plugin entrypoints target these modules.
+
+Test accounting: 1,034 passing after checkpoint 2 minus the retired V1-only and
+duplicate compatibility coverage through checkpoint 5, then the obsolete
+payload-key mapper coverage in checkpoint 6 = **907 passing**. The retained
+tests exercise the documented eToro shapes and assert that unknown/legacy
+shapes fail closed. Four research tests are retained and now exercise V3
+instead of a fabricated V1 runtime. No active V3 safety/strategy test was
+removed. Removed code and tests remain recoverable from the baseline commit
+above.
+
+## Validation
+
+After the final contract corrections: **932 tests pass**, including the
+corrected REST/P&L fixtures, startup/rearm gates and notional reconciliation.
+`compileall`, Ruff unused-symbol checks and `git diff --check` also pass.
+
+Run `.venv/bin/python -m pytest -q` after each checkpoint. New broker boundaries
+need contract tests; payload parsing must retain fail-closed behavior. The test
+suite runs without broker credentials or network order submission. Publish each
+validated checkpoint on the PR so progress is recoverable independently of the
+workspace lifetime.

@@ -6,7 +6,7 @@ from app.brokers.etoro.order_response_parser import (
     extract_order_error_code,
     extract_order_error_message,
     extract_order_id,
-    extract_position_id_from_order_details,
+    extract_position_id,
     extract_reference_id,
     has_executed_position_details,
     is_close_response_accepted,
@@ -78,16 +78,9 @@ def test_extract_reference_id_returns_none_when_missing():
     assert extract_reference_id({'orderId': 362406474}) is None
 
 
-def test_extract_position_id_from_order_details():
-    assert extract_position_id_from_order_details(executed_order_payload()) == '9001'
-
-
-def test_extract_position_id_from_nested_order_details():
-    assert extract_position_id_from_order_details({'data': {'order': {'PositionID': 123456}}}) == '123456'
-
-
-def test_extract_position_id_returns_none_when_missing():
-    assert extract_position_id_from_order_details({'status': {'id': 1, 'name': 'Executed'}, 'positionExecutions': []}) is None
+def test_order_execution_position_id_uses_canonical_field():
+    assert extract_position_id({'positionId': 9001}) == '9001'
+    assert extract_position_id({'PositionID': 9001}) is None
 
 
 def test_extract_executed_position_details_from_opening_data():
@@ -236,8 +229,17 @@ def test_is_close_response_accepted_when_position_matches_and_status_is_one():
     assert is_close_response_accepted({'orderForClose': {'positionID': 3549893989, 'orderID': 362453867, 'statusID': 1}}, '3549893989')
 
 
-def test_is_close_response_accepted_with_camel_case_position_and_status_id():
-    assert is_close_response_accepted({'orderForClose': {'PositionId': '3549893989', 'orderID': 362453867, 'statusId': 1}}, 3549893989)
+def test_is_close_response_rejects_noncanonical_position_or_status_fields():
+    assert not is_close_response_accepted(
+        {
+            'orderForClose': {
+                'PositionId': '3549893989',
+                'orderID': 362453867,
+                'statusId': 1,
+            }
+        },
+        3549893989,
+    )
 
 
 def test_is_close_response_not_accepted_when_order_for_close_is_missing():

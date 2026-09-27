@@ -9,6 +9,7 @@ on:
     branches:
       - main
       - develop
+      - alpaca-experimental
 
 jobs:
   pytest:

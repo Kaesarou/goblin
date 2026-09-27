@@ -17,9 +17,9 @@ class DemoClient:
 
     def _get(self, path):
         self.calls.append(path)
-        return {"ordersForOpen": [], "orders": [], "positions": [
-            {"positionID": "private-id", "amount": 300.0},
-        ]}
+        return {"clientPortfolio": {"ordersForOpen": [], "orders": [], "positions": [
+            {"positionId": "private-id", "amount": 300.0},
+        ]}}
 
     def _post(self, *_args, **_kwargs):
         raise AssertionError("payload schema probe must not mutate eToro")
@@ -30,8 +30,9 @@ def test_probe_reads_broker_without_exposing_position_identifiers_or_amounts():
     report = inspect(client)
     assert client.calls == ["portfolio_GET", "/api/v1/trading/info/demo/pnl"]
     assert report["broker_mutations"] == 0
-    assert report["pnl_schema"]["root_ordersForOpen_count"] == 0
-    assert report["pnl_schema"]["root_orders_count"] == 0
+    assert report["pnl_schema"]["clientPortfolio_ordersForOpen_count"] == 0
+    assert report["pnl_schema"]["clientPortfolio_orders_count"] == 0
+    assert report["pnl_schema"]["clientPortfolio_positions_sample_keys"] == ["amount", "positionId"]
     assert report["portfolio_schema"]["clientPortfolio_positions_count"] == 1
     assert "private-id" not in str(report)
     assert "300.0" not in str(report)

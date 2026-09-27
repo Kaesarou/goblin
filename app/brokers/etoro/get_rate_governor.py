@@ -5,7 +5,6 @@ from collections import deque
 from collections.abc import Callable
 from threading import Lock
 
-
 ETORO_GET_MAX_REQUESTS_PER_WINDOW = 45
 ETORO_GET_RATE_WINDOW_SECONDS = 60.0
 ETORO_GET_429_FALLBACK_SECONDS = 60.0

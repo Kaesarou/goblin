@@ -6,7 +6,6 @@ from app.execution.candidate_economics import EvaluatedTradeCandidate
 from app.instruments.models import EntryDecisionConfig
 from app.market.market_context import ContextAlignment
 
-
 ENTRY_DECISION_MODEL_VERSION = 'entry_router_v6'
 
 

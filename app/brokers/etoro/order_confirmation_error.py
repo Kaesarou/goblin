@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from app.brokers.base import OpenPositionRejectedError
 
-class EtoroOrderRejectedError(RuntimeError):
+
+class EtoroOrderRejectedError(OpenPositionRejectedError):
     """The order lookup explicitly reported a terminal rejected/failed state.
 
     This exception must only be raised after examining the broker's structured

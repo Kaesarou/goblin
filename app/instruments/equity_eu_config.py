@@ -11,7 +11,6 @@ from app.instruments.models import (
 from app.risk.stale_position_guard import StalePositionConfig
 from app.risk.trade_cost_model import TradeCostConfig
 
-
 EU_INTRADAY_FIXED_PROFILE = 'eu_intraday_fixed_v1'
 EU_TREND_BUY_PROFILE_KEY = 'eu_trend_buy_v1'
 

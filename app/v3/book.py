@@ -1,12 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from datetime import datetime
-from typing import Iterable, Mapping
 
 from app.v3.models import BrokerLeg, InventoryState, InventoryStatus, PortfolioState
 from app.v3.persistence import InventoryEvent
-
 
 _CLOSE_TOLERANCE = 1e-9
 
@@ -23,7 +22,7 @@ class InventoryBook:
         self._legacy_inventory_aliases: dict[str, str] = {}
 
     @classmethod
-    def from_events(cls, events: Iterable[InventoryEvent]) -> "InventoryBook":
+    def from_events(cls, events: Iterable[InventoryEvent]) -> InventoryBook:
         book = cls()
         for event in events:
             if event.event_type == "ENTRY_FILLED":
