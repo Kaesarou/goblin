@@ -15,8 +15,15 @@ def quote_snapshot(symbol: str, quote: dict, *, received_at: datetime) -> Market
     ask = float(number(quote.get("ap"), positive=True))
     if ask < bid:
         raise ValueError("Crossed Alpaca quote")
-    return MarketSnapshot(symbol, bid, ask, (bid + ask) / 2, timestamp(quote.get("t")),
-                          received_at=received_at, price_source=PriceSource.BID_ASK_MIDPOINT)
+    return MarketSnapshot(
+        symbol,
+        bid,
+        ask,
+        (bid + ask) / 2,
+        timestamp(quote.get("t")),
+        received_at=received_at,
+        price_source=PriceSource.BID_ASK_MIDPOINT,
+    )
 
 
 class AlpacaRestMarketDataClient:
@@ -28,27 +35,46 @@ class AlpacaRestMarketDataClient:
     def get_market_snapshots(self, symbols: list[str]) -> dict[str, MarketSnapshot]:
         if not symbols:
             return {}
-        payload = self.http.request("GET", "/v2/stocks/quotes/latest", params={
-            "symbols": ",".join(sorted(set(symbols))), "feed": self.feed, "currency": "USD",
-        })
+        payload = self.http.request(
+            "GET",
+            "/v2/stocks/quotes/latest",
+            params={
+                "symbols": ",".join(sorted(set(symbols))),
+                "feed": self.feed,
+                "currency": "USD",
+            },
+        )
         quotes = payload.get("quotes") if isinstance(payload, dict) else None
         if not isinstance(quotes, dict):
             raise ValueError("Missing Alpaca quotes collection")
         now = datetime.now(UTC)
-        return {symbol: quote_snapshot(symbol, quotes[symbol], received_at=now)
-                for symbol in symbols}
+        return {
+            symbol: quote_snapshot(symbol, quotes[symbol], received_at=now) for symbol in symbols
+        }
 
 
 class AlpacaMarketDataFeed(LiveMarketDataFeed):
-    def __init__(self, *, api_key: str, secret_key: str, feed: str = "iex",
-                 trade_stream=None, queue_capacity=4096, connector=None,
-                 global_silence_seconds=15.0) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        secret_key: str,
+        feed: str = "iex",
+        trade_stream=None,
+        queue_capacity=4096,
+        connector=None,
+        global_silence_seconds=15.0,
+    ) -> None:
         self._queue: queue.Queue[MarketDataEvent] = queue.Queue(maxsize=queue_capacity)
         self._last_timestamp: dict[str, datetime] = {}
         self._trade_stream = trade_stream
         self._stream = AlpacaStream(
-            api_key=api_key, secret_key=secret_key, feed=feed, on_message=self._on_quote,
-            connector=connector, silence_seconds=global_silence_seconds,
+            api_key=api_key,
+            secret_key=secret_key,
+            feed=feed,
+            on_message=self._on_quote,
+            connector=connector,
+            silence_seconds=global_silence_seconds,
         )
         self.invalid_quotes = self.ordering_drops = self.queue_overflows = 0
 
@@ -85,10 +111,15 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
         return self._stream.healthy()
 
     def diagnostics(self) -> dict:
-        return {**self._stream.diagnostics(), "mode": "alpaca_websocket",
-                "invalid_quotes": self.invalid_quotes, "ordering_drops": self.ordering_drops,
-                "queue_overflows": self.queue_overflows, "queue_size": self._queue.qsize(),
-                "trade_updates": self._trade_stream.diagnostics() if self._trade_stream else None}
+        return {
+            **self._stream.diagnostics(),
+            "mode": "alpaca_websocket",
+            "invalid_quotes": self.invalid_quotes,
+            "ordering_drops": self.ordering_drops,
+            "queue_overflows": self.queue_overflows,
+            "queue_size": self._queue.qsize(),
+            "trade_updates": self._trade_stream.diagnostics() if self._trade_stream else None,
+        }
 
     def _on_quote(self, message: dict) -> None:
         symbol = message.get("S")
@@ -105,8 +136,13 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
             self.ordering_drops += 1
             return
         self._last_timestamp[symbol] = snapshot.timestamp
-        event = MarketDataEvent(symbol, MarketDataSource.WEBSOCKET, now, snapshot,
-                                connection_id=str(self._stream.connections))
+        event = MarketDataEvent(
+            symbol,
+            MarketDataSource.WEBSOCKET,
+            now,
+            snapshot,
+            connection_id=str(self._stream.connections),
+        )
         try:
             self._queue.put_nowait(event)
         except queue.Full as exc:

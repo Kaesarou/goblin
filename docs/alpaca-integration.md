@@ -35,7 +35,50 @@ Checkpoint 1: HTTP transport, market-data REST fallback and both authenticated
 WebSocket protocols implemented; 16 transport/quote tests pass locally. No
 runtime broker selection is changed by this checkpoint.
 
-Implementation in progress. Required validation includes disconnected streams,
-out-of-order events, partial fills, uncertain submissions, repeated confirmation,
-multiple legs of one symbol, restart recovery and external account activity.
-No credentials or live/paper trading calls are needed for the automated tests.
+Checkpoint 2: paper execution adapter and SQLite order journal implemented.
+Requests are persisted before submission. BUY uses USD notional; SELL uses the
+specific leg's quantity, never an aggregate symbol liquidation. Cumulative fills
+are idempotent across REST/stream duplicates. Account identity is pinned in the
+journal. Conflicting stream economics leave a persistent safety fault rather
+than disappearing on restart. Unknown submissions are looked up by client ID;
+a 404 never authorizes another POST. External pending orders on a closing symbol
+block conflicting SELLs.
+
+The adapter deliberately consumes quote midpoints, with explicit
+`bid_ask_midpoint` provenance and the broker quote timestamp. It does not attach
+an old trade price to a fresh quote, add bracket orders, or change V3 exits.
+This is a new data source, not evidence of equivalent strategy performance.
+
+## Validation and remaining work
+
+Local validation at checkpoint 2: **980 tests passed**, including **48 Alpaca
+tests**. `compileall`, targeted Ruff unused-symbol/import checks and diff
+whitespace checks pass.
+
+Automated tests cover both WebSocket protocols (including binary JSON trade
+updates), authentication/subscription failures, reconnect/resubscribe, ordering,
+queue overflow, HTTP rate limits and no mutation retries, multiple legs of a
+symbol, fractional closes, repeated fills, partial fills followed by cancellation,
+timeout recovery, account changes and external activity. All network calls are
+mocked; no account credentials or real paper/live orders were used.
+
+**This is not yet a runnable Alpaca V3 mode.** The existing eToro/paper factory
+and strategy are unchanged. Required next steps before enabling it:
+
+1. Add validated Alpaca settings and factory selection, US-equity universe/feed
+   configuration, separate persistence paths and accurate manifest metadata.
+   Keep live capital disabled and do not silently replace eToro index benchmarks
+   with ETFs or present legacy eToro cost estimates as Alpaca actual costs.
+2. Connect both stream lifecycles to V3 and test startup, shutdown and REST fallback
+   end to end. Remove the eToro instrument-ID requirement from the generic market
+   data protocol rather than manufacture numeric IDs for Alpaca symbols.
+3. Extend generic V3 close recovery to retain the client ID from an unknown
+   submission. Currently V3 halts on that exception without scheduling an ID
+   lookup. The adapter's recovery tests alone do not cover this runtime gap.
+4. Exercise partial SELL fills/cancellations during V3 quantity reconciliation,
+   including crashes between adapter persistence and V3 events. The existing
+   attribution rules assume the requested reduction; intermediate partial fills
+   must not release a mutation or leave an unexplained quantity reduction.
+5. Review the complete integration and validate a separately authorized Alpaca
+   paper run. Corporate-action reconciliation, operator recovery tooling and live
+   promotion are not implemented by these first two checkpoints.

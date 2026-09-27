@@ -14,8 +14,7 @@ from app.brokers.alpaca.stream import AlpacaStream
 from app.market.models import PriceSource
 
 NOW = datetime(2026, 9, 25, 14, 0, tzinfo=UTC)
-QUOTE = {"T": "q", "S": "AAPL", "bp": 100, "ap": 102,
-         "t": "2026-09-25T14:00:00.123456789Z"}
+QUOTE = {"T": "q", "S": "AAPL", "bp": 100, "ap": 102, "t": "2026-09-25T14:00:00.123456789Z"}
 
 
 def response(status, payload=None, headers=None):
@@ -53,8 +52,13 @@ def test_read_retries_respect_shared_rate_limit_cooldown():
         call_times.append(now[0])
         return next(responses)
 
-    client = AlpacaHttpClient("key", "secret", transport=transport, clock=lambda: now[0],
-                             sleep=lambda seconds: now.__setitem__(0, now[0] + seconds))
+    client = AlpacaHttpClient(
+        "key",
+        "secret",
+        transport=transport,
+        clock=lambda: now[0],
+        sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+    )
     assert client.request("GET", "/v2/account") == {"ok": True}
     assert call_times == [0, 4]
     assert client.rate_limits == 1
@@ -68,8 +72,17 @@ def test_quotes_preserve_broker_time_and_explicit_midpoint_provenance():
     assert snapshot.price_source == PriceSource.BID_ASK_MIDPOINT
 
 
-@pytest.mark.parametrize("patch", [{"bp": 0}, {"ap": "NaN"}, {"ap": 99},
-                                    {"bp": True}, {"t": "2026-09-25T14:00:00"}])
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"bp": 0},
+        {"ap": "NaN"},
+        {"ap": 99},
+        {"bp": True},
+        {"ap": "1e1000"},
+        {"t": "2026-09-25T14:00:00"},
+    ],
+)
 def test_invalid_quotes_are_not_synthesized(patch):
     with pytest.raises(ValueError):
         quote_snapshot("AAPL", {**QUOTE, **patch}, received_at=NOW)
@@ -77,8 +90,15 @@ def test_invalid_quotes_are_not_synthesized(patch):
 
 def test_rest_fallback_pins_same_feed_and_rejects_missing_symbol():
     calls = []
-    http = type("Http", (), {"request": lambda _, *args, **kwargs:
-                            calls.append((args, kwargs)) or {"quotes": {"AAPL": QUOTE}}})()
+    http = type(
+        "Http",
+        (),
+        {
+            "request": lambda _, *args, **kwargs: (
+                calls.append((args, kwargs)) or {"quotes": {"AAPL": QUOTE}}
+            )
+        },
+    )()
     client = AlpacaRestMarketDataClient(http, feed="sip")
     assert client.get_market_snapshots(["AAPL"])["AAPL"].last == 101
     assert calls[0][1]["params"]["feed"] == "sip"
@@ -113,17 +133,26 @@ class Socket:
 @pytest.mark.parametrize("market", [False, True])
 def test_authenticated_subscription_and_binary_frames(market):
     received = []
-    stream = AlpacaStream(api_key="key", secret_key="secret", on_message=received.append,
-                          feed="iex" if market else None)
-    frames = ([
-        [{"T": "success", "msg": "connected"}],
-        [{"T": "success", "msg": "authenticated"}],
-        [{"T": "subscription", "quotes": ["AAPL"]}], [QUOTE],
-    ] if market else [
-        {"stream": "authorization", "data": {"status": "authorized"}},
-        {"stream": "listening", "data": {"streams": ["trade_updates"]}},
-        {"stream": "trade_updates", "data": {"event": "partial_fill", "order": {"id": "o"}}},
-    ])
+    stream = AlpacaStream(
+        api_key="key",
+        secret_key="secret",
+        on_message=received.append,
+        feed="iex" if market else None,
+    )
+    frames = (
+        [
+            [{"T": "success", "msg": "connected"}],
+            [{"T": "success", "msg": "authenticated"}],
+            [{"T": "subscription", "quotes": ["AAPL"]}],
+            [QUOTE],
+        ]
+        if market
+        else [
+            {"stream": "authorization", "data": {"status": "authorized"}},
+            {"stream": "listening", "data": {"streams": ["trade_updates"]}},
+            {"stream": "trade_updates", "data": {"event": "partial_fill", "order": {"id": "o"}}},
+        ]
+    )
     socket = Socket(frames, stream._stop)
     stream._connector = lambda url: socket
     stream._connection(("AAPL",))
@@ -132,13 +161,15 @@ def test_authenticated_subscription_and_binary_frames(market):
     assert socket.sent[1]["action"] == ("subscribe" if market else "listen")
 
 
-@pytest.mark.parametrize("frames", [
-    [[{"T": "error", "code": 409, "msg": "insufficient subscription"}]],
-    [[{"T": "success", "msg": "authenticated"}], [{"T": "subscription", "quotes": []}]],
-])
+@pytest.mark.parametrize(
+    "frames",
+    [
+        [[{"T": "error", "code": 409, "msg": "insufficient subscription"}]],
+        [[{"T": "success", "msg": "authenticated"}], [{"T": "subscription", "quotes": []}]],
+    ],
+)
 def test_stream_denied_or_incomplete_subscription_fails_closed(frames):
-    stream = AlpacaStream(api_key="key", secret_key="secret", on_message=lambda _: None,
-                          feed="iex")
+    stream = AlpacaStream(api_key="key", secret_key="secret", on_message=lambda _: None, feed="iex")
     stream._connector = lambda url: Socket(frames, stream._stop)
     with pytest.raises(PermissionError):
         stream._connection(("AAPL",))
@@ -156,3 +187,60 @@ def test_feed_drops_out_of_order_quotes_and_fails_on_queue_overflow():
         feed._on_quote({**QUOTE, "t": "2026-09-25T14:00:01Z"})
     assert feed.next_event(0) is None
     assert feed.queue_overflows == 1
+
+
+def test_stream_reconnects_with_fresh_auth_and_subscription(monkeypatch):
+    delivered = []
+
+    def callback(message):
+        delivered.append(message)
+        if len(delivered) == 1:
+            raise ConnectionError("disconnected")
+
+    stream = AlpacaStream(api_key="key", secret_key="secret", on_message=callback, feed="iex")
+    frames = [
+        [{"T": "success", "msg": "authenticated"}],
+        [{"T": "subscription", "quotes": ["AAPL"]}],
+        [QUOTE],
+    ]
+    sockets = [Socket(frames, stream._stop), Socket(frames, stream._stop)]
+    connections = iter(sockets)
+    stream._connector = lambda url: next(connections)
+    monkeypatch.setattr(stream._stop, "wait", lambda _: stream._stop.is_set())
+    stream.update_symbols(["AAPL"])
+    stream._run()
+    assert stream.connections == 2
+    assert len(delivered) == 2
+    assert all(
+        [message["action"] for message in socket.sent] == ["auth", "subscribe"]
+        for socket in sockets
+    )
+    assert not stream.healthy()
+
+
+def test_subscription_change_waits_for_acknowledgement():
+    delivered = []
+
+    def callback(message):
+        delivered.append(message["S"])
+        if len(delivered) == 1:
+            stream.update_symbols(["MSFT"])
+
+    stream = AlpacaStream(api_key="key", secret_key="secret", on_message=callback, feed="iex")
+    sockets = [
+        Socket(
+            [
+                [{"T": "success", "msg": "authenticated"}],
+                [{"T": "subscription", "quotes": [symbol]}],
+                [{**QUOTE, "S": symbol}],
+            ],
+            stream._stop,
+        )
+        for symbol in ("AAPL", "MSFT")
+    ]
+    connections = iter(sockets)
+    stream._connector = lambda url: next(connections)
+    stream.update_symbols(["AAPL"])
+    stream._run()
+    assert delivered == ["AAPL", "MSFT"]
+    assert sockets[1].sent[-1] == {"action": "subscribe", "quotes": ["MSFT"]}

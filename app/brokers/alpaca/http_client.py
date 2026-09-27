@@ -13,8 +13,16 @@ DATA_API_URL = "https://data.alpaca.markets"
 class AlpacaHttpClient:
     """Bounded reads and single-shot mutations, with independent API budgets."""
 
-    def __init__(self, api_key: str, secret_key: str, *, data: bool = False,
-                 transport=None, clock=time.monotonic, sleep=time.sleep) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        secret_key: str,
+        *,
+        data: bool = False,
+        transport=None,
+        clock=time.monotonic,
+        sleep=time.sleep,
+    ) -> None:
         if not api_key.strip() or not secret_key.strip():
             raise ValueError("Alpaca API key and secret are required")
         self.base_url = DATA_API_URL if data else PAPER_API_URL
@@ -35,13 +43,18 @@ class AlpacaHttpClient:
             self._acquire()
             try:
                 response = self._transport(
-                    method, self.base_url + path, headers=self._headers,
-                    params=params, json=json, timeout=(5, 10), allow_redirects=False,
+                    method,
+                    self.base_url + path,
+                    headers=self._headers,
+                    params=params,
+                    json=json,
+                    timeout=(5, 10),
+                    allow_redirects=False,
                 )
             except (requests.ConnectionError, requests.Timeout):
                 if attempt + 1 == attempts:
                     raise
-                self._sleep(2 ** attempt)
+                self._sleep(2**attempt)
                 continue
             if response.status_code == 429:
                 self.rate_limits += 1
@@ -54,7 +67,7 @@ class AlpacaHttpClient:
                 with self._lock:
                     self._cooldown_until = max(self._cooldown_until, self._clock() + delay)
             if response.status_code in {429, 500, 502, 503, 504} and attempt + 1 < attempts:
-                self._sleep(2 ** attempt)
+                self._sleep(2**attempt)
                 continue
             response.raise_for_status()
             if not 200 <= response.status_code < 300:

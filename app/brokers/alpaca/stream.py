@@ -8,19 +8,31 @@ import time
 def _connect(url):
     from websockets.sync.client import connect
 
-    return connect(url, open_timeout=10, close_timeout=2, ping_interval=10,
-                   ping_timeout=10, max_queue=1024)
+    return connect(
+        url, open_timeout=10, close_timeout=2, ping_interval=10, ping_timeout=10, max_queue=1024
+    )
 
 
 class AlpacaStream:
     """Reconnectable JSON stream; trading also uses binary JSON frames."""
 
-    def __init__(self, *, api_key: str, secret_key: str, on_message,
-                 feed: str | None = None, connector=None, silence_seconds=15.0) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        secret_key: str,
+        on_message,
+        feed: str | None = None,
+        connector=None,
+        silence_seconds=15.0,
+    ) -> None:
         if feed not in {None, "iex", "sip"}:
             raise ValueError("Only real-time IEX and SIP feeds are supported")
-        self.url = (f"wss://stream.data.alpaca.markets/v2/{feed}" if feed
-                    else "wss://paper-api.alpaca.markets/stream")
+        self.url = (
+            f"wss://stream.data.alpaca.markets/v2/{feed}"
+            if feed
+            else "wss://paper-api.alpaca.markets/stream"
+        )
         self._auth = {"action": "auth", "key": api_key, "secret": secret_key}
         self._market = feed is not None
         self._callback = on_message
@@ -58,18 +70,25 @@ class AlpacaStream:
 
     def check_error(self) -> None:
         if self._fatal is not None:
-            raise RuntimeError("Alpaca stream failed; check credentials/feed entitlement") from self._fatal
+            raise RuntimeError(
+                "Alpaca stream failed; check credentials/feed entitlement"
+            ) from self._fatal
 
     def healthy(self) -> bool:
-        return self._healthy and (not self._market or
-                                 time.monotonic() - self._last_data < self._silence_seconds)
+        return self._healthy and (
+            not self._market or time.monotonic() - self._last_data < self._silence_seconds
+        )
 
     def subscribed_symbols(self) -> tuple[str, ...]:
         return self._applied if self._healthy else ()
 
     def diagnostics(self) -> dict:
-        return {"healthy": self.healthy(), "connections": self.connections,
-                "last_error": self._last_error, "fatal": self._fatal is not None}
+        return {
+            "healthy": self.healthy(),
+            "connections": self.connections,
+            "last_error": self._last_error,
+            "fatal": self._fatal is not None,
+        }
 
     def _run(self) -> None:
         delay = 1.0
@@ -121,21 +140,26 @@ class AlpacaStream:
                         if message.get("code") in {400, 401, 402, 403, 405, 409}:
                             raise PermissionError("Alpaca denied authentication or subscription")
                         raise RuntimeError("Alpaca stream error")
-                    auth_ok = (kind == "success" and message.get("msg") == "authenticated"
-                               if self._market else kind == "authorization"
-                               and data.get("status") == "authorized")
+                    auth_ok = (
+                        kind == "success" and message.get("msg") == "authenticated"
+                        if self._market
+                        else kind == "authorization" and data.get("status") == "authorized"
+                    )
                     if kind == "authorization" and data.get("status") != "authorized":
                         raise PermissionError("Alpaca trading stream authorization failed")
                     if auth_ok and not authenticated:
                         authenticated = True
-                        subscription = ({"action": "subscribe", "quotes": list(symbols)}
-                                        if self._market else {"action": "listen", "data": {
-                                            "streams": ["trade_updates"]}})
+                        subscription = (
+                            {"action": "subscribe", "quotes": list(symbols)}
+                            if self._market
+                            else {"action": "listen", "data": {"streams": ["trade_updates"]}}
+                        )
                         websocket.send(json.dumps(subscription))
                     elif kind in {"subscription", "listening"}:
                         expected = set(symbols) if self._market else {"trade_updates"}
-                        actual = set(message.get("quotes", []) if self._market
-                                     else data.get("streams", []))
+                        actual = set(
+                            message.get("quotes", []) if self._market else data.get("streams", [])
+                        )
                         if not authenticated or actual != expected:
                             raise PermissionError("Alpaca subscription incomplete")
                         self._healthy = True
