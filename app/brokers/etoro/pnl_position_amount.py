@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import math
 
-from app.brokers.etoro.portfolio_position_parser import extract_position_id
-
 
 def position_amount_usd(payload: dict, position_id: str) -> float | None:
     """Return one proven P&L position amount, None if the position is absent.
@@ -28,9 +26,10 @@ def position_amount_usd(payload: dict, position_id: str) -> float | None:
     positions = client_portfolio.get("positions")
     if not isinstance(positions, list) or not all(isinstance(p, dict) for p in positions):
         raise ValueError("Invalid eToro P&L positions collection")
+    # P&L uses positionId; /portfolio uses the distinct positionID contract.
     matches = [
         p for p in positions
-        if extract_position_id(p) == str(position_id)
+        if p.get("positionId") is not None and str(p["positionId"]) == str(position_id)
     ]
     if len(matches) > 1:
         raise ValueError(f"Duplicate eToro P&L position identity: {position_id}")

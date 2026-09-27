@@ -50,7 +50,8 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
    `openingData.avgPrice`/`units`, `orderForClose.positionID`/`statusID`,
    `clientPortfolio.positions[].positionID`/`units`, aggregate
    `accountTotals.accountTotalValue`, instrument `items[].internalInstrumentId`,
-   REST rates `instrumentID`/`bid`/`ask`/`lastExecution`, P&L root `ordersForOpen`/`orders`,
+   REST rates `instrumentID`/`bid`/`ask`/`lastExecution`, P&L
+   `clientPortfolio.ordersForOpen`/`orders` and `positions[].positionId`,
    and the canonical WebSocket `Bid`/`Ask`/`LastExecution`/`Date`/
    `PriceRateID` fields. Unused generic scalar/string mapper modules and their
    compatibility tests were removed. Validation: the full 907-test suite
@@ -155,6 +156,31 @@ Baseline: `a3dac175bfc5171cde621a3a914d05b48f4aa0df` (1,026 tests passing).
     must not be reused here. The corrected existing fixtures fail before the
     fix and pass afterward, including a last trade distinct from the midpoint
     and explicit price provenance. Other missing-field checks remain intact.
+28. Correct pending-order preflight to read the P&L `clientPortfolio` envelope.
+    Update the startup, observation-only and manual-close rearm fixtures to
+    match that endpoint. Missing envelopes, missing collections, null arrays
+    and malformed items still fail closed; a pending order still blocks BUYs.
+29. Keep P&L identity parsing separate from portfolio identity parsing:
+    `clientPortfolio.positions[].positionId` versus `positionID`. Correct the
+    notional-reconciliation and read-only diagnostic fixtures. The suspect
+    1-USD order value is again cross-checked against the exact P&L position;
+    missing, ambiguous or invalid economics never hide a confirmed fill.
+
+## Endpoint contract evidence
+
+Final review on 2026-09-27 found that passing fixtures had repeated three
+incorrect schema assumptions. The affected existing tests now reproduce the
+failures before the fixes and pass afterward. Field names are endpoint-specific:
+
+| Source | Container and fields |
+| --- | --- |
+| [REST rates](https://api-portal.etoro.com/api-reference/market-data/get-instrument-market-rates) | `rates[].instrumentID`, `bid`, `ask`, `lastExecution` |
+| [WebSocket rates](https://api-portal.etoro.com/core/websocket/topics) | `Bid`, `Ask`, `LastExecution`, `Date`, `PriceRateID` |
+| [P&L](https://api-portal.etoro.com/api-reference/trading--demo/get-account-pnl-and-portfolio-details) | `clientPortfolio.ordersForOpen`, `clientPortfolio.orders`, `clientPortfolio.positions[].positionId` / `amount` |
+| [Portfolio](https://api-portal.etoro.com/api-reference/trading--demo/get-demo-portfolio-breakdown) | `clientPortfolio.positions[].positionID` / `units` |
+
+Tests use synthetic values with these documented shapes. They make no live
+broker calls and do not substitute the P&L identity contract for `/portfolio`.
 
 ## Retirement evidence
 
@@ -176,6 +202,10 @@ removed. Removed code and tests remain recoverable from the baseline commit
 above.
 
 ## Validation
+
+After the final contract corrections: **932 tests pass**, including the
+corrected REST/P&L fixtures, startup/rearm gates and notional reconciliation.
+`compileall`, Ruff unused-symbol checks and `git diff --check` also pass.
 
 Run `.venv/bin/python -m pytest -q` after each checkpoint. New broker boundaries
 need contract tests; payload parsing must retain fail-closed behavior. The test

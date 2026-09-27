@@ -26,7 +26,7 @@ class Broker:
     def _get(self, path):
         assert path == "/api/v1/trading/info/demo/pnl"
         self.pending_current = next(self.pending, [])
-        return {"ordersForOpen": self.pending_current, "orders": []}
+        return {"clientPortfolio": {"ordersForOpen": self.pending_current, "orders": []}}
 
 
 def _open_position():
