@@ -42,6 +42,9 @@ class CachedBrokerClient(BrokerClient):
         # Startup safety must never depend on the equity/position TTL caches.
         return self.delegate.get_account_preflight()
 
+    def get_account_identity(self) -> str | None:
+        return self.delegate.get_account_identity()
+
     def get_account_equity(self) -> float:
         now = self._now()
         if (

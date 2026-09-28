@@ -96,6 +96,8 @@ def main() -> int:
     demo_close_watcher = (
         os.environ.get("GOBLIN_DEMO_AUTO_REARM_AFTER_MANUAL_CLOSE") == "1"
         and os.environ.get("GOBLIN_OBSERVATION_ONLY") == "0"
+        and os.environ.get("BROKER", "etoro_demo").strip().lower().replace("-", "_")
+        in {"etoro_demo", "etorodemo"}
     )
     child_module = (
         "scripts.demo_rearm_after_manual_closes" if demo_close_watcher

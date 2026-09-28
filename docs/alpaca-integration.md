@@ -97,6 +97,24 @@ other unresolved BUYs and independent safety halts. Close confirmations keep
 priority, and order lookups use the query lane so they do not block reduce-only
 dispatch.
 
+Checkpoint 8: the application bootstrap locks its data directory for the entire
+run and persists a broker/database namespace in both a directory marker and
+SQLite. Alpaca requires a fresh dedicated directory; all of its configured
+output/cache paths must remain inside that directory without aliasing each
+other. It pins the authoritative `/v2/account.id` in the V3 SQLite before loading
+inventories, independently of the adapter journal. Changing broker/environment
+or account fails closed. Existing unlabelled eToro data is preserved and bound
+to its selected broker/environment; eToro account-ID pinning is not implemented
+by this checkpoint. Old binaries do not honor this new lock: separate Docker
+bind mounts remain mandatory. The restart guard no longer routes Alpaca through
+the eToro-only manual-close watcher.
+
+Checkpoint 8 validation: **1129 tests passed**. New cases cover concurrent
+separate deployments, duplicate processes, broker/account mismatches, copied
+databases, legacy eToro preservation, symlink/path escapes, output aliases,
+corrupt namespace markers and restart-wrapper routing. Alpaca bootstrap remains
+gated pending the universe and full-runtime checks below.
+
 ## Environment configuration
 
 ```dotenv

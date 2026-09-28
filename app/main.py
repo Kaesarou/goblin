@@ -23,6 +23,7 @@ from app.runtime.runtime_policy import (
     JOURNAL_PARTIAL_SUMMARY_INTERVAL_MINUTES,
     JOURNAL_WRITE_PARTIAL_SUMMARY,
 )
+from app.runtime.storage_scope import RuntimeStorageScope
 from app.runtime.trading_session_window import trading_session_service_from_settings
 from app.utils.logging import configure_logging
 from app.v3.config import RecoverabilityConfig, etoro5_research_config
@@ -230,11 +231,16 @@ def _build_research_pipeline(
 
 
 def main() -> None:
+    settings = get_settings()
+    _assert_v3_execution_mode(settings.broker)
+    with RuntimeStorageScope(settings) as storage:
+        _run_main(settings, storage)
+
+
+def _run_main(settings: Settings, storage: RuntimeStorageScope) -> None:
     started_at = datetime.now(UTC)
     run_id = build_run_id(started_at)
     run_status = "running"
-    settings = get_settings()
-    _assert_v3_execution_mode(settings.broker)
 
     run_paths = build_run_journal_paths(
         journal_path=settings.journal_path,
@@ -352,6 +358,11 @@ def main() -> None:
             else research_pipeline.observe_websocket_payload
         ),
     )
+    account_id = clients.execution_broker.get_account_identity()
+    if settings.broker.startswith("alpaca_") and account_id is None:
+        raise RuntimeError("Alpaca startup requires an authoritative account identity")
+    if account_id is not None:
+        storage.bind_account(account_id)
     event_store = InventoryEventStore(
         settings.position_store_path,
         event_sink=_inventory_event_sink(trade_journal),

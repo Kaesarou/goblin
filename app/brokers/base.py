@@ -148,6 +148,10 @@ class BrokerClient(ABC):
         """
         return None
 
+    def get_account_identity(self) -> str | None:
+        """Read a stable broker account ID without caching credentials as identity."""
+        return None
+
     @abstractmethod
     def get_account_equity(self) -> float:
         raise NotImplementedError

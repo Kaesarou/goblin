@@ -67,6 +67,9 @@ class AlpacaBrokerClient(BrokerClient):
     def get_account_equity(self) -> float:
         return float(number(self._account().get("equity"), positive=True))
 
+    def get_account_identity(self) -> str:
+        return text(self._account().get("id"))
+
     def _assert_mutation_allowed(self) -> None:
         self.store.check_health()
         if self._stream_error:
