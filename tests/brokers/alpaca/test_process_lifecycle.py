@@ -2,7 +2,7 @@
 
 The parent owns the mock broker's orders, so killing Goblin cannot erase broker
 evidence. Children use main(), the real continuous run loop, threads and SQLite.
-The demo gate is bypassed by the test harness, never in application code.
+Broker selection and execution-mode guards are not bypassed.
 """
 
 import json

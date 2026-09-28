@@ -137,12 +137,11 @@ def test_mixed_http_and_journal_environments_are_rejected(tmp_path):
         )
 
 
-def test_v3_live_guard_and_temporary_demo_integration_guard_are_explicit():
+def test_v3_allows_experimental_demo_but_keeps_both_live_guards():
     for mode in ("alpaca_live", "etoro_live"):
         with pytest.raises(RuntimeError, match="not prospectively validated"):
             _assert_v3_execution_mode(mode)
-    with pytest.raises(RuntimeError, match="universe and full-runtime"):
-        _assert_v3_execution_mode("alpaca_demo")
+    _assert_v3_execution_mode("alpaca_demo")
 
 
 def test_instrument_cache_is_used_after_restart_but_permissions_are_fresh(tmp_path):

@@ -98,9 +98,15 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
         if self._trade_stream:
             self._trade_stream.check_error()
         try:
-            return self._queue.get(timeout=timeout_seconds)
+            event = self._queue.get(timeout=timeout_seconds)
         except queue.Empty:
             return None
+        if event.connection_id != str(self._stream.connections):
+            # An old queued quote must not regain entry authority merely
+            # because a replacement socket has authenticated successfully.
+            self.ordering_drops += 1
+            return None
+        return event
 
     def stop(self) -> None:
         self._stream.stop()

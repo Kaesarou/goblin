@@ -149,7 +149,7 @@ def build_v3_run_manifest(
                 "etoro_live_allowed": False,
                 "paper_allowed": True,
                 "etoro_demo_allowed": True,
-                "alpaca_demo_allowed": False,
+                "alpaca_demo_allowed": True,
                 "alpaca_live_allowed": False,
             },
             "hedge_execution_enabled": False,

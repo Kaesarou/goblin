@@ -1124,9 +1124,14 @@ class GoblinV3Runtime:
             and getattr(session, "session_active", False)
             and getattr(session, "new_entries_allowed", False)
             and self._current_run_equity is not None
+            and self._transport_entry_allowed()
             and self.coordinator.entry_allowed(symbol)
             and self.executor.new_risk_allowed
         )
+
+    def _transport_entry_allowed(self) -> bool:
+        return (not self.live_market_data.requires_websocket_health
+                or self.live_market_data.connection_healthy())
 
     def _symbol_risk_authority(self, symbol: str) -> dict[str, object]:
         session = self.session_decisions.get(symbol)
@@ -1135,6 +1140,7 @@ class GoblinV3Runtime:
             "session_active": bool(session and session.session_active),
             "session_new_entries_allowed": bool(session and session.new_entries_allowed),
             "market_data_entry_allowed": bool(self.coordinator.entry_allowed(symbol)),
+            "market_data_transport_healthy": self._transport_entry_allowed(),
             "current_run_equity_available": self._current_run_equity is not None,
             "executor_new_risk_allowed": self.executor.new_risk_allowed,
         }

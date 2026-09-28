@@ -227,25 +227,29 @@ Queued quotes cannot dispatch orders after a stop request. Three restart-guard
 regressions cover signal forwarding during child creation, during wait, and a
 child-exit race; previous signal handlers are restored on wrapper exit.
 
-**Alpaca configuration and factory selection are implemented, but V3 execution
-remains gated.** `alpaca_demo` fails explicitly at bootstrap pending final runtime
-review below; integration tests bypass only
-that gate. `alpaca_live` uses the same prospective live
-capital refusal as `etoro_live`. No live authority is granted by configuring it.
-The strategy rules and existing broker quantity-attribution rules are unchanged.
-Remaining work:
+Checkpoint 11 opens **experimental `alpaca_demo` bootstrap** after the assembled
+runtime and process-lifecycle checks. The integration/process harness no longer
+bypasses the broker-mode guard. Review also added an immediate transport-health
+entry check and rejection of queued quotes from a previous connection, so a new
+subscription cannot restore authority to an old buffered price. Strategy rules,
+quantity attribution and eToro execution paths are retained. **1156 tests pass**.
+Account/universe/feed validation failures now finalize their manifests as failed
+instead of leaving a run labelled running before the event loop has started.
 
-1. Review the assembled integration before opening demo bootstrap.
-   Keep live capital disabled; simulated transports do not prove account/feed
-   entitlement or real network behavior.
-2. Review the operator's redacted `.env`, selected US trading universe and explicit
+`alpaca_live` retains the same prospective live-capital refusal as `etoro_live`.
+Configuration alone grants no live authority. The conservative operator procedure
+for missing/contradictory evidence is in [alpaca-operations.md](alpaca-operations.md).
+These tests use simulated transports: they do not prove account/feed entitlement,
+actual network behavior or Docker deployment behavior.
+
+Remaining deployment validation:
+
+1. Review the operator's redacted `.env`, selected US trading universe and explicit
    benchmarks. Run eToro and Alpaca in separate containers with distinct writable
    data/log/cache mounts; no repository Compose change is required or made here.
-3. Define operator recovery for permanently missing evidence. A BUY or close
-   started before a crash but without an adapter reservation remains locked;
-   a reserved order returning 404 remains pollable, but absence never proves rejection.
-   These crash boundaries are tested and never cause a second POST. Transient
-   REST/stream position races also fail closed rather than guess attribution.
-4. Review the complete integration and validate a separately authorized Alpaca
-   paper run. Corporate-action reconciliation, operator recovery tooling and live
-   promotion are not implemented by these checkpoints.
+2. Validate a separately authorized Alpaca paper run on the VPS, including stream
+   availability, shutdown/restart and the first confirmed order/reconciliation.
+
+Automatic corporate-action reconciliation, force-reconciliation operator tooling
+and live promotion are outside this experimental paper integration. Missing
+evidence remains blocked and never authorizes resubmission or fabricated fills.

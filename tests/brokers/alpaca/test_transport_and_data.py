@@ -206,6 +206,21 @@ def test_feed_drops_out_of_order_quotes_and_fails_on_queue_overflow():
     assert feed.queue_overflows == 1
 
 
+def test_reconnect_does_not_restore_authority_to_quotes_queued_by_previous_socket():
+    feed = AlpacaMarketDataFeed(api_key="key", secret_key="secret")
+    feed._stream._healthy = True
+    feed._stream._applied = ("AAPL",)
+    feed._stream.connections = 1
+    feed._on_quote(QUOTE)
+    feed._stream.connections = 2
+    feed._on_quote({**QUOTE, "t": "2026-09-25T14:00:01Z"})
+    assert feed.next_event(0) is None  # old connection, even though still buffered
+    fresh = feed.next_event(0)
+    assert fresh.connection_id == "2"
+    assert fresh.snapshot.timestamp.second == 1
+    assert feed.ordering_drops == 1
+
+
 def test_stream_reconnects_with_fresh_auth_and_subscription(monkeypatch):
     delivered = []
 

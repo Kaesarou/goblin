@@ -161,8 +161,6 @@ def test_main_acquires_scope_before_journals_or_clients(tmp_path, monkeypatch):
 
     config = storage_settings(tmp_path)
     monkeypatch.setattr(main, "get_settings", lambda: config)
-    # Exercise the future bootstrap wiring, without granting demo authority.
-    monkeypatch.setattr(main, "_assert_v3_execution_mode", lambda broker: None)
     entered = []
     def run(settings, scope):
         assert identity(settings) == ("alpaca_demo", None)

@@ -125,14 +125,9 @@ def _assert_v3_execution_mode(broker: str) -> None:
     if normalized in {"etoro_live", "alpaca_live"}:
         raise RuntimeError(
             "Goblin V3 is not prospectively validated for live capital. "
-            "Use paper or etoro_demo until an explicit promotion decision."
+            "Use paper, etoro_demo or alpaca_demo until an explicit promotion decision."
         )
-    if normalized == "alpaca_demo":
-        raise RuntimeError(
-            "Alpaca is configured but V3 universe and full-runtime integration "
-            "is not validated yet; demo execution remains disabled."
-        )
-    if normalized not in {"paper", "etoro_demo"}:
+    if normalized not in {"paper", "etoro_demo", "alpaca_demo"}:
         raise RuntimeError(f"Unsupported V3 broker mode: {broker}")
 
 
@@ -357,62 +352,69 @@ def _run_main(settings: Settings, storage: RuntimeStorageScope) -> None:
     write_run_manifest(run_paths.manifest, manifest)
     write_run_manifest(settings.run_manifest_path, manifest)
 
-    clients = build_runtime_clients(
-        settings,
-        websocket_payload_observer=(
-            None
-            if research_pipeline is None
-            else research_pipeline.observe_websocket_payload
-        ),
-    )
-    account_id = clients.execution_broker.get_account_identity()
-    if settings.broker.startswith("alpaca_") and account_id is None:
-        raise RuntimeError("Alpaca startup requires an authoritative account identity")
-    if account_id is not None:
-        storage.bind_account(account_id)
-    if settings.broker.startswith("alpaca_"):
-        benchmarks = list(settings.benchmark_symbols_by_asset_class()[AssetClass.EQUITY_US])
-        clients.execution_broker.validate_universe(symbols, context_symbols=benchmarks)
-        # Check selected-feed access/completeness without seeding causal candles
-        # from a REST snapshot. Only the live runtime may advance feature state.
-        clients.rest_market_data.get_market_snapshots(list(dict.fromkeys([*symbols, *benchmarks])))
-        manifest["broker"]["account_id"] = account_id
-        manifest["broker"]["universe_preflight"] = "passed"
-        write_run_manifest(run_paths.manifest, manifest)
-        write_run_manifest(settings.run_manifest_path, manifest)
-    event_store = InventoryEventStore(
-        settings.position_store_path,
-        event_sink=_inventory_event_sink(trade_journal),
-    )
-    state_store = V3RuntimeStateStore(settings.position_store_path)
-    asset_class_by_symbol = {
-        symbol: instrument_registry.resolve(symbol).asset_class
-        for symbol in symbols
-    }
-    runtime = GoblinV3Runtime(
-        settings=settings,
-        symbols=symbols,
-        run_id=run_id,
-        instrument_registry=instrument_registry,
-        execution_broker=clients.execution_broker,
-        rest_market_data=clients.rest_market_data,
-        live_market_data=clients.live_market_data,
-        candle_builders=build_candle_builders(symbols),
-        trading_session_service=trading_session_service_from_settings(settings),
-        market_context_service=market_context_service,
-        multi_timeframe_service=multi_timeframe_service,
-        market_data_validator=MarketDataValidator(),
-        planner=planner,
-        config=config,
-        feature_engine=OnlineFeatureEngine(asset_class_by_symbol),
-        event_store=event_store,
-        runtime_state_store=state_store,
-        trade_journal=trade_journal,
-        market_journal=market_journal,
-        candle_journal=candle_journal,
-        heartbeat=RuntimeHeartbeat(settings.runtime_heartbeat_minutes),
-        research_pipeline=research_pipeline,
-    )
+    try:
+        clients = build_runtime_clients(
+            settings,
+            websocket_payload_observer=(
+                None
+                if research_pipeline is None
+                else research_pipeline.observe_websocket_payload
+            ),
+        )
+        account_id = clients.execution_broker.get_account_identity()
+        if settings.broker.startswith("alpaca_") and account_id is None:
+            raise RuntimeError("Alpaca startup requires an authoritative account identity")
+        if account_id is not None:
+            storage.bind_account(account_id)
+        if settings.broker.startswith("alpaca_"):
+            benchmarks = list(settings.benchmark_symbols_by_asset_class()[AssetClass.EQUITY_US])
+            clients.execution_broker.validate_universe(symbols, context_symbols=benchmarks)
+            # Check selected-feed access/completeness without seeding causal candles
+            # from a REST snapshot. Only the live runtime may advance feature state.
+            clients.rest_market_data.get_market_snapshots(list(dict.fromkeys([*symbols, *benchmarks])))
+            manifest["broker"]["account_id"] = account_id
+            manifest["broker"]["universe_preflight"] = "passed"
+            write_run_manifest(run_paths.manifest, manifest)
+            write_run_manifest(settings.run_manifest_path, manifest)
+        event_store = InventoryEventStore(
+            settings.position_store_path,
+            event_sink=_inventory_event_sink(trade_journal),
+        )
+        state_store = V3RuntimeStateStore(settings.position_store_path)
+        asset_class_by_symbol = {
+            symbol: instrument_registry.resolve(symbol).asset_class
+            for symbol in symbols
+        }
+        runtime = GoblinV3Runtime(
+            settings=settings,
+            symbols=symbols,
+            run_id=run_id,
+            instrument_registry=instrument_registry,
+            execution_broker=clients.execution_broker,
+            rest_market_data=clients.rest_market_data,
+            live_market_data=clients.live_market_data,
+            candle_builders=build_candle_builders(symbols),
+            trading_session_service=trading_session_service_from_settings(settings),
+            market_context_service=market_context_service,
+            multi_timeframe_service=multi_timeframe_service,
+            market_data_validator=MarketDataValidator(),
+            planner=planner,
+            config=config,
+            feature_engine=OnlineFeatureEngine(asset_class_by_symbol),
+            event_store=event_store,
+            runtime_state_store=state_store,
+            trade_journal=trade_journal,
+            market_journal=market_journal,
+            candle_journal=candle_journal,
+            heartbeat=RuntimeHeartbeat(settings.runtime_heartbeat_minutes),
+            research_pipeline=research_pipeline,
+        )
+    except Exception:
+        # Failed account/universe/feed validation happens before runtime.run().
+        # Do not leave an apparently running manifest for a rejected bootstrap.
+        for manifest_path in (run_paths.manifest, settings.run_manifest_path):
+            finalize_run_manifest(manifest_path, status="failed")
+        raise
 
     trade_journal.write(
         "runtime_started",

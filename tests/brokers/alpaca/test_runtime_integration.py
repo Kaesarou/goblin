@@ -2,7 +2,7 @@
 
 Finite scenarios drive the same runtime event/maintenance methods as run(). The
 entry/exit planner, candle builder, feature state, journals and task lanes are
-not replaced. Demo bootstrap authority deliberately remains a separate gate.
+not replaced. Broker selection and bootstrap guards are exercised unchanged.
 """
 
 import json
@@ -102,7 +102,6 @@ class Harness:
                 return harness.now if tz is not None else harness.now.replace(tzinfo=None)
 
         monkeypatch.setattr(main, "get_settings", lambda: self.settings)
-        monkeypatch.setattr(main, "_assert_v3_execution_mode", lambda broker: None)
         monkeypatch.setattr(main, "datetime", Clock)
         monkeypatch.setattr("app.v3.runtime.datetime", Clock)
         monkeypatch.setattr("app.market_data.coordinator.datetime", Clock)
@@ -201,6 +200,8 @@ def test_factory_runtime_prices_to_candles_to_real_planner_buy_and_restart(tmp_p
     assert manifest["broker"]["account_id"] == "paper-account"
     assert manifest["broker"]["data_feed"] == feed
     assert manifest["broker"]["universe_preflight"] == "passed"
+    assert manifest["risk"]["live_authority"]["alpaca_demo_allowed"] is True
+    assert manifest["risk"]["live_authority"]["alpaca_live_allowed"] is False
     assert manifest["runtime"]["account_equity"]["field"] == "equity"
     assert manifest["runtime"]["broker_execution"]["partial_close_request_field"] == "qty"
     assert "etoro_get_rate_governor" not in manifest["runtime"]["broker_execution"]
@@ -230,6 +231,7 @@ def test_ineligible_trading_asset_prevents_streams_and_orders(tmp_path, monkeypa
         harness.run(lambda runtime: pytest.fail("Invalid universe started"))
     assert not harness.api.submissions
     assert not harness.sockets
+    assert json.loads(Path(harness.settings.run_manifest_path).read_text())["status"] == "failed"
 
 
 def test_unknown_etoro_benchmark_is_not_silently_replaced(tmp_path, monkeypatch):
@@ -239,6 +241,7 @@ def test_unknown_etoro_benchmark_is_not_silently_replaced(tmp_path, monkeypatch)
         harness.run(lambda runtime: pytest.fail("Unknown benchmark started"))
     assert any(path == "/v2/assets/SPX500" for _, path, _ in harness.calls)
     assert not harness.api.submissions and not harness.sockets
+    assert json.loads(Path(harness.settings.run_manifest_path).read_text())["status"] == "failed"
 
 
 @pytest.mark.parametrize("missing", [False, True])
@@ -251,6 +254,7 @@ def test_missing_quote_or_feed_entitlement_prevents_runtime_start(tmp_path, monk
     with pytest.raises(KeyError if missing else requests.HTTPError):
         harness.run(lambda runtime: pytest.fail("Unusable data feed started"))
     assert not harness.api.submissions and not harness.sockets
+    assert json.loads(Path(harness.settings.run_manifest_path).read_text())["status"] == "failed"
 
 
 def test_benchmark_is_context_only_and_does_not_require_fractional_order_permission(tmp_path, monkeypatch):
@@ -317,6 +321,8 @@ def test_quote_disconnect_rest_fallback_is_reduce_only_then_resubscribes(tmp_pat
         socket = [s for s in harness.sockets if s.market][-1]
         socket.frames.put(ConnectionError("Simulated disconnection"))
         eventually(lambda: not runtime.live_market_data.connection_healthy())
+        # Block immediately, even before the per-symbol silence timeout.
+        assert not runtime._operational_entry_allowed("AAPL")
         harness.now += timedelta(seconds=20)
         assert not runtime._operational_entry_allowed("AAPL")
         candles = runtime.metrics["candles_closed"]
