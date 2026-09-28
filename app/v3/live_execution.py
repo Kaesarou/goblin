@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 import requests
@@ -30,8 +30,17 @@ from app.v3.close_recovery import (
 from app.v3.execution import ProRataPartialCloseAllocator, assess_inventory_close
 from app.v3.external_account_gate import gate_active, record_external_broker_activity
 from app.v3.models import IntentPurpose, OrderIntent
+from app.v3.open_recovery import (
+    _OpenContext,
+    _PendingOpenConfirmation,
+    open_order_matches_request,
+    partial_open_event_valid,
+    restored_open_context,
+    terminal_open_evidence_valid,
+    terminal_partial_open_valid,
+)
 from app.v3.persistence import InventoryEvent, InventoryEventStore
-from app.v3.state_store import CloseRetryState, V3RuntimeStateStore
+from app.v3.state_store import CloseRetryState, OpenRetryState, V3RuntimeStateStore
 
 POINT_M_DUST_NOTIONAL_USD = 10.0
 CONFIRMATION_INITIAL_DELAY_SECONDS = 10.0
@@ -69,12 +78,10 @@ _STALE_CONFIRMATION_OVERRIDABLE_HALT_REASONS = frozenset(
 )
 
 
-@dataclass(frozen=True)
-class _OpenContext:
-    action_id: str
-    intent: OrderIntent
-    inventory_id: str
-    trigger_price: float
+_OPEN_RECOVERY_HALT_REASONS = frozenset({
+    "open_order_confirmation_unknown", "open_submission_dispatch_unknown",
+    "unresolved_open_submission_at_restart",
+})
 
 
 @dataclass(frozen=True)
@@ -156,6 +163,11 @@ class V3BrokerExecutor:
         self._open_by_symbol: dict[str, str] = {}
         self._open_action_ids: set[str] = set()
         self._unresolved_open_actions: set[str] = set()
+        self._unknown_open_action_ids: set[str] = set()
+        self._resolved_open_action_ids: set[str] = set()
+        self._pending_open_confirmations: dict[str, _PendingOpenConfirmation] = {}
+        self._open_confirmation_tasks: set[str] = set()
+        self._open_confirmation_attempts = 0
         self._notional_anomaly_action_ids: set[str] = set()
         self._account_observation_only = False
         if getattr(self.broker, "requires_external_activity_ack", False):
@@ -173,6 +185,7 @@ class V3BrokerExecutor:
         started: dict[str, str] = {}
         resolved: set[str] = set()
         unknown: set[str] = set()
+        recoverable: dict[str, tuple[_OpenContext, datetime]] = {}
         for event in self.event_store.events():
             action = str(event.payload.get("action_id", "")).strip()
             if not action:
@@ -183,6 +196,8 @@ class V3BrokerExecutor:
                     symbol = event.inventory_id.split(":", 1)[0].strip().upper()
                 started[action] = symbol
                 self._open_action_ids.add(action)
+                if event.payload.get("client_order_id"):
+                    recoverable[action] = restored_open_context(event), event.occurred_at
             elif event.event_type == "ENTRY_FILLED":
                 resolved.add(action)
                 # Old ledgers have 1.0 as broker-confirmed account notional but
@@ -191,7 +206,8 @@ class V3BrokerExecutor:
                 position_id = str(event.payload.get("position_id", ""))
                 if (position_id in active_position_ids
                         and event.payload.get("notional_source") ==
-                        "broker_confirmed_account_currency"):
+                        "broker_confirmed_account_currency"
+                        and not partial_open_event_valid(event.payload)):
                     try:
                         requested = float(event.payload["requested_notional"])
                         booked = float(event.payload["notional"])
@@ -208,7 +224,25 @@ class V3BrokerExecutor:
                 unknown.add(action)
             elif event.event_type == "OPEN_ACCOUNT_NOTIONAL_MISMATCH":
                 self._notional_anomaly_action_ids.add(action)
-        self._unresolved_open_actions = (set(started) - resolved) | unknown
+        self._resolved_open_action_ids.update(resolved)
+        self._unresolved_open_actions = (set(started) | unknown) - resolved
+        self._unknown_open_action_ids.update(self._unresolved_open_actions)
+        retries = self.runtime_state_store.load_open_retries()
+        now, mono = _utc_now(), time.monotonic()
+        for action in self._unresolved_open_actions & recoverable.keys():
+            context, submitted_at = recoverable[action]
+            pending = _PendingOpenConfirmation(context, submitted_at)
+            retry = retries.get(action)
+            if retry is not None:
+                pending.attempt_count = retry.attempt_count
+                pending.next_attempt_at = retry.next_attempt_at
+                pending.next_attempt_monotonic = mono + max(0.0, (retry.next_attempt_at - now).total_seconds())
+                pending.last_error_type = retry.last_error_type
+                pending.last_http_status = retry.last_http_status
+                pending.last_result_state = retry.last_result_state
+            self._pending_open_confirmations[action] = pending
+        for action in retries.keys() - self._pending_open_confirmations.keys():
+            self.runtime_state_store.delete_open_retry(action)
         for action in sorted(self._unresolved_open_actions):
             symbol = started.get(action)
             if symbol:
@@ -243,6 +277,7 @@ class V3BrokerExecutor:
         except Exception:
             # submit() may have reached eToro even when it raises locally.
             self.halted_reason = "open_submission_dispatch_unknown"
+            self._unknown_open_action_ids.add(action)
             raise
         if not scheduled:
             self._release_open(symbol, action)
@@ -284,6 +319,8 @@ class V3BrokerExecutor:
         )
         action_id = intent.intent_id
         trigger_price = float(snapshot.ask)
+        prepare_identity = getattr(self.broker, "prepare_open_order_id", None)
+        client_order_id = prepare_identity(action_id) if prepare_identity else None
         self._append(
             event_type="ORDER_SUBMISSION_STARTED",
             inventory_id=inventory_id,
@@ -291,29 +328,33 @@ class V3BrokerExecutor:
             payload={
                 "action_id": action_id,
                 "intent_id": intent.intent_id,
+                "client_order_id": client_order_id,
                 "symbol": intent.symbol,
                 "purpose": intent.purpose.value,
                 "notional": intent.notional,
                 "trigger_price": trigger_price,
+                "cost_estimate": asdict(intent.cost_estimate) if intent.cost_estimate else None,
             },
         )
-        context = _OpenContext(action_id, intent, inventory_id, trigger_price)
+        context = _OpenContext(action_id, intent, inventory_id, trigger_price, client_order_id)
         stop_loss = max(1e-8, trigger_price * 0.5)
         take_profit = trigger_price * 10.0
-        self.task_runner.submit(
-            kind="v3_open_position",
-            task_id=f"v3-open:{action_id}",
-            context=context,
-            operation=lambda: self.broker.open_position(
-                intent.symbol,
-                "BUY",
-                float(intent.notional),
-                stop_loss,
-                take_profit,
-            ),
-            lane=BrokerTaskLane.STANDARD,
-        )
         self._pending_actions.add(action_id)
+        identity = {"client_order_id": client_order_id} if client_order_id is not None else {}
+        try:
+            self.task_runner.submit(
+                kind="v3_open_position",
+                task_id=f"v3-open:{action_id}",
+                context=context,
+                operation=lambda: self.broker.open_position(
+                    intent.symbol, "BUY", float(intent.notional), stop_loss, take_profit,
+                    **identity,
+                ),
+                lane=BrokerTaskLane.STANDARD,
+            )
+        except Exception:
+            self._track_open_confirmation(context)
+            raise
         return True
 
     def _schedule_inventory_close(
@@ -435,6 +476,8 @@ class V3BrokerExecutor:
         for completion in self.task_runner.drain():
             if completion.kind == "v3_open_position":
                 applied.extend(self._handle_open_completion(completion))
+            elif completion.kind == "v3_open_execution_lookup":
+                applied.extend(self._handle_open_lookup(completion))
             elif completion.kind == "close_position" and isinstance(
                 completion.context,
                 _CloseContext,
@@ -454,7 +497,8 @@ class V3BrokerExecutor:
     ) -> int:
         now = time.monotonic() if monotonic_now is None else float(monotonic_now)
         self._refresh_stale_confirmation_halt(utc_now or _utc_now())
-        if self._confirmation_tasks or self._broker_reconciliation_in_flight:
+        if (self._confirmation_tasks or self._open_confirmation_tasks
+                or self._broker_reconciliation_in_flight):
             return 0
         due = [
             (pending.next_attempt_monotonic, pending.accepted_at, action_id, pending)
@@ -466,6 +510,8 @@ class V3BrokerExecutor:
         active_due = [item for item in due if item[3].mutation_active]
         if active_due:
             due = active_due
+        elif self._schedule_open_confirmation(now, utc_now=utc_now):
+            return 1
         elif self._schedule_broker_reconciliation(now):
             return 1
         if due:
@@ -492,6 +538,104 @@ class V3BrokerExecutor:
             )
             return 1
         return 0
+
+    @property
+    def recovering_open_symbols(self) -> tuple[str, ...]:
+        return tuple(sorted({pending.context.intent.symbol
+                             for pending in self._pending_open_confirmations.values()}))
+
+    def _track_open_confirmation(self, context: _OpenContext) -> None:
+        self._unknown_open_action_ids.add(context.action_id)
+        if context.client_order_id and context.action_id not in self._pending_open_confirmations:
+            pending = _PendingOpenConfirmation(context, _utc_now())
+            self._pending_open_confirmations[context.action_id] = pending
+            self._defer_open_confirmation(pending, delay=CONFIRMATION_INITIAL_DELAY_SECONDS,
+                                          result_state="submission_unknown")
+        self._refresh_open_recovery_halt()
+
+    def _refresh_open_recovery_halt(self, *, clear_resolved: bool = False) -> None:
+        if (clear_resolved and not self._unknown_open_action_ids
+                and self.halted_reason in _OPEN_RECOVERY_HALT_REASONS):
+            self.halted_reason = (
+                "open_account_notional_mismatch_at_restart" if self._notional_anomaly_action_ids
+                else "broker_quantity_reduction_unattributed" if self._unattributed_reconciled_position_ids
+                else "close_submission_outcome_unknown" if self._unknown_close_action_ids
+                else None
+            )
+        if self._unknown_open_action_ids and self.halted_reason is None:
+            self.halted_reason = "open_order_confirmation_unknown"
+
+    def _finalize_open_action(self, context: _OpenContext) -> None:
+        was_unknown = context.action_id in self._unknown_open_action_ids
+        self._release_open(context.intent.symbol.strip().upper(), context.action_id)
+        self._pending_open_confirmations.pop(context.action_id, None)
+        self._unknown_open_action_ids.discard(context.action_id)
+        self._resolved_open_action_ids.add(context.action_id)
+        self.runtime_state_store.delete_open_retry(context.action_id)
+        self._refresh_open_recovery_halt(clear_resolved=was_unknown)
+        self._refresh_stale_confirmation_halt(_utc_now())
+
+    def _defer_open_confirmation(
+        self, pending: _PendingOpenConfirmation, *, delay: float | None = None,
+        error: Exception | None = None, result_state: str = "pending",
+        monotonic_now: float | None = None, utc_now: datetime | None = None,
+    ) -> None:
+        status = _http_status(error) if error is not None else None
+        if delay is None:
+            delay = _confirmation_backoff_seconds(pending.attempt_count, status=status, error=error)
+        mono = time.monotonic() if monotonic_now is None else monotonic_now
+        pending.next_attempt_monotonic = mono + delay
+        pending.next_attempt_at = _as_utc(utc_now or _utc_now()) + timedelta(seconds=delay)
+        pending.last_error_type = type(error).__name__ if error is not None else None
+        pending.last_http_status = status
+        pending.last_result_state = result_state
+        self.runtime_state_store.save_open_retry(OpenRetryState(
+            pending.context.action_id, pending.attempt_count, pending.next_attempt_at,
+            pending.last_error_type, status, result_state,
+        ))
+
+    def _schedule_open_confirmation(self, now: float, *, utc_now: datetime | None) -> int:
+        due = [(pending.next_attempt_monotonic, pending.submitted_at, action, pending)
+               for action, pending in self._pending_open_confirmations.items()
+               if pending.next_attempt_monotonic <= now]
+        if not due:
+            return 0
+        _, _, action, pending = min(due, key=lambda item: item[:3])
+        pending.attempt_count += 1
+        self._open_confirmation_attempts += 1
+        self._defer_open_confirmation(pending, monotonic_now=now, utc_now=utc_now,
+                                      result_state="lookup_in_flight")
+        self._open_confirmation_tasks.add(action)
+        self.task_runner.submit(
+            kind="v3_open_execution_lookup", task_id=f"v3-open-confirm:{action}",
+            context=pending, lane=BrokerTaskLane.QUERY,
+            operation=lambda: self.broker.get_open_execution(
+                pending.context.client_order_id, pending.context.intent.symbol,
+                pending.context.intent.notional,
+            ),
+        )
+        return 1
+
+    def _handle_open_lookup(self, completion: BrokerTaskCompletion) -> list[str]:
+        pending = completion.context
+        if not isinstance(pending, _PendingOpenConfirmation):
+            return []
+        action = pending.context.action_id
+        self._open_confirmation_tasks.discard(action)
+        if action in self._resolved_open_action_ids:
+            return []
+        if completion.error is not None and not isinstance(completion.error, OpenPositionRejectedError):
+            self._defer_open_confirmation(pending, error=completion.error, result_state="error")
+            return []
+        if completion.error is None and completion.value is None:
+            self._defer_open_confirmation(pending, result_state="execution_unavailable")
+            return []
+        applied = self._handle_open_completion(replace(
+            completion, kind="v3_open_position", context=pending.context,
+        ))
+        if action in self._pending_open_confirmations:
+            self._defer_open_confirmation(pending, result_state="invalid_execution")
+        return applied
 
     def _schedule_broker_reconciliation(self, monotonic_now: float) -> int:
         previous = self._last_broker_reconciliation_monotonic
@@ -629,6 +773,15 @@ class V3BrokerExecutor:
                 for leg in inventory.broker_legs
                 if leg.units > 0
             }
+            recovering_orders = {
+                pending.context.client_order_id: preflight.open_orders[pending.context.client_order_id]
+                for pending in self._pending_open_confirmations.values()
+                if pending.context.client_order_id in preflight.open_orders
+                and open_order_matches_request(
+                    preflight.open_orders[pending.context.client_order_id], pending.context,
+                )
+            }
+            known_ids.update(order.position_id for order in recovering_orders.values())
             unexpected = tuple(
                 f"untracked_broker_position:{position_id}:units={units:.12g}"
                 for position_id, units in sorted(preflight.position_units.items())
@@ -637,6 +790,7 @@ class V3BrokerExecutor:
             pending_issues = tuple(
                 f"pending_broker_open:{description}"
                 for description in preflight.pending_open_orders
+                if description not in recovering_orders
             )
             known_closes = {
                 item.close_order_id: item.position_id
@@ -1001,6 +1155,10 @@ class V3BrokerExecutor:
             if self._unattributed_reconciled_position_ids:
                 self.halted_reason = "broker_quantity_reduction_unattributed"
 
+        # Clearing a recovered reconciliation/close halt must not unlock an
+        # independent BUY whose broker outcome is still being confirmed.
+        self._refresh_open_recovery_halt()
+
     def confirmation_metrics(self) -> dict[str, object]:
         now = _utc_now()
         oldest_seconds = 0.0
@@ -1026,6 +1184,19 @@ class V3BrokerExecutor:
                 broker_rate_limit = {"status": "unavailable"}
         return {
             "pending_open_symbols": dict(sorted(self._open_by_symbol.items())),
+            "open_confirmation_attempts": self._open_confirmation_attempts,
+            "open_confirmation_in_flight": len(self._open_confirmation_tasks),
+            "open_confirmations": [
+                {"action_id": action, "order_id": pending.context.client_order_id,
+                 "symbol": pending.context.intent.symbol,
+                 "requested_notional": pending.context.intent.notional,
+                 "submitted_at": pending.submitted_at, "attempt_count": pending.attempt_count,
+                 "next_attempt_at": pending.next_attempt_at,
+                 "last_result_state": pending.last_result_state,
+                 "last_error_type": pending.last_error_type,
+                 "last_http_status": pending.last_http_status}
+                for action, pending in sorted(self._pending_open_confirmations.items())
+            ],
             "unresolved_open_action_ids": sorted(self._unresolved_open_actions),
             "account_notional_anomaly_action_ids": sorted(self._notional_anomaly_action_ids),
             "account_observation_only": self._account_observation_only,
@@ -1117,6 +1288,8 @@ class V3BrokerExecutor:
         if not isinstance(context, _OpenContext):
             return self._apply_open_completion(completion)
         action = context.action_id
+        if action in self._resolved_open_action_ids:
+            return []
         symbol = context.intent.symbol.strip().upper()
         error = completion.error
         # Only a structured broker terminal status creates OpenPositionRejectedError.
@@ -1131,15 +1304,27 @@ class V3BrokerExecutor:
                     "action_id": action,
                     "intent_id": context.intent.intent_id,
                     "symbol": symbol,
+                    "client_order_id": context.client_order_id,
                     "reason": "open_broker_outcome_not_proven_rejected",
                     "error_type": type(error).__name__,
                     "error": str(error),
                 },
             )
-            self.halted_reason = "open_order_confirmation_unknown"
+            self._track_open_confirmation(context)
             return []
 
         result = completion.value
+        if (error is None and context.client_order_id is not None
+                and not terminal_open_evidence_valid(result, context)):
+            self._pending_actions.discard(action)
+            self._append(
+                event_type="ORDER_SUBMISSION_UNKNOWN", inventory_id=context.inventory_id,
+                event_id=f"{action}:open-evidence-invalid",
+                payload={"action_id": action, "client_order_id": context.client_order_id,
+                         "symbol": symbol, "reason": "open_execution_evidence_invalid"},
+            )
+            self._track_open_confirmation(context)
+            return []
         if error is None and isinstance(result, OpenPositionResult):
             requested = float(context.intent.notional)
             reported_raw = result.executed_notional
@@ -1160,8 +1345,11 @@ class V3BrokerExecutor:
                     or isinstance(reported_raw, bool)
                     or not math.isfinite(reported)
                     or reported <= 0
-                    or reported < 0.8 * requested
+                    or (reported < 0.8 * requested and not terminal_partial_open_valid(result, context))
                     or reported > 1.2 * requested
+                    or (result.order is not None
+                        and result.order.status in {"canceled", "expired", "rejected"}
+                        and not terminal_partial_open_valid(result, context))
                 )
                 if inconsistent:
                     # Requested account currency is provisional, not certified;
@@ -1204,9 +1392,9 @@ class V3BrokerExecutor:
             self.halted_reason = "open_ledger_projection_failed"
             raise
         if applied:
-            self._release_open(symbol, action)
+            self._finalize_open_action(context)
         elif isinstance(error, OpenPositionRejectedError):
-            self._release_open(symbol, action)
+            self._finalize_open_action(context)
         else:
             if self.halted_reason is None:
                 self.halted_reason = "invalid_open_completion"
@@ -1222,6 +1410,7 @@ class V3BrokerExecutor:
                     "reason": "open_completion_not_projected",
                 },
             )
+            self._track_open_confirmation(context)
         return applied
 
     def _apply_open_completion(self, completion: BrokerTaskCompletion) -> list[str]:
@@ -1304,9 +1493,23 @@ class V3BrokerExecutor:
             self.halted_reason = "invalid_open_account_notional"
             return []
 
+        inventory_id = context.inventory_id
+        previous = next((item for item in self.book.inventories
+                         if item.inventory_id == inventory_id), None)
+        if previous is not None and previous.total_units <= 0:
+            # A reduce-only exit may finish while this BUY is still uncertain.
+            # Preserve that closed lifecycle and start a new one for the late fill.
+            inventory_id = f"{context.intent.symbol}:{context.action_id}"
+            if inventory_id == context.inventory_id:
+                self.halted_reason = "open_fill_for_closed_action"
+                return []
+
         payload = {
             "action_id": context.action_id,
             "intent_id": context.intent.intent_id,
+            "client_order_id": context.client_order_id,
+            "open_order": asdict(result.order) if result.order is not None else None,
+            "submitted_inventory_id": context.inventory_id,
             "symbol": context.intent.symbol,
             "position_id": result.position_id,
             "units": units,
@@ -1324,14 +1527,19 @@ class V3BrokerExecutor:
             ),
             "purpose": context.intent.purpose.value,
         }
-        self._append(
+        inserted = self._append(
             event_type="ENTRY_FILLED",
-            inventory_id=context.inventory_id,
+            inventory_id=inventory_id,
             event_id=f"{context.action_id}:entry-fill:{result.position_id}",
             payload=payload,
         )
+        if not inserted:
+            # A durable fill whose in-memory projection is uncertain needs replay,
+            # never a second application or another broker submission.
+            self.halted_reason = "open_ledger_projection_failed"
+            return []
         self.book.apply_entry_fill(
-            inventory_id=context.inventory_id,
+            inventory_id=inventory_id,
             symbol=context.intent.symbol,
             position_id=result.position_id,
             units=units,
@@ -1784,6 +1992,7 @@ class V3BrokerExecutor:
             "close_submission_outcome_unknown", "close_accepted_without_order_id",
         }:
             self.halted_reason = None
+        self._refresh_open_recovery_halt()
 
     def _finalize_confirmed_close_action(self, context: _CloseContext) -> None:
         self._retire_close_action(context)

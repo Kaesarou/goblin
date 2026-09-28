@@ -222,13 +222,12 @@ class GoblinV3Runtime:
             )
 
         active_inventories = self._active_inventories()
-        if active_inventories:
+        recovery_symbols = set(self.executor.recovering_open_symbols)
+        if active_inventories or recovery_symbols:
             restored_feature_set = set(restored_features)
-            missing_feature_symbols = {
-                inventory.symbol
-                for inventory in active_inventories
-                if inventory.symbol not in restored_feature_set
-            }
+            missing_feature_symbols = (
+                {inventory.symbol for inventory in active_inventories} | recovery_symbols
+            ) - restored_feature_set
             if missing_feature_symbols:
                 self.executor.halted_reason = (
                     "missing_causal_feature_state_for_open_inventory:"

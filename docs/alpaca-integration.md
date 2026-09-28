@@ -81,7 +81,21 @@ read-only recovery of the exact symbol/notional request. Alpaca returns durable
 order identity/status alongside terminal execution, including partial fills after
 cancellation. Startup preflight exposes owned BUY identities even when the order
 is no longer pending. A missing order or nonterminal fill never proves rejection.
-V3 consumption of this recovery/evidence contract is the next checkpoint.
+
+Checkpoint 7: V3 now persists BUY identities before dispatch and restores
+request-bound, read-only confirmation after timeouts or crashes. Its separate
+BUY retry journal preserves backoff deadlines across restarts. Missing evidence
+retains the reservation and never resubmits an order. Terminal partial fills are
+booked once using confirmed units and USD economics; only validated terminal
+partial-fill evidence can relax the legacy minimum-notional guard. A late BUY
+after a reduce-only exit starts a fresh inventory lifecycle.
+
+Startup preflight recognizes only BUY evidence matching the persisted request.
+Pending buys also require restored causal feature state before new risk can
+return. Completing one action or recovering a reconciliation failure preserves
+other unresolved BUYs and independent safety halts. Close confirmations keep
+priority, and order lookups use the query lane so they do not block reduce-only
+dispatch.
 
 ## Environment configuration
 
@@ -137,6 +151,15 @@ legs, duplicate/out-of-order stream evidence, delayed reconciliation results,
 untracked closes, external reductions and invalid attribution evidence. These
 tests combine the real adapter, SQLite journals and V3 executor with mocked APIs.
 
+Checkpoint 7 validation: **1104 tests passed**, including **171 Alpaca tests**
+and **86 V3/Alpaca recovery integration cases**. BUY coverage adds interrupted
+submission, missing identities/evidence, terminal zero/partial fills, restart
+backoff, duplicate completions, invalid request/economic evidence, late fills
+after a closed inventory and independent halt ownership. V3 startup tests cover
+pending, partially filled and filled-but-unbooked BUYs with and without causal
+feature checkpoints. Those startup tests stub market feeds and equity refresh;
+they do not replace the full factory-connected runtime validation below.
+
 Automated tests cover both WebSocket protocols (including binary JSON trade
 updates), authentication/subscription failures, reconnect/resubscribe, ordering,
 queue overflow, HTTP rate limits and no mutation retries, multiple legs of a
@@ -156,14 +179,11 @@ Remaining work:
    with ETFs or present legacy eToro cost estimates as Alpaca actual costs.
 2. Test the factory-connected streams, startup, shutdown and REST fallback
    through the complete V3 runtime (not only the adapter lifecycle).
-3. Complete operational recovery for unknown BUYs, including partial fills still
-   pending at the BUY timeout. They currently retain the reservation and fail
-   closed; they are not automatically projected into V3 on later execution.
-4. Define operator recovery for permanently missing evidence. A close started
-   before a crash but without an adapter reservation remains locked; a reserved
-   close returning 404 remains pollable, but absence never proves rejection.
+3. Define operator recovery for permanently missing evidence. A BUY or close
+   started before a crash but without an adapter reservation remains locked;
+   a reserved order returning 404 remains pollable, but absence never proves rejection.
    These crash boundaries are tested and never cause a second POST. Transient
    REST/stream position races also fail closed rather than guess attribution.
-5. Review the complete integration and validate a separately authorized Alpaca
+4. Review the complete integration and validate a separately authorized Alpaca
    paper run. Corporate-action reconciliation, operator recovery tooling and live
    promotion are not implemented by these checkpoints.
