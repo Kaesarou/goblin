@@ -70,6 +70,20 @@ class AlpacaBrokerClient(BrokerClient):
     def get_account_identity(self) -> str:
         return text(self._account().get("id"))
 
+    def _validate_asset(self, symbol: str, *, trading: bool) -> None:
+        asset = (self.instrument_cache.get_asset(symbol) if self.instrument_cache
+                 else self.http.request("GET", "/v2/assets/" + symbol))
+        if (not isinstance(asset, dict) or asset.get("symbol") != symbol
+                or asset.get("class") != "us_equity" or asset.get("status") != "active"
+                or (trading and (asset.get("tradable") is not True
+                                 or asset.get("fractionable") is not True))):
+            raise ValueError(f"Alpaca asset is not an active {'fractional ' if trading else ''}US equity: {symbol}")
+
+    def validate_universe(self, symbols: list[str], *, context_symbols: list[str]) -> None:
+        trading = set(symbols)
+        for symbol in sorted(trading | set(context_symbols)):
+            self._validate_asset(symbol, trading=symbol in trading)
+
     def _assert_mutation_allowed(self) -> None:
         self.store.check_health()
         if self._stream_error:
@@ -200,20 +214,7 @@ class AlpacaBrokerClient(BrokerClient):
                 if notional < 1:
                     raise ValueError("Alpaca fractional order must be at least USD 1")
                 self._assert_mutation_allowed()
-                asset = (
-                    self.instrument_cache.get_asset(symbol)
-                    if self.instrument_cache
-                    else self.http.request("GET", "/v2/assets/" + symbol)
-                )
-                if (
-                    not isinstance(asset, dict)
-                    or asset.get("class") != "us_equity"
-                    or asset.get("status") != "active"
-                    or asset.get("tradable") is not True
-                    or asset.get("fractionable") is not True
-                    or asset.get("symbol") != symbol
-                ):
-                    raise ValueError("Alpaca asset is not an active fractional US equity")
+                self._validate_asset(symbol, trading=True)
                 preflight = self.get_account_preflight()
                 if (
                     preflight.pending_open_orders

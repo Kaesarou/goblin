@@ -139,6 +139,12 @@ def _assert_v3_universe(
     symbols: list[str],
     instrument_registry: InstrumentRegistry,
 ) -> None:
+    if instrument_registry.settings.broker.startswith("alpaca_"):
+        if any(instrument_registry.resolve(symbol).asset_class != AssetClass.EQUITY_US
+               for symbol in symbols):
+            raise RuntimeError("Alpaca V3 watchlist must contain only US equities")
+        if not instrument_registry.settings.benchmark_symbols_by_asset_class()[AssetClass.EQUITY_US]:
+            raise RuntimeError("Alpaca requires an explicitly configured US context benchmark")
     unsupported = [
         symbol
         for symbol in symbols
@@ -213,7 +219,7 @@ def _build_research_pipeline(
             stream_name="research",
             compact=True,
         ),
-        payload_schema_observer=EtoroPayloadSchemaObserver(
+        payload_schema_observer=None if settings.broker.startswith("alpaca_") else EtoroPayloadSchemaObserver(
             run_id=run_id,
             paths=(
                 run_paths.etoro_payload_schema,
@@ -363,6 +369,16 @@ def _run_main(settings: Settings, storage: RuntimeStorageScope) -> None:
         raise RuntimeError("Alpaca startup requires an authoritative account identity")
     if account_id is not None:
         storage.bind_account(account_id)
+    if settings.broker.startswith("alpaca_"):
+        benchmarks = list(settings.benchmark_symbols_by_asset_class()[AssetClass.EQUITY_US])
+        clients.execution_broker.validate_universe(symbols, context_symbols=benchmarks)
+        # Check selected-feed access/completeness without seeding causal candles
+        # from a REST snapshot. Only the live runtime may advance feature state.
+        clients.rest_market_data.get_market_snapshots(list(dict.fromkeys([*symbols, *benchmarks])))
+        manifest["broker"]["account_id"] = account_id
+        manifest["broker"]["universe_preflight"] = "passed"
+        write_run_manifest(run_paths.manifest, manifest)
+        write_run_manifest(settings.run_manifest_path, manifest)
     event_store = InventoryEventStore(
         settings.position_store_path,
         event_sink=_inventory_event_sink(trade_journal),
@@ -460,6 +476,17 @@ def _run_main(settings: Settings, storage: RuntimeStorageScope) -> None:
         )
         raise
     finally:
+        # startup() can fail after a stream or worker has already been started,
+        # before runtime.run() gets a chance to execute its own finally block.
+        failed_before_cleanup = run_status == "failed"
+        shutdown_error = None
+        try:
+            runtime.stop()
+        except Exception as exc:
+            shutdown_error = exc
+            run_status = "failed"
+            runtime.stop_reason = "error"
+            logger.exception("V3 runtime cleanup failed")
         if checkpoint_started:
             try:
                 write_runtime_checkpoint(
@@ -512,6 +539,8 @@ def _run_main(settings: Settings, storage: RuntimeStorageScope) -> None:
                 summary=summary,
                 runtime_metrics=runtime._heartbeat_metrics(),
             )
+        if shutdown_error is not None and not failed_before_cleanup:
+            raise shutdown_error
 
 
 if __name__ == "__main__":

@@ -45,6 +45,9 @@ class CachedBrokerClient(BrokerClient):
     def get_account_identity(self) -> str | None:
         return self.delegate.get_account_identity()
 
+    def validate_universe(self, symbols: list[str], *, context_symbols: list[str]) -> None:
+        self.delegate.validate_universe(symbols, context_symbols=context_symbols)
+
     def get_account_equity(self) -> float:
         now = self._now()
         if (

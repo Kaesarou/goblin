@@ -152,6 +152,9 @@ class BrokerClient(ABC):
         """Read a stable broker account ID without caching credentials as identity."""
         return None
 
+    def validate_universe(self, symbols: list[str], *, context_symbols: list[str]) -> None:
+        """Optional read-only startup validation, never an order or a symbol substitution."""
+
     @abstractmethod
     def get_account_equity(self) -> float:
         raise NotImplementedError

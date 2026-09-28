@@ -166,6 +166,7 @@ class GoblinV3Runtime:
         self._equity_source: str | None = None
         self._started = False
         self._stop_requested = False
+        self._stopped = False
         self.stop_reason: str | None = None
         self._last_fallback_monotonic = 0.0
         self._last_close_confirmation_monotonic = 0.0
@@ -342,14 +343,19 @@ class GoblinV3Runtime:
                 raise
 
     def stop(self) -> None:
-        if self._stop_requested and not self._started:
+        if self._stopped:
             return
         self._stop_requested = True
         try:
             self.live_market_data.stop()
         finally:
-            self.mutation_runner.close(wait=False)
-            self.maintenance_runner.close(wait=False)
+            # Keep the storage lease until dispatched broker calls finish and
+            # their completions are projected. A second process must not race
+            # a still-running worker after the main loop has stopped.
+            self.mutation_runner.close(wait=True)
+            self.maintenance_runner.close(wait=True)
+
+        self._drain_broker_tasks()
 
         self.runtime_state_store.save_feature_engine(self.feature_engine)
         self.runtime_state_store.save_inventory_book(
@@ -367,6 +373,7 @@ class GoblinV3Runtime:
             self._heartbeat_metrics(),
         )
         self._started = False
+        self._stopped = True
 
     def _handle_event(self, event: MarketDataEvent, now: datetime) -> None:
         symbol = event.symbol.strip().upper()
@@ -960,7 +967,10 @@ class GoblinV3Runtime:
                         },
                     )
             elif completion.kind == "v3_position_fallback":
-                self._handle_position_fallback_completion(completion)
+                # A late quote may finish during shutdown, after the mutation
+                # lane has closed. It must not dispatch a new exit then.
+                if not self._stop_requested:
+                    self._handle_position_fallback_completion(completion)
 
     def _handle_position_fallback_completion(self, completion) -> None:
         symbols = list((completion.context or {}).get("symbols", []))

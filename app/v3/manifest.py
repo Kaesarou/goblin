@@ -55,10 +55,11 @@ from app.v3.runtime import V3_RUNTIME_CONTRACT_VERSION
 from app.v3.state_store import (
     V3_BROKER_EQUITY_STATE_VERSION,
     V3_CLOSE_RETRY_STATE_VERSION,
+    V3_OPEN_RETRY_STATE_VERSION,
     V3_RUNTIME_STATE_VERSION,
 )
 
-V3_RUN_MANIFEST_SCHEMA_VERSION = 20
+V3_RUN_MANIFEST_SCHEMA_VERSION = 21
 _SENSITIVE_SETTINGS = {"ETORO_API_KEY", "ETORO_USER_KEY", "ALPACA_API_KEY", "ALPACA_SECRET_KEY"}
 
 
@@ -96,7 +97,7 @@ def build_v3_run_manifest(
         if broker_name.startswith("etoro_")
         else None
     )
-    return {
+    manifest = {
         "schema_version": V3_RUN_MANIFEST_SCHEMA_VERSION,
         "run_id": run_id,
         "status": "running",
@@ -148,6 +149,8 @@ def build_v3_run_manifest(
                 "etoro_live_allowed": False,
                 "paper_allowed": True,
                 "etoro_demo_allowed": True,
+                "alpaca_demo_allowed": False,
+                "alpaca_live_allowed": False,
             },
             "hedge_execution_enabled": False,
         },
@@ -168,6 +171,7 @@ def build_v3_run_manifest(
                 "v3_runtime_state": V3_RUNTIME_STATE_VERSION,
                 "broker_equity_reference": V3_BROKER_EQUITY_STATE_VERSION,
                 "close_retry_scheduler": V3_CLOSE_RETRY_STATE_VERSION,
+                "open_retry_scheduler": V3_OPEN_RETRY_STATE_VERSION,
                 "executable_prices": EXECUTABLE_PRICE_CONTRACT_VERSION,
                 "quote_quality": QUOTE_QUALITY_CONTRACT_VERSION,
                 "broker_exit_translation": "pro_rata_partial_close_point_m_dust_v3",
@@ -219,6 +223,7 @@ def build_v3_run_manifest(
                     "query_lane": "shared_serial_with_close_confirmation",
                     "query_priority": [
                         "active_close_mutation",
+                        "active_open_recovery",
                         "periodic_broker_reconciliation",
                         "economics_only_close_confirmation",
                     ],
@@ -343,6 +348,43 @@ def build_v3_run_manifest(
             "state_db": settings.position_store_path,
         },
     }
+    alpaca = broker_name.startswith("alpaca_")
+    manifest["broker"] = {
+        "mode": broker_name,
+        "execution_provider": "alpaca" if alpaca else "paper" if broker_name == "paper" else "etoro",
+        "market_data_provider": "alpaca" if alpaca else "etoro",
+        "account_id": None,
+        "data_feed": settings.alpaca_data_feed if alpaca else None,
+        "universe_preflight": "pending" if alpaca else "legacy",
+        "storage_identity": "runtime_storage_v1",
+    }
+    if alpaca:
+        manifest["runtime"]["account_equity"].update(endpoint="/v2/account", field="equity")
+        market = manifest["runtime"]["market_data"]
+        market.update(provider="alpaca", feed=settings.alpaca_data_feed,
+                      quote_price_source="bid_ask_midpoint", rest_feed_matches_stream=True)
+        execution = manifest["runtime"]["broker_execution"]
+        execution.update(partial_close_request_field="qty", open_units_authority="alpaca_order.filled_qty")
+        execution.pop("etoro_get_rate_governor")
+        execution["alpaca_http_rate_governor"] = {
+            "max_requests_per_window": 180, "window_seconds": 60,
+            "buckets": ["trading", "market_data"], "mutation_attempts": 1,
+            "order_lookup_attempts_per_dispatch": 1,
+        }
+        execution["broker_units_reconciliation"]["pending_reduction_policy"] = (
+            "action_scoped_cumulative_fill_evidence_keep_reservation_until_terminal"
+        )
+        manifest["economics"]["note"] = (
+            "Frozen eToro5 research estimates retained for strategy comparability; "
+            "these are not Alpaca actual fees or a claim of equivalent performance."
+        )
+        manifest["runtime"]["research"]["payload_schema_observer"] = {
+            "enabled": False, "reason": "etoro_payload_observer_not_applicable_to_alpaca",
+        }
+        for section in ("files", "analysis_sources"):
+            manifest[section].pop("etoro_payload_schema", None)
+            manifest[section].pop("latest_etoro_payload_schema", None)
+    return manifest
 
 
 def write_run_manifest(path: str | Path, manifest: dict[str, Any]) -> None:

@@ -185,18 +185,46 @@ symbol, fractional closes, repeated fills, partial fills followed by cancellatio
 timeout recovery, account changes and external activity. All network calls are
 mocked; no account credentials or real paper/live orders were used.
 
+Checkpoint 9 validation: **1146 tests passed**, including **17 new assembled-runtime
+integration cases**. The real bootstrap, provider factory, HTTP clients, threaded
+streams, task runners, SQLite stores, candle/features and frozen V3 planner are
+combined with simulated HTTP/socket transports and a controlled clock. IEX and
+SIP cases exercise an actual planner BUY, restart without resubmission, and the
+84% trailing exit. Disconnect coverage proves REST fallback is reduce-only and
+does not advance candles/features, reconnection restores subscriptions, fresh
+accepted quotes are required for recovery, and duplicate binary trade updates
+do not book inventory twice. Finite scenarios drive runtime methods directly;
+two fatal-stream scenarios also exercise the actual continuous `run()` loop.
+
+Startup now verifies active US-equity assets, fractional trading permissions for
+the trading universe, an explicitly configured benchmark and complete quote
+responses from the selected feed. Benchmarks are context only: they need not be
+fractionally tradable. There is no automatic SPX500-to-SPY substitution. Manifest
+schema 21 identifies Alpaca, its account and feed, and explicitly labels the
+unchanged legacy research cost assumptions; the eToro payload observer is off.
+
+Integration testing found and fixed stale stream health during reconnect backoff
+and incomplete cleanup when startup fails after starting streams. Shutdown waits
+for dispatched broker work, projects completions before checkpointing, keeps the
+storage lease throughout, and discards late fallback quotes rather than submit a
+new exit to a closed worker. A concurrent lease-acquisition regression test
+covers that boundary. This is not yet a Docker SIGTERM/SIGKILL validation.
+
 **Alpaca configuration and factory selection are implemented, but V3 execution
-remains gated.** `alpaca_demo` fails explicitly at bootstrap until the universe
-and full-runtime integration below are validated. `alpaca_live` uses the same prospective live
+remains gated.** `alpaca_demo` fails explicitly at bootstrap pending final runtime
+review and the remaining lifecycle checks below; integration tests bypass only
+that gate. `alpaca_live` uses the same prospective live
 capital refusal as `etoro_live`. No live authority is granted by configuring it.
 The strategy rules and existing broker quantity-attribution rules are unchanged.
 Remaining work:
 
-1. Complete US-equity universe/benchmark validation and broker-specific manifest metadata.
-   Keep live capital disabled and do not silently replace eToro index benchmarks
-   with ETFs or present legacy eToro cost estimates as Alpaca actual costs.
-2. Test the factory-connected streams, startup, shutdown and REST fallback
-   through the complete V3 runtime (not only the adapter lifecycle).
+1. Review the assembled integration and test normal continuous-loop termination,
+   process signals and forced interruption/restart before opening demo bootstrap.
+   Keep live capital disabled; simulated transports do not prove account/feed
+   entitlement or real network behavior.
+2. Review the operator's redacted `.env`, selected US trading universe and explicit
+   benchmarks. Run eToro and Alpaca in separate containers with distinct writable
+   data/log/cache mounts; no repository Compose change is required or made here.
 3. Define operator recovery for permanently missing evidence. A BUY or close
    started before a crash but without an adapter reservation remains locked;
    a reserved order returning 404 remains pollable, but absence never proves rejection.

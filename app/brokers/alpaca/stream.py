@@ -111,6 +111,9 @@ class AlpacaStream:
             except Exception as exc:
                 # Never log frames: the authentication frame contains secrets.
                 self._last_error = type(exc).__name__
+                # Invalidate transport authority before the reconnect backoff.
+                self._healthy = False
+                self._applied = ()
                 self._stop.wait(delay)
                 delay = min(30.0, delay * 2)
             finally:
