@@ -296,8 +296,15 @@ class GoblinV3Runtime:
             },
         )
 
+    def request_stop(self, *, reason: str = "requested") -> None:
+        # Signal-safe: the main loop owns cleanup, persistence and worker joins.
+        self._stop_requested = True
+        if self.stop_reason != "error":
+            self.stop_reason = reason
+
     def run(self, *, timeout_seconds: float = 1.0) -> None:
-        self.stop_reason = None
+        if not self._stop_requested:
+            self.stop_reason = None
         try:
             if not self._started:
                 self.startup()
@@ -313,6 +320,8 @@ class GoblinV3Runtime:
                 self._schedule_close_confirmation_checks(monotonic_now)
 
                 event = self.live_market_data.next_event(timeout_seconds)
+                if self._stop_requested:
+                    break
                 if event is not None:
                     self._handle_event(event, now)
 
@@ -376,6 +385,8 @@ class GoblinV3Runtime:
         self._stopped = True
 
     def _handle_event(self, event: MarketDataEvent, now: datetime) -> None:
+        if self._stop_requested:
+            return
         symbol = event.symbol.strip().upper()
         precheck = self.coordinator.precheck(event)
         if not precheck.accepted:
@@ -440,6 +451,8 @@ class GoblinV3Runtime:
         )
 
         for intent in self.intent_book.triggered(snapshot):
+            if self._stop_requested:
+                break
             if not intent.reduce_only and not (
                 session_allows_new_risk
                 and self._operational_entry_allowed(symbol)
@@ -1003,6 +1016,8 @@ class GoblinV3Runtime:
                 continue
             recovered.append(symbol)
             for intent in self.intent_book.triggered(snapshot):
+                if self._stop_requested:
+                    break
                 if not intent.reduce_only:
                     continue
                 if self.executor.schedule(intent, snapshot=snapshot):
@@ -1104,7 +1119,8 @@ class GoblinV3Runtime:
     def _operational_entry_allowed(self, symbol: str) -> bool:
         session = self.session_decisions.get(symbol)
         return bool(
-            session is not None
+            not self._stop_requested
+            and session is not None
             and getattr(session, "session_active", False)
             and getattr(session, "new_entries_allowed", False)
             and self._current_run_equity is not None
@@ -1115,6 +1131,7 @@ class GoblinV3Runtime:
     def _symbol_risk_authority(self, symbol: str) -> dict[str, object]:
         session = self.session_decisions.get(symbol)
         checks = {
+            "runtime_accepting_orders": not self._stop_requested,
             "session_active": bool(session and session.session_active),
             "session_new_entries_allowed": bool(session and session.new_entries_allowed),
             "market_data_entry_allowed": bool(self.coordinator.entry_allowed(symbol)),

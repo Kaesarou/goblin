@@ -23,6 +23,7 @@ from app.runtime.runtime_policy import (
     JOURNAL_PARTIAL_SUMMARY_INTERVAL_MINUTES,
     JOURNAL_WRITE_PARTIAL_SUMMARY,
 )
+from app.runtime.stop_signals import runtime_stop_signals
 from app.runtime.storage_scope import RuntimeStorageScope
 from app.runtime.trading_session_window import trading_session_service_from_settings
 from app.utils.logging import configure_logging
@@ -444,103 +445,104 @@ def _run_main(settings: Settings, storage: RuntimeStorageScope) -> None:
         run_paths.root,
     )
 
-    checkpoint_started = False
-    try:
-        # Startup performs restart restore and broker-unit reconciliation. Capture
-        # exactly that causal boundary before the first prospective event is run.
-        runtime.startup()
-        write_runtime_checkpoint(
-            run_paths.state_start,
-            runtime=runtime,
-            phase="start",
-            asof=datetime.now(UTC),
-        )
-        checkpoint_started = True
-        runtime.run()
-        run_status = (
-            "interrupted"
-            if runtime.stop_reason == "interrupted"
-            else "completed"
-        )
-    except Exception as exc:
-        run_status = "failed"
-        runtime.stop_reason = "error"
-        logger.exception("Goblin V3 runtime failed: %s", exc)
-        trade_journal.write(
-            "error",
-            {
-                "stage": "v3_runtime",
-                "error_type": type(exc).__name__,
-                "message": str(exc),
-            },
-        )
-        raise
-    finally:
-        # startup() can fail after a stream or worker has already been started,
-        # before runtime.run() gets a chance to execute its own finally block.
-        failed_before_cleanup = run_status == "failed"
-        shutdown_error = None
+    with runtime_stop_signals(lambda: runtime.request_stop(reason="interrupted")):
+        checkpoint_started = False
         try:
-            runtime.stop()
+            # Startup performs restart restore and broker-unit reconciliation. Capture
+            # exactly that causal boundary before the first prospective event is run.
+            runtime.startup()
+            write_runtime_checkpoint(
+                run_paths.state_start,
+                runtime=runtime,
+                phase="start",
+                asof=datetime.now(UTC),
+            )
+            checkpoint_started = True
+            runtime.run()
+            run_status = (
+                "interrupted"
+                if runtime.stop_reason == "interrupted"
+                else "completed"
+            )
         except Exception as exc:
-            shutdown_error = exc
             run_status = "failed"
             runtime.stop_reason = "error"
-            logger.exception("V3 runtime cleanup failed")
-        if checkpoint_started:
+            logger.exception("Goblin V3 runtime failed: %s", exc)
+            trade_journal.write(
+                "error",
+                {
+                    "stage": "v3_runtime",
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            )
+            raise
+        finally:
+            # startup() can fail after a stream or worker has already been started,
+            # before runtime.run() gets a chance to execute its own finally block.
+            failed_before_cleanup = run_status == "failed"
+            shutdown_error = None
             try:
-                write_runtime_checkpoint(
-                    run_paths.state_end,
+                runtime.stop()
+            except Exception as exc:
+                shutdown_error = exc
+                run_status = "failed"
+                runtime.stop_reason = "error"
+                logger.exception("V3 runtime cleanup failed")
+            if checkpoint_started:
+                try:
+                    write_runtime_checkpoint(
+                        run_paths.state_end,
+                        runtime=runtime,
+                        phase="end",
+                        asof=datetime.now(UTC),
+                    )
+                except Exception:
+                    logger.exception("V3 end checkpoint write failed")
+            if research_pipeline is not None:
+                research_pipeline.flush()
+            else:
+                _write_disabled_research_summary(
+                    path=run_paths.research_summary,
+                    run_id=run_id,
+                    updated_at=datetime.now(UTC),
+                )
+            trade_journal.write(
+                "runtime_stopped",
+                {
+                    "run_id": run_id,
+                    "status": run_status,
+                    "loop_id": runtime.loop_id,
+                    "v3_metrics": runtime._heartbeat_metrics(),
+                },
+            )
+            summary = trade_journal.finalize()
+            summary.setdefault("market_data", {})["model_version"] = (
+                MARKET_DATA_MODEL_VERSION
+            )
+            write_run_manifest(settings.daily_summary_path, summary)
+            write_run_manifest(run_paths.summary, summary)
+            try:
+                write_run_qc(
+                    run_paths.run_qc,
+                    run_paths=run_paths,
                     runtime=runtime,
-                    phase="end",
-                    asof=datetime.now(UTC),
+                    trade_journal=trade_journal,
+                    market_journal=market_journal,
+                    candle_journal=candle_journal,
+                    status=run_status,
                 )
             except Exception:
-                logger.exception("V3 end checkpoint write failed")
-        if research_pipeline is not None:
-            research_pipeline.flush()
-        else:
-            _write_disabled_research_summary(
-                path=run_paths.research_summary,
-                run_id=run_id,
-                updated_at=datetime.now(UTC),
-            )
-        trade_journal.write(
-            "runtime_stopped",
-            {
-                "run_id": run_id,
-                "status": run_status,
-                "loop_id": runtime.loop_id,
-                "v3_metrics": runtime._heartbeat_metrics(),
-            },
-        )
-        summary = trade_journal.finalize()
-        summary.setdefault("market_data", {})["model_version"] = (
-            MARKET_DATA_MODEL_VERSION
-        )
-        write_run_manifest(settings.daily_summary_path, summary)
-        write_run_manifest(run_paths.summary, summary)
-        try:
-            write_run_qc(
-                run_paths.run_qc,
-                run_paths=run_paths,
-                runtime=runtime,
-                trade_journal=trade_journal,
-                market_journal=market_journal,
-                candle_journal=candle_journal,
-                status=run_status,
-            )
-        except Exception:
-            logger.exception("V3 run QC write failed")
-        for manifest_path in (run_paths.manifest, settings.run_manifest_path):
-            finalize_run_manifest(
-                manifest_path,
-                status=run_status,
-                summary=summary,
-                runtime_metrics=runtime._heartbeat_metrics(),
-            )
-        if shutdown_error is not None and not failed_before_cleanup:
-            raise shutdown_error
+                logger.exception("V3 run QC write failed")
+            for manifest_path in (run_paths.manifest, settings.run_manifest_path):
+                finalize_run_manifest(
+                    manifest_path,
+                    status=run_status,
+                    summary=summary,
+                    runtime_metrics=runtime._heartbeat_metrics(),
+                )
+            if shutdown_error is not None and not failed_before_cleanup:
+                raise shutdown_error
 
 
 if __name__ == "__main__":

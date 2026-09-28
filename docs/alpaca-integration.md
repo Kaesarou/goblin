@@ -210,16 +210,32 @@ storage lease throughout, and discards late fallback quotes rather than submit a
 new exit to a closed worker. A concurrent lease-acquisition regression test
 covers that boundary. This is not yet a Docker SIGTERM/SIGKILL validation.
 
+Checkpoint 10 validation: **1155 tests passed**. Six new tests spawn independent
+Python processes running the actual continuous loop, with broker evidence owned
+by the parent mock server so a killed runtime cannot erase it. They cover normal
+requested stop, SIGTERM and SIGINT during an in-flight BUY (including repeated
+signals and exclusive storage ownership until completion), SIGTERM after stream
+startup, and SIGKILL after a broker-side BUY or 84% SELL fill but before the HTTP
+response arrives. Restart books the exact quantity once using GET requests only.
+The process tests verify final manifest status, handler restoration and released
+storage locks. They do not run a Docker daemon or reach an actual Alpaca account.
+
+SIGTERM/SIGINT handlers now request main-loop shutdown without performing I/O or
+raising inside a SQLite transaction. They remain installed through worker joins
+and checkpoint finalization; a stop request received during startup is preserved.
+Queued quotes cannot dispatch orders after a stop request. Three restart-guard
+regressions cover signal forwarding during child creation, during wait, and a
+child-exit race; previous signal handlers are restored on wrapper exit.
+
 **Alpaca configuration and factory selection are implemented, but V3 execution
 remains gated.** `alpaca_demo` fails explicitly at bootstrap pending final runtime
-review and the remaining lifecycle checks below; integration tests bypass only
+review below; integration tests bypass only
 that gate. `alpaca_live` uses the same prospective live
 capital refusal as `etoro_live`. No live authority is granted by configuring it.
 The strategy rules and existing broker quantity-attribution rules are unchanged.
 Remaining work:
 
-1. Review the assembled integration and test normal continuous-loop termination,
-   process signals and forced interruption/restart before opening demo bootstrap.
+1. Review the assembled integration before opening demo bootstrap.
    Keep live capital disabled; simulated transports do not prove account/feed
    entitlement or real network behavior.
 2. Review the operator's redacted `.env`, selected US trading universe and explicit
