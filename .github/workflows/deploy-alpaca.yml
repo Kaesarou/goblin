@@ -1,0 +1,152 @@
+name: Deploy Alpaca experimental
+
+on:
+  push:
+    branches:
+      - alpaca-experimental
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: goblin-alpaca-experimental
+  cancel-in-progress: false
+
+env:
+  IMAGE_REPOSITORY: ghcr.io/kaesarou/goblin
+  DEPLOY_DIRECTORY: /opt/goblin-alpaca
+
+jobs:
+  tests:
+    name: Validate Alpaca release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Run tests
+        run: python -m pytest tests -q --tb=short
+      - name: Validate deployment files
+        env:
+          GOBLIN_IMAGE: ghcr.io/kaesarou/goblin:0000000000000000000000000000000000000000
+        run: |
+          bash -n scripts/deploy_alpaca_release.sh
+          touch .env
+          docker compose -f docker-compose.alpaca.yml config --quiet
+
+  publish:
+    name: Publish immutable Alpaca image
+    needs: tests
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.reference }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Authenticate to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Define immutable image reference
+        id: image
+        run: echo "reference=${IMAGE_REPOSITORY}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+      - name: Build and publish image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
+          tags: |
+            ${{ steps.image.outputs.reference }}
+            ${{ env.IMAGE_REPOSITORY }}:alpaca-experimental
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=alpaca-experimental
+          cache-to: type=gha,scope=alpaca-experimental,mode=max
+      - name: Create deployment artifact
+        env:
+          IMAGE: ${{ steps.image.outputs.reference }}
+        run: |
+          mkdir deployment-artifact
+          cp docker-compose.alpaca.yml scripts/deploy_alpaca_release.sh deployment-artifact/
+          printf '{"git_commit":"%s","image":"%s","created_at":"%s"}\n' \
+            "$GITHUB_SHA" "$IMAGE" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            > deployment-artifact/manifest.json
+      - name: Upload deployment artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: goblin-alpaca-deployment-${{ github.sha }}
+          path: deployment-artifact/
+          retention-days: 7
+          if-no-files-found: error
+
+  deploy:
+    name: Deploy Alpaca beside main
+    needs: publish
+    runs-on: ubuntu-latest
+    # Reuse the existing VPS environment secrets. The target Compose project,
+    # container, registry login, data and concurrency group are all separate.
+    environment: production
+    env:
+      OVH_HOST: ${{ secrets.OVH_HOST }}
+      OVH_USER: ${{ secrets.OVH_USER }}
+      VPS_DOCKER_CONFIG: /opt/goblin-alpaca/releases/${{ github.sha }}/docker-auth-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Download deployment artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: goblin-alpaca-deployment-${{ github.sha }}
+          path: deployment-artifact
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.OVH_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.OVH_SSH_KNOWN_HOSTS }}
+        run: |
+          test -n "$OVH_HOST" && test -n "$OVH_USER"
+          test -n "$SSH_PRIVATE_KEY" && test -n "$SSH_KNOWN_HOSTS"
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/ovh_deploy"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/ovh_deploy" "$HOME/.ssh/known_hosts"
+      - name: Verify VPS configuration and copy release
+        run: |
+          release_directory="${DEPLOY_DIRECTORY}/releases/${GITHUB_SHA}"
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -i "$HOME/.ssh/ovh_deploy" "${OVH_USER}@${OVH_HOST}" \
+            "test -f '${DEPLOY_DIRECTORY}/.env' || { echo 'Install /opt/goblin-alpaca/.env before deploying Alpaca' >&2; exit 66; }; install -d -m 700 '$release_directory' '$VPS_DOCKER_CONFIG'"
+          scp -o BatchMode=yes -o StrictHostKeyChecking=yes -i "$HOME/.ssh/ovh_deploy" \
+            deployment-artifact/docker-compose.alpaca.yml \
+            deployment-artifact/deploy_alpaca_release.sh \
+            deployment-artifact/manifest.json \
+            "${OVH_USER}@${OVH_HOST}:${release_directory}/"
+      - name: Authenticate VPS to GHCR with isolated credentials
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | \
+            ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -i "$HOME/.ssh/ovh_deploy" "${OVH_USER}@${OVH_HOST}" \
+              "DOCKER_CONFIG='$VPS_DOCKER_CONFIG' docker login ghcr.io --username 'Kaesarou' --password-stdin"
+      - name: Deploy immutable Alpaca image
+        env:
+          IMAGE: ${{ needs.publish.outputs.image }}
+        run: |
+          release_script="${DEPLOY_DIRECTORY}/releases/${GITHUB_SHA}/deploy_alpaca_release.sh"
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -i "$HOME/.ssh/ovh_deploy" "${OVH_USER}@${OVH_HOST}" \
+            "DOCKER_CONFIG='$VPS_DOCKER_CONFIG' bash '$release_script' '$GITHUB_SHA' '$IMAGE' '$DEPLOY_DIRECTORY'"
+      - name: Remove temporary Alpaca GHCR credentials
+        if: always()
+        run: |
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -i "$HOME/.ssh/ovh_deploy" "${OVH_USER}@${OVH_HOST}" \
+            "rm -f -- '$VPS_DOCKER_CONFIG/config.json'; rmdir -- '$VPS_DOCKER_CONFIG' 2>/dev/null || true" || true

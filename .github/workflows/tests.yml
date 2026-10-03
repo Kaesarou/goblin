@@ -46,3 +46,11 @@ jobs:
         run: |
           cat pytest.log
           test "${{ steps.tests.outcome }}" = "success"
+
+      - name: Validate Alpaca deployment files
+        env:
+          GOBLIN_IMAGE: ghcr.io/kaesarou/goblin:0000000000000000000000000000000000000000
+        run: |
+          bash -n scripts/deploy_alpaca_release.sh
+          touch .env
+          docker compose -f docker-compose.alpaca.yml config --quiet
