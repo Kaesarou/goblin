@@ -166,6 +166,8 @@ def test_successful_release_only_controls_its_explicit_compose_project(deploymen
             assert args[args.index("--project-name") + 1] == "goblin-alpaca"
             assert args[args.index("--project-directory") + 1] == str(app_dir)
     assert not any(args[0] in {"stop", "update"} for args in calls)
+    startup = next(args for args in calls if args[0] == "compose" and "up" in args)
+    assert "--force-recreate" in startup and "--no-deps" in startup
 
 
 @pytest.mark.parametrize("failure", ["configuration", "pull", "owner"])

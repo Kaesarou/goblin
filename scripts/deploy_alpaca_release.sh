@@ -87,12 +87,14 @@ fail_closed() {
   exit 1
 }
 
-if ! compose up --detach --wait --wait-timeout 180 goblin; then
+# Recreate even on a same-SHA retry: this applies the latest .env and restores
+# the configured restart policy after a preceding fail_closed disabled it.
+if ! compose up --detach --force-recreate --no-deps --wait --wait-timeout 180 goblin; then
   fail_closed
 fi
-container_id="$(compose ps --quiet goblin)"
-running_image="$(docker inspect --format '{{.Config.Image}}' "$container_id")"
-if [[ "$running_image" != "$image" ]]; then
+if ! container_id="$(compose ps --quiet goblin)" || [[ -z "$container_id" ]] || \
+   ! running_image="$(docker inspect --format '{{.Config.Image}}' "$container_id")" || \
+   [[ "$running_image" != "$image" ]]; then
   fail_closed
 fi
 
