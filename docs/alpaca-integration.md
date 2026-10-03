@@ -198,10 +198,13 @@ two fatal-stream scenarios also exercise the actual continuous `run()` loop.
 
 Startup now verifies active US-equity assets, fractional trading permissions for
 the trading universe, an explicitly configured benchmark and complete quote
-responses from the selected feed. Benchmarks are context only: they need not be
-fractionally tradable. There is no automatic SPX500-to-SPY substitution. Manifest
-schema 21 identifies Alpaca, its account and feed, and explicitly labels the
-unchanged legacy research cost assumptions; the eToro payload observer is off.
+payloads from the selected feed. A closed market may legitimately return zero
+bid/ask values; those values prove feed access but are never converted into an
+executable MarketSnapshot. Runtime WebSocket and REST-fallback paths remain
+strict and discard non-positive prices. Benchmarks are context only: they need
+not be fractionally tradable. There is no automatic SPX500-to-SPY substitution.
+Manifest schema 21 identifies Alpaca, its account and feed, and explicitly labels
+the unchanged legacy research cost assumptions; the eToro payload observer is off.
 
 Integration testing found and fixed stale stream health during reconnect backoff
 and incomplete cleanup when startup fails after starting streams. Shutdown waits

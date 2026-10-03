@@ -371,7 +371,9 @@ def _run_main(settings: Settings, storage: RuntimeStorageScope) -> None:
             clients.execution_broker.validate_universe(symbols, context_symbols=benchmarks)
             # Check selected-feed access/completeness without seeding causal candles
             # from a REST snapshot. Only the live runtime may advance feature state.
-            clients.rest_market_data.get_market_snapshots(list(dict.fromkeys([*symbols, *benchmarks])))
+            clients.rest_market_data.validate_feed_access(
+                list(dict.fromkeys([*symbols, *benchmarks]))
+            )
             manifest["broker"]["account_id"] = account_id
             manifest["broker"]["universe_preflight"] = "passed"
             write_run_manifest(run_paths.manifest, manifest)

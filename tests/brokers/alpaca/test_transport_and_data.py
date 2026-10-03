@@ -123,6 +123,34 @@ def test_rest_fallback_pins_same_feed_and_rejects_missing_symbol():
         client.get_market_snapshots(["MSFT"])
 
 
+def test_preflight_accepts_no_quote_prices_when_market_is_closed():
+    no_quote = {"T": "q", "S": "AAPL", "bp": 0, "ap": 0, "t": "2026-09-26T14:00:00Z"}
+    http = type(
+        "Http",
+        (),
+        {"request": lambda _, *args, **kwargs: {"quotes": {"AAPL": no_quote}}},
+    )()
+    client = AlpacaRestMarketDataClient(http, feed="iex")
+
+    client.validate_feed_access(["AAPL"])
+
+    with pytest.raises(ValueError, match="numeric range"):
+        client.get_market_snapshots(["AAPL"])
+
+
+def test_preflight_still_rejects_crossed_positive_quotes():
+    crossed = {"T": "q", "S": "AAPL", "bp": 102, "ap": 100, "t": "2026-09-26T14:00:00Z"}
+    http = type(
+        "Http",
+        (),
+        {"request": lambda _, *args, **kwargs: {"quotes": {"AAPL": crossed}}},
+    )()
+    client = AlpacaRestMarketDataClient(http, feed="iex")
+
+    with pytest.raises(ValueError, match="Crossed Alpaca quote"):
+        client.validate_feed_access(["AAPL"])
+
+
 class Socket:
     def __init__(self, frames, stop):
         self.frames = iter(frames)
