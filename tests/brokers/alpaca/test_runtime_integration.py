@@ -88,6 +88,7 @@ class Harness:
         self.asset_patches = {}
         self.quote_status = 200
         self.missing_quotes = set()
+        self.no_quote_symbols = set()
         self.rest_bid = 100.0
         self.settings = storage_settings(
             tmp_path / "alpaca", ALPACA_DATA_FEED=feed,
@@ -138,7 +139,10 @@ class Harness:
         if path == "/v2/stocks/quotes/latest":
             symbols = kwargs["params"]["symbols"].split(",")
             return response(self.quote_status, {"quotes": {
-                symbol: self.quote(symbol, self.rest_bid)
+                symbol: self.quote(
+                    symbol,
+                    0 if symbol in self.no_quote_symbols else self.rest_bid,
+                )
                 for symbol in symbols if symbol not in self.missing_quotes
             }})
         return response(200, self.api.request(method, path, params=kwargs.get("params"), json=kwargs.get("json")))
@@ -255,6 +259,17 @@ def test_missing_quote_or_feed_entitlement_prevents_runtime_start(tmp_path, monk
         harness.run(lambda runtime: pytest.fail("Unusable data feed started"))
     assert not harness.api.submissions and not harness.sockets
     assert json.loads(Path(harness.settings.run_manifest_path).read_text())["status"] == "failed"
+
+
+def test_closed_market_without_executable_rest_prices_can_bootstrap(tmp_path, monkeypatch):
+    harness = Harness(tmp_path, monkeypatch)
+    harness.no_quote_symbols.add("SPY")
+
+    harness.run(lambda runtime: harness.ready(runtime))
+
+    manifest = json.loads(Path(harness.settings.run_manifest_path).read_text())
+    assert manifest["broker"]["universe_preflight"] == "passed"
+    assert not harness.api.submissions
 
 
 def test_benchmark_is_context_only_and_does_not_require_fractional_order_permission(tmp_path, monkeypatch):

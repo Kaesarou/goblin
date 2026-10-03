@@ -32,7 +32,7 @@ class AlpacaRestMarketDataClient:
             raise ValueError("Only real-time IEX and SIP feeds are supported")
         self.http, self.feed = http, feed
 
-    def get_market_snapshots(self, symbols: list[str]) -> dict[str, MarketSnapshot]:
+    def _latest_quotes(self, symbols: list[str]) -> dict[str, dict]:
         if not symbols:
             return {}
         payload = self.http.request(
@@ -47,6 +47,36 @@ class AlpacaRestMarketDataClient:
         quotes = payload.get("quotes") if isinstance(payload, dict) else None
         if not isinstance(quotes, dict):
             raise ValueError("Missing Alpaca quotes collection")
+        missing = [symbol for symbol in symbols if symbol not in quotes]
+        if missing:
+            raise KeyError(missing[0])
+        invalid = [symbol for symbol in symbols if not isinstance(quotes[symbol], dict)]
+        if invalid:
+            raise ValueError(f"Invalid Alpaca quote for {invalid[0]}")
+        return quotes
+
+    def validate_feed_access(self, symbols: list[str]) -> None:
+        """Validate feed access without requiring executable prices.
+
+        Alpaca legitimately returns zero bid/ask values when a symbol has no
+        current quote (for example outside the US session). Startup must still
+        be able to validate credentials, entitlement and symbol completeness at
+        those times. The execution paths continue to use quote_snapshot,
+        which rejects non-positive prices.
+        """
+        quotes = self._latest_quotes(symbols)
+        for symbol in symbols:
+            quote = quotes[symbol]
+            number(quote.get("bp"))
+            number(quote.get("ap"))
+            timestamp(quote.get("t"))
+            bid = float(quote["bp"])
+            ask = float(quote["ap"])
+            if bid > 0 and ask > 0 and ask < bid:
+                raise ValueError(f"Crossed Alpaca quote for {symbol}")
+
+    def get_market_snapshots(self, symbols: list[str]) -> dict[str, MarketSnapshot]:
+        quotes = self._latest_quotes(symbols)
         now = datetime.now(UTC)
         return {
             symbol: quote_snapshot(symbol, quotes[symbol], received_at=now) for symbol in symbols
