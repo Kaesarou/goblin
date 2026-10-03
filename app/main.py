@@ -23,6 +23,8 @@ from app.runtime.runtime_policy import (
     JOURNAL_PARTIAL_SUMMARY_INTERVAL_MINUTES,
     JOURNAL_WRITE_PARTIAL_SUMMARY,
 )
+from app.runtime.stop_signals import runtime_stop_signals
+from app.runtime.storage_scope import RuntimeStorageScope
 from app.runtime.trading_session_window import trading_session_service_from_settings
 from app.utils.logging import configure_logging
 from app.v3.config import RecoverabilityConfig, etoro5_research_config
@@ -120,12 +122,12 @@ def _write_disabled_research_summary(
 
 def _assert_v3_execution_mode(broker: str) -> None:
     normalized = broker.strip().lower()
-    if normalized == "etoro_live":
+    if normalized in {"etoro_live", "alpaca_live"}:
         raise RuntimeError(
             "Goblin V3 is not prospectively validated for live capital. "
-            "Use paper or etoro_demo until an explicit promotion decision."
+            "Use paper, etoro_demo or alpaca_demo until an explicit promotion decision."
         )
-    if normalized not in {"paper", "etoro_demo"}:
+    if normalized not in {"paper", "etoro_demo", "alpaca_demo"}:
         raise RuntimeError(f"Unsupported V3 broker mode: {broker}")
 
 
@@ -133,6 +135,12 @@ def _assert_v3_universe(
     symbols: list[str],
     instrument_registry: InstrumentRegistry,
 ) -> None:
+    if instrument_registry.settings.broker.startswith("alpaca_"):
+        if any(instrument_registry.resolve(symbol).asset_class != AssetClass.EQUITY_US
+               for symbol in symbols):
+            raise RuntimeError("Alpaca V3 watchlist must contain only US equities")
+        if not instrument_registry.settings.benchmark_symbols_by_asset_class()[AssetClass.EQUITY_US]:
+            raise RuntimeError("Alpaca requires an explicitly configured US context benchmark")
     unsupported = [
         symbol
         for symbol in symbols
@@ -207,7 +215,7 @@ def _build_research_pipeline(
             stream_name="research",
             compact=True,
         ),
-        payload_schema_observer=EtoroPayloadSchemaObserver(
+        payload_schema_observer=None if settings.broker.startswith("alpaca_") else EtoroPayloadSchemaObserver(
             run_id=run_id,
             paths=(
                 run_paths.etoro_payload_schema,
@@ -225,11 +233,16 @@ def _build_research_pipeline(
 
 
 def main() -> None:
+    settings = get_settings()
+    _assert_v3_execution_mode(settings.broker)
+    with RuntimeStorageScope(settings) as storage:
+        _run_main(settings, storage)
+
+
+def _run_main(settings: Settings, storage: RuntimeStorageScope) -> None:
     started_at = datetime.now(UTC)
     run_id = build_run_id(started_at)
     run_status = "running"
-    settings = get_settings()
-    _assert_v3_execution_mode(settings.broker)
 
     run_paths = build_run_journal_paths(
         journal_path=settings.journal_path,
@@ -339,47 +352,69 @@ def main() -> None:
     write_run_manifest(run_paths.manifest, manifest)
     write_run_manifest(settings.run_manifest_path, manifest)
 
-    clients = build_runtime_clients(
-        settings,
-        websocket_payload_observer=(
-            None
-            if research_pipeline is None
-            else research_pipeline.observe_websocket_payload
-        ),
-    )
-    event_store = InventoryEventStore(
-        settings.position_store_path,
-        event_sink=_inventory_event_sink(trade_journal),
-    )
-    state_store = V3RuntimeStateStore(settings.position_store_path)
-    asset_class_by_symbol = {
-        symbol: instrument_registry.resolve(symbol).asset_class
-        for symbol in symbols
-    }
-    runtime = GoblinV3Runtime(
-        settings=settings,
-        symbols=symbols,
-        run_id=run_id,
-        instrument_registry=instrument_registry,
-        execution_broker=clients.execution_broker,
-        rest_market_data=clients.rest_market_data,
-        live_market_data=clients.live_market_data,
-        candle_builders=build_candle_builders(symbols),
-        trading_session_service=trading_session_service_from_settings(settings),
-        market_context_service=market_context_service,
-        multi_timeframe_service=multi_timeframe_service,
-        market_data_validator=MarketDataValidator(),
-        planner=planner,
-        config=config,
-        feature_engine=OnlineFeatureEngine(asset_class_by_symbol),
-        event_store=event_store,
-        runtime_state_store=state_store,
-        trade_journal=trade_journal,
-        market_journal=market_journal,
-        candle_journal=candle_journal,
-        heartbeat=RuntimeHeartbeat(settings.runtime_heartbeat_minutes),
-        research_pipeline=research_pipeline,
-    )
+    try:
+        clients = build_runtime_clients(
+            settings,
+            websocket_payload_observer=(
+                None
+                if research_pipeline is None
+                else research_pipeline.observe_websocket_payload
+            ),
+        )
+        account_id = clients.execution_broker.get_account_identity()
+        if settings.broker.startswith("alpaca_") and account_id is None:
+            raise RuntimeError("Alpaca startup requires an authoritative account identity")
+        if account_id is not None:
+            storage.bind_account(account_id)
+        if settings.broker.startswith("alpaca_"):
+            benchmarks = list(settings.benchmark_symbols_by_asset_class()[AssetClass.EQUITY_US])
+            clients.execution_broker.validate_universe(symbols, context_symbols=benchmarks)
+            # Check selected-feed access/completeness without seeding causal candles
+            # from a REST snapshot. Only the live runtime may advance feature state.
+            clients.rest_market_data.get_market_snapshots(list(dict.fromkeys([*symbols, *benchmarks])))
+            manifest["broker"]["account_id"] = account_id
+            manifest["broker"]["universe_preflight"] = "passed"
+            write_run_manifest(run_paths.manifest, manifest)
+            write_run_manifest(settings.run_manifest_path, manifest)
+        event_store = InventoryEventStore(
+            settings.position_store_path,
+            event_sink=_inventory_event_sink(trade_journal),
+        )
+        state_store = V3RuntimeStateStore(settings.position_store_path)
+        asset_class_by_symbol = {
+            symbol: instrument_registry.resolve(symbol).asset_class
+            for symbol in symbols
+        }
+        runtime = GoblinV3Runtime(
+            settings=settings,
+            symbols=symbols,
+            run_id=run_id,
+            instrument_registry=instrument_registry,
+            execution_broker=clients.execution_broker,
+            rest_market_data=clients.rest_market_data,
+            live_market_data=clients.live_market_data,
+            candle_builders=build_candle_builders(symbols),
+            trading_session_service=trading_session_service_from_settings(settings),
+            market_context_service=market_context_service,
+            multi_timeframe_service=multi_timeframe_service,
+            market_data_validator=MarketDataValidator(),
+            planner=planner,
+            config=config,
+            feature_engine=OnlineFeatureEngine(asset_class_by_symbol),
+            event_store=event_store,
+            runtime_state_store=state_store,
+            trade_journal=trade_journal,
+            market_journal=market_journal,
+            candle_journal=candle_journal,
+            heartbeat=RuntimeHeartbeat(settings.runtime_heartbeat_minutes),
+            research_pipeline=research_pipeline,
+        )
+    except Exception:
+        # Failed account/universe/feed validation happens before runtime.run().
+        # Do not leave an apparently running manifest for a rejected bootstrap.
+        for manifest_path in (run_paths.manifest, settings.run_manifest_path):
+            finalize_run_manifest(manifest_path, status="failed")
+        raise
 
     trade_journal.write(
         "runtime_started",
@@ -412,90 +447,104 @@ def main() -> None:
         run_paths.root,
     )
 
-    checkpoint_started = False
-    try:
-        # Startup performs restart restore and broker-unit reconciliation. Capture
-        # exactly that causal boundary before the first prospective event is run.
-        runtime.startup()
-        write_runtime_checkpoint(
-            run_paths.state_start,
-            runtime=runtime,
-            phase="start",
-            asof=datetime.now(UTC),
-        )
-        checkpoint_started = True
-        runtime.run()
-        run_status = (
-            "interrupted"
-            if runtime.stop_reason == "interrupted"
-            else "completed"
-        )
-    except Exception as exc:
-        run_status = "failed"
-        runtime.stop_reason = "error"
-        logger.exception("Goblin V3 runtime failed: %s", exc)
-        trade_journal.write(
-            "error",
-            {
-                "stage": "v3_runtime",
-                "error_type": type(exc).__name__,
-                "message": str(exc),
-            },
-        )
-        raise
-    finally:
-        if checkpoint_started:
+    with runtime_stop_signals(lambda: runtime.request_stop(reason="interrupted")):
+        checkpoint_started = False
+        try:
+            # Startup performs restart restore and broker-unit reconciliation. Capture
+            # exactly that causal boundary before the first prospective event is run.
+            runtime.startup()
+            write_runtime_checkpoint(
+                run_paths.state_start,
+                runtime=runtime,
+                phase="start",
+                asof=datetime.now(UTC),
+            )
+            checkpoint_started = True
+            runtime.run()
+            run_status = (
+                "interrupted"
+                if runtime.stop_reason == "interrupted"
+                else "completed"
+            )
+        except Exception as exc:
+            run_status = "failed"
+            runtime.stop_reason = "error"
+            logger.exception("Goblin V3 runtime failed: %s", exc)
+            trade_journal.write(
+                "error",
+                {
+                    "stage": "v3_runtime",
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            )
+            raise
+        finally:
+            # startup() can fail after a stream or worker has already been started,
+            # before runtime.run() gets a chance to execute its own finally block.
+            failed_before_cleanup = run_status == "failed"
+            shutdown_error = None
             try:
-                write_runtime_checkpoint(
-                    run_paths.state_end,
+                runtime.stop()
+            except Exception as exc:
+                shutdown_error = exc
+                run_status = "failed"
+                runtime.stop_reason = "error"
+                logger.exception("V3 runtime cleanup failed")
+            if checkpoint_started:
+                try:
+                    write_runtime_checkpoint(
+                        run_paths.state_end,
+                        runtime=runtime,
+                        phase="end",
+                        asof=datetime.now(UTC),
+                    )
+                except Exception:
+                    logger.exception("V3 end checkpoint write failed")
+            if research_pipeline is not None:
+                research_pipeline.flush()
+            else:
+                _write_disabled_research_summary(
+                    path=run_paths.research_summary,
+                    run_id=run_id,
+                    updated_at=datetime.now(UTC),
+                )
+            trade_journal.write(
+                "runtime_stopped",
+                {
+                    "run_id": run_id,
+                    "status": run_status,
+                    "loop_id": runtime.loop_id,
+                    "v3_metrics": runtime._heartbeat_metrics(),
+                },
+            )
+            summary = trade_journal.finalize()
+            summary.setdefault("market_data", {})["model_version"] = (
+                MARKET_DATA_MODEL_VERSION
+            )
+            write_run_manifest(settings.daily_summary_path, summary)
+            write_run_manifest(run_paths.summary, summary)
+            try:
+                write_run_qc(
+                    run_paths.run_qc,
+                    run_paths=run_paths,
                     runtime=runtime,
-                    phase="end",
-                    asof=datetime.now(UTC),
+                    trade_journal=trade_journal,
+                    market_journal=market_journal,
+                    candle_journal=candle_journal,
+                    status=run_status,
                 )
             except Exception:
-                logger.exception("V3 end checkpoint write failed")
-        if research_pipeline is not None:
-            research_pipeline.flush()
-        else:
-            _write_disabled_research_summary(
-                path=run_paths.research_summary,
-                run_id=run_id,
-                updated_at=datetime.now(UTC),
-            )
-        trade_journal.write(
-            "runtime_stopped",
-            {
-                "run_id": run_id,
-                "status": run_status,
-                "loop_id": runtime.loop_id,
-                "v3_metrics": runtime._heartbeat_metrics(),
-            },
-        )
-        summary = trade_journal.finalize()
-        summary.setdefault("market_data", {})["model_version"] = (
-            MARKET_DATA_MODEL_VERSION
-        )
-        write_run_manifest(settings.daily_summary_path, summary)
-        write_run_manifest(run_paths.summary, summary)
-        try:
-            write_run_qc(
-                run_paths.run_qc,
-                run_paths=run_paths,
-                runtime=runtime,
-                trade_journal=trade_journal,
-                market_journal=market_journal,
-                candle_journal=candle_journal,
-                status=run_status,
-            )
-        except Exception:
-            logger.exception("V3 run QC write failed")
-        for manifest_path in (run_paths.manifest, settings.run_manifest_path):
-            finalize_run_manifest(
-                manifest_path,
-                status=run_status,
-                summary=summary,
-                runtime_metrics=runtime._heartbeat_metrics(),
-            )
+                logger.exception("V3 run QC write failed")
+            for manifest_path in (run_paths.manifest, settings.run_manifest_path):
+                finalize_run_manifest(
+                    manifest_path,
+                    status=run_status,
+                    summary=summary,
+                    runtime_metrics=runtime._heartbeat_metrics(),
+                )
+            if shutdown_error is not None and not failed_before_cleanup:
+                raise shutdown_error
 
 
 if __name__ == "__main__":

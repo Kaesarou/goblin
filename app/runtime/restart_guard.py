@@ -96,23 +96,38 @@ def main() -> int:
     demo_close_watcher = (
         os.environ.get("GOBLIN_DEMO_AUTO_REARM_AFTER_MANUAL_CLOSE") == "1"
         and os.environ.get("GOBLIN_OBSERVATION_ONLY") == "0"
+        and os.environ.get("BROKER", "etoro_demo").strip().lower().replace("-", "_")
+        in {"etoro_demo", "etorodemo"}
     )
     child_module = (
         "scripts.demo_rearm_after_manual_closes" if demo_close_watcher
         else "app.main"
     )
-    child = subprocess.Popen([sys.executable, "-m", child_module])
+    child = None
     stopping = False
 
     def forward_stop(signum, _frame):
         nonlocal stopping
         stopping = True
-        if child.poll() is None:
-            child.send_signal(signum)
+        if child is not None and child.poll() is None:
+            try:
+                child.send_signal(signum)
+            except ProcessLookupError:
+                pass  # Child exited between poll() and send_signal().
 
-    signal.signal(signal.SIGTERM, forward_stop)
-    signal.signal(signal.SIGINT, forward_stop)
-    return_code = child.wait()
+    previous = {}
+    try:
+        # Docker may stop the wrapper while Popen is still creating its child.
+        # Remember that request and forward it as soon as a child exists.
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            previous[signum] = signal.signal(signum, forward_stop)
+        child = subprocess.Popen([sys.executable, "-m", child_module])
+        if stopping:
+            forward_stop(signal.SIGTERM, None)
+        return_code = child.wait()
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
     if stopping:
         return 0
     return return_code if return_code > 0 else (1 if return_code < 0 else 0)
