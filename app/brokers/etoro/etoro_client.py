@@ -83,6 +83,7 @@ class EtoroClient(BrokerClient):
 
     etoro_api_base_url = 'https://public-api.etoro.com'
     account_equity_source = ACCOUNT_EQUITY_SOURCE
+    open_price_sanity_required = True
 
     def __init__(
         self,
@@ -194,6 +195,7 @@ class EtoroClient(BrokerClient):
             executed_entry_price=executed_position.executed_entry_price,
             executed_units=executed_position.executed_units,
             executed_notional=account_notional,
+            broker_response=order_details,
         )
 
     def _translate_open_confirmation_error(
