@@ -30,6 +30,13 @@ from app.v3.close_recovery import (
 from app.v3.execution import ProRataPartialCloseAllocator, assess_inventory_close
 from app.v3.external_account_gate import gate_active, record_external_broker_activity
 from app.v3.models import IntentPurpose, OrderIntent
+from app.v3.open_economics import (
+    OPEN_ECONOMICS_HALT_REASONS,
+    OPEN_PRICE_MAX_DEVIATION_BP,
+    OpenEconomicsRecovery,
+    positive_number,
+    price_sanity,
+)
 from app.v3.open_recovery import (
     _OpenContext,
     _PendingOpenConfirmation,
@@ -224,6 +231,8 @@ class V3BrokerExecutor:
                 unknown.add(action)
             elif event.event_type == "OPEN_ACCOUNT_NOTIONAL_MISMATCH":
                 self._notional_anomaly_action_ids.add(action)
+            elif event.event_type == "OPEN_ACCOUNT_NOTIONAL_RECONCILED":
+                self._notional_anomaly_action_ids.discard(action)
         self._resolved_open_action_ids.update(resolved)
         self._unresolved_open_actions = (set(started) | unknown) - resolved
         self._unknown_open_action_ids.update(self._unresolved_open_actions)
@@ -253,10 +262,14 @@ class V3BrokerExecutor:
             self.halted_reason = "unresolved_open_submission_at_restart"
         if self._notional_anomaly_action_ids and self.halted_reason is None:
             self.halted_reason = "open_account_notional_mismatch_at_restart"
+        self._open_economics = OpenEconomicsRecovery(self.event_store.events())
+        if self._open_economics.price_anomalies and self.halted_reason is None:
+            self.halted_reason = "open_fill_economics_unresolved_at_restart"
 
     @property
     def new_risk_allowed(self) -> bool:
-        return self.halted_reason is None
+        return (self.halted_reason is None and not self._notional_anomaly_action_ids
+                and not self._open_economics.price_anomalies)
 
     def schedule(self, intent: OrderIntent, *, snapshot: MarketSnapshot) -> bool:
         if intent.side.upper() != "BUY":
@@ -334,9 +347,18 @@ class V3BrokerExecutor:
                 "notional": intent.notional,
                 "trigger_price": trigger_price,
                 "cost_estimate": asdict(intent.cost_estimate) if intent.cost_estimate else None,
+                "causal_quote": {
+                    "bid": snapshot.bid, "ask": snapshot.ask, "last": snapshot.last,
+                    "timestamp": snapshot.timestamp.isoformat(),
+                    "received_at": snapshot.received_at.isoformat(),
+                },
             },
         )
-        context = _OpenContext(action_id, intent, inventory_id, trigger_price, client_order_id)
+        context = _OpenContext(action_id, intent, inventory_id, trigger_price, client_order_id=client_order_id, causal_quote={
+            "bid": snapshot.bid, "ask": snapshot.ask, "last": snapshot.last,
+            "timestamp": snapshot.timestamp.isoformat(),
+            "received_at": snapshot.received_at.isoformat(),
+        })
         stop_loss = max(1e-8, trigger_price * 0.5)
         take_profit = trigger_price * 10.0
         self._pending_actions.add(action_id)
@@ -365,6 +387,8 @@ class V3BrokerExecutor:
     ) -> bool:
         inventory = self.book.active_for_symbol(intent.symbol)
         if inventory is None:
+            return False
+        if not inventory.economics_resolved and intent.purpose == IntentPurpose.PROFIT_EXIT:
             return False
         assessment = assess_inventory_close(
             inventory=inventory,
@@ -487,6 +511,8 @@ class V3BrokerExecutor:
                 applied.extend(self._handle_close_lookup(completion))
             elif completion.kind == "v3_broker_reconciliation":
                 self._handle_broker_reconciliation(completion)
+            elif completion.kind == "v3_open_economics_revalidation":
+                self._handle_open_economics_revalidation(completion)
         return tuple(applied)
 
     def schedule_close_confirmation_checks(
@@ -498,7 +524,7 @@ class V3BrokerExecutor:
         now = time.monotonic() if monotonic_now is None else float(monotonic_now)
         self._refresh_stale_confirmation_halt(utc_now or _utc_now())
         if (self._confirmation_tasks or self._open_confirmation_tasks
-                or self._broker_reconciliation_in_flight):
+                or self._broker_reconciliation_in_flight or self._open_economics.in_flight):
             return 0
         due = [
             (pending.next_attempt_monotonic, pending.accepted_at, action_id, pending)
@@ -513,6 +539,8 @@ class V3BrokerExecutor:
         elif self._schedule_open_confirmation(now, utc_now=utc_now):
             return 1
         elif self._schedule_broker_reconciliation(now):
+            return 1
+        elif self._schedule_open_economics_revalidation(utc_now or _utc_now()):
             return 1
         if due:
             _, _, action_id, pending = min(due, key=lambda item: item[:3])
@@ -658,6 +686,118 @@ class V3BrokerExecutor:
             lane=BrokerTaskLane.QUERY,
         )
         return 1
+
+    def _schedule_open_economics_revalidation(self, now: datetime) -> bool:
+        lookup = getattr(self.broker, "get_open_position_economics", None)
+        if lookup is None:
+            return False
+        checks = self._open_economics.due_checks(
+            self.book, self._notional_anomaly_action_ids, _as_utc(now),
+        )
+        # A close can race a P&L GET. Wait for its quantity to become authoritative.
+        checks = tuple(check for check in checks
+                       if check.position_id not in self._active_close_mutations_by_position)
+        if not checks:
+            return False
+        for check in checks:
+            payload = self._open_economics.reserve(check, _as_utc(now))
+            self._append(event_type="OPEN_ECONOMICS_REVALIDATION_STARTED",
+                         inventory_id=check.inventory_id,
+                         event_id=f"{check.action_id}:economics-check:{payload['attempt_count']}",
+                         payload=payload)
+            if check.current_units > 0:
+                self.broker.remember_position_instrument(check.position_id, check.fill["symbol"])
+        self._open_economics.in_flight = True
+        self._open_economics.attempts += 1
+
+        def operation():
+            active = tuple(check.position_id for check in checks if check.current_units > 0)
+            closed = tuple(check.position_id for check in checks if check.current_units == 0)
+            return (lookup(active) if active else {},
+                    self.broker.get_open_position_units(closed) if closed else {})
+
+        self.task_runner.submit(kind="v3_open_economics_revalidation",
+                                task_id="v3-open-economics-revalidation", context=checks,
+                                operation=operation, lane=BrokerTaskLane.QUERY)
+        return True
+
+    def _handle_open_economics_revalidation(self, completion) -> None:
+        self._open_economics.in_flight = False
+        if completion.error is not None:
+            for check in completion.context:
+                self._record_open_economics_failure(check, "broker_read_unavailable",
+                                                    error=completion.error)
+            return
+        if (not isinstance(completion.value, tuple) or len(completion.value) != 2
+                or not all(isinstance(value, dict) for value in completion.value)):
+            for check in completion.context:
+                self._record_open_economics_failure(check, "invalid_broker_response")
+            return
+        evidence_by_id, closed_units = completion.value
+        for check in completion.context:
+            if (not _units_close(check.current_units, self._current_leg_units(check.position_id))
+                    or check.position_id in self._active_close_mutations_by_position):
+                self._record_open_economics_failure(check, "position_changed_during_lookup")
+                continue
+            price_unresolved = check.action_id in self._open_economics.price_anomalies
+            if check.current_units == 0:
+                # Retire only the risk anomaly, never fabricate original economics.
+                # Mere absence from P&L is insufficient: require a quantified flat
+                # portfolio and a complete, confirmed close ledger for this leg.
+                closed = closed_units.get(check.position_id)
+                exits = sum(float(event.payload["units"]) for event in self.event_store.events()
+                            if event.event_type in {"EXIT_FILLED", "EXIT_ECONOMICS_CONFIRMED"}
+                            and str(event.payload.get("position_id")) == check.position_id)
+                if (price_unresolved or isinstance(closed, bool) or closed != 0.0
+                        or not _units_close(exits, float(check.fill["units"]))):
+                    self._record_open_economics_failure(check, "closed_exposure_not_proven")
+                    continue
+                payload = {"action_id": check.action_id, "position_id": check.position_id,
+                           "resolution": "confirmed_closed_exposure",
+                           "source": "exact_portfolio_units_and_confirmed_close_ledger",
+                           "original_account_notional_resolved": False}
+            else:
+                evidence = evidence_by_id.get(check.position_id)
+                if not self._open_economics.validate(check, evidence, units_close=_units_close):
+                    self._record_open_economics_failure(check, "exact_economics_not_proven",
+                                                        evidence=evidence)
+                    continue
+                payload = {"action_id": check.action_id, "position_id": check.position_id,
+                           "resolution": "exact_broker_position", "price": evidence.entry_price,
+                           "notional": evidence.account_notional, "units": evidence.units,
+                           "source": evidence.source, "broker_response": evidence.broker_response}
+            event_types = []
+            if check.action_id in self._notional_anomaly_action_ids:
+                event_types.append("OPEN_ACCOUNT_NOTIONAL_RECONCILED")
+            if price_unresolved:
+                event_types.append("OPEN_FILL_ECONOMICS_RECONCILED")
+            for event_type in event_types:
+                self._append(event_type=event_type, inventory_id=check.inventory_id,
+                             event_id=f"{check.action_id}:{event_type}", payload=payload)
+                if check.current_units > 0:
+                    self.book.reconcile_entry_economics(
+                        position_id=check.position_id, price=payload["price"],
+                        account_notional=payload["notional"], observed_at=_utc_now(),
+                        resolve_price=event_type == "OPEN_FILL_ECONOMICS_RECONCILED")
+            self._notional_anomaly_action_ids.discard(check.action_id)
+            self._open_economics.price_anomalies.discard(check.action_id)
+            self._open_economics.reconciled += 1
+        if (not self._notional_anomaly_action_ids and not self._open_economics.price_anomalies
+                and self.halted_reason in OPEN_ECONOMICS_HALT_REASONS):
+            self.halted_reason = None
+            self._refresh_stale_confirmation_halt(_utc_now())
+
+    def _record_open_economics_failure(self, check, reason, *, error=None, evidence=None):
+        self._open_economics.failures += 1
+        count, deadline = self._open_economics.retries[check.action_id]
+        self._append(event_type="OPEN_ECONOMICS_REVALIDATION_FAILED",
+                     inventory_id=check.inventory_id,
+                     event_id=f"{check.action_id}:economics-check-failed:{count}",
+                     payload={"action_id": check.action_id, "position_id": check.position_id,
+                              "reason": reason, "attempt_count": count,
+                              "next_attempt_at": deadline.isoformat(),
+                              "error_type": type(error).__name__ if error else None,
+                              "broker_response": getattr(evidence, "broker_response", None)})
 
     def restore_pending_close_confirmations(
         self, events: Iterable[InventoryEvent], *,
@@ -1055,6 +1195,7 @@ class V3BrokerExecutor:
                 "broker_units": actual_broker_units,
                 "reconciled_book_units": reconciled_book_units,
                 "entry_price_basis": float(leg.entry_price),
+                "entry_economics_resolved": leg.economics_resolved,
                 "previous_account_notional": previous_account_notional,
                 "remaining_account_notional": remaining_account_notional,
                 "pending_requested_units": expectation.pending_requested_units,
@@ -1089,6 +1230,7 @@ class V3BrokerExecutor:
                 broker_units=actual_broker_units,
                 entry_price_basis=float(leg.entry_price),
                 attribution_confident=attribution_confident,
+                entry_economics_resolved=leg.economics_resolved,
             ))
             if pending is not None:
                 pending.quantity_resolved = True
@@ -1183,6 +1325,7 @@ class V3BrokerExecutor:
             except Exception:
                 broker_rate_limit = {"status": "unavailable"}
         return {
+            **self._open_economics.metrics(),
             "pending_open_symbols": dict(sorted(self._open_by_symbol.items())),
             "open_confirmation_attempts": self._open_confirmation_attempts,
             "open_confirmation_in_flight": len(self._open_confirmation_tasks),
@@ -1379,7 +1522,8 @@ class V3BrokerExecutor:
                         },
                     )
                     self._notional_anomaly_action_ids.add(action)
-                    self.halted_reason = "open_account_notional_mismatch"
+                    if self.halted_reason is None or self.halted_reason in OPEN_ECONOMICS_HALT_REASONS:
+                        self.halted_reason = "open_account_notional_mismatch"
                     if use_requested:
                         completion = replace(
                             completion, value=replace(result, executed_notional=None)
@@ -1438,7 +1582,15 @@ class V3BrokerExecutor:
             self.halted_reason = "invalid_open_completion"
             return []
 
-        price = float(result.executed_entry_price or context.trigger_price)
+        causal_quote = context.causal_quote or {"ask": context.trigger_price}
+        quarantine_price = (
+            getattr(self.broker, "open_price_sanity_required", False)
+            and not price_sanity(result.executed_entry_price, causal_quote)
+        )
+        # A placeholder preserves confirmed units/exposure in the projection.
+        # Its explicit unresolved flag forbids cost-basis/trailing/P&L authority.
+        price = (context.trigger_price if quarantine_price
+                 else float(result.executed_entry_price or context.trigger_price))
         if not math.isfinite(price) or price <= 0:
             self.halted_reason = "invalid_open_execution_price"
             return []
@@ -1526,6 +1678,18 @@ class V3BrokerExecutor:
                 else context.intent.cost_estimate.total
             ),
             "purpose": context.intent.purpose.value,
+            "broker_raw_price": result.executed_entry_price,
+            "broker_response": result.broker_response,
+            "causal_quote": causal_quote,
+            "entry_price_deviation_bp": (
+                (float(result.executed_entry_price) / context.trigger_price - 1) * 10_000
+                if positive_number(result.executed_entry_price) else None
+            ),
+            "price_sanity_max_deviation_bp": OPEN_PRICE_MAX_DEVIATION_BP,
+            "price_source": "causal_quote_provisional" if quarantine_price else (
+                "paper_derived" if result.executed_entry_price is None else "broker_confirmed"
+            ),
+            "economics_status": "ECONOMICS_UNRESOLVED" if quarantine_price else "RESOLVED",
         }
         inserted = self._append(
             event_type="ENTRY_FILLED",
@@ -1547,7 +1711,13 @@ class V3BrokerExecutor:
             account_notional=account_notional,
             fee=0.0,
             filled_at=_utc_now(),
+            economics_resolved=not quarantine_price,
         )
+        self._open_economics.fills[context.action_id] = (inventory_id, payload)
+        if quarantine_price:
+            self._open_economics.price_anomalies.add(context.action_id)
+            if self.halted_reason is None:
+                self.halted_reason = "open_fill_economics_unresolved"
         return [context.intent.intent_id]
 
     def _handle_close_submission(self, completion: BrokerTaskCompletion) -> list[str]:
@@ -1830,6 +2000,7 @@ class V3BrokerExecutor:
                     ),
                     "broker_remaining_units": reconciled.broker_units,
                     "entry_price_basis": reconciled.entry_price_basis,
+                    "entry_economics_resolved": reconciled.entry_economics_resolved,
                     "price": exit_price,
                     "fee": 0.0,
                     "close_order_id": close_order_id,
@@ -1849,6 +2020,7 @@ class V3BrokerExecutor:
                 units=executed_units,
                 entry_price_basis=reconciled.entry_price_basis,
                 fee=0.0,
+                entry_economics_resolved=reconciled.entry_economics_resolved,
             )
             if reconciled.broker_units <= BROKER_UNIT_ABS_TOLERANCE:
                 self.broker.forget_position_instrument(context.position_id)
@@ -1923,6 +2095,7 @@ class V3BrokerExecutor:
                 "broker_execution_position_id": broker_execution_position_id,
                 "units": executed_units,
                 "book_units_applied": units_to_apply,
+                "entry_economics_resolved": leg.economics_resolved,
                 "requested_units": context.requested_units,
                 "pre_close_units": context.pre_close_units,
                 "price": exit_price,

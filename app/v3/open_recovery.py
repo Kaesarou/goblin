@@ -18,6 +18,7 @@ class _OpenContext:
     inventory_id: str
     trigger_price: float
     client_order_id: str | None = None
+    causal_quote: dict | None = None
 
 
 @dataclass
@@ -46,6 +47,7 @@ def restored_open_context(event: InventoryEvent) -> _OpenContext:
         ),
         inventory_id=event.inventory_id, trigger_price=float(payload["trigger_price"]),
         client_order_id=str(payload["client_order_id"]),
+        causal_quote=payload.get("causal_quote"),
     )
 
 

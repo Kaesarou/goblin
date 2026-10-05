@@ -23,6 +23,19 @@ class OpenPositionResult:
     executed_units: float | None = None
     executed_notional: float | None = None
     order: BrokerOpenOrder | None = None
+    broker_response: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class BrokerPositionEconomics:
+    """Exact position evidence in instrument price and account currency."""
+
+    position_id: str
+    units: float
+    entry_price: float
+    account_notional: float
+    source: str
+    broker_response: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -133,6 +146,13 @@ class BrokerClient(ABC):
     """
 
     account_equity_source = "broker_account_equity"
+    open_price_sanity_required = False
+
+    def get_open_position_economics(
+        self, position_ids: Iterable[str],
+    ) -> dict[str, BrokerPositionEconomics]:
+        """Return exact uncached evidence; absence is not proof of a close."""
+        raise NotImplementedError
 
     @property
     def requires_external_activity_ack(self) -> bool:

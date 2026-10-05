@@ -95,6 +95,7 @@ def test_v3_manifest_declares_authority_and_replayable_log_budget(tmp_path):
             "active_close_mutation",
             "active_open_recovery",
             "periodic_broker_reconciliation",
+            "open_economics_revalidation",
             "economics_only_close_confirmation",
         ],
         "mismatch_policy": "halt_new_risk_reduce_only_allowed",

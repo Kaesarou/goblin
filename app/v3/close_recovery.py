@@ -50,6 +50,7 @@ class _ReconciledCloseQuantity:
     broker_units: float
     entry_price_basis: float
     attribution_confident: bool
+    entry_economics_resolved: bool = True
 
 
 @dataclass(frozen=True)
@@ -175,6 +176,7 @@ def replay_close_events(
                     ids[0], event.inventory_id, position_id,
                     float(payload["reconciled_book_units"]), float(payload["broker_units"]),
                     float(payload["entry_price_basis"]), confident,
+                    bool(payload.get("entry_economics_resolved", True)),
                 ))
         elif event.event_type == "BROKER_RECONCILIATION_ACKNOWLEDGED":
             unattributed.discard(str(payload["position_id"]))
