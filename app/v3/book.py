@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import math
+from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from datetime import datetime
-from typing import Iterable, Mapping
 
 from app.v3.models import BrokerLeg, InventoryState, InventoryStatus, PortfolioState
 from app.v3.persistence import InventoryEvent
-
 
 _CLOSE_TOLERANCE = 1e-9
 
@@ -23,13 +23,22 @@ class InventoryBook:
         self._legacy_inventory_aliases: dict[str, str] = {}
 
     @classmethod
-    def from_events(cls, events: Iterable[InventoryEvent]) -> "InventoryBook":
+    def from_events(cls, events: Iterable[InventoryEvent]) -> InventoryBook:
         book = cls()
         for event in events:
             if event.event_type == "ENTRY_FILLED":
                 payload = event.payload
                 units = float(payload["units"])
                 price = float(payload["price"])
+                notional = float(payload.get("notional", units * price))
+                requested = payload.get("requested_notional")
+                if (payload.get("notional_source") == "broker_confirmed_account_currency"
+                        and isinstance(requested, (int, float)) and not isinstance(requested, bool)
+                        and math.isfinite(requested) and requested > 0
+                        and not 0.8 * requested <= notional <= 1.2 * requested):
+                    # Preserve the immutable legacy fill, but never restore the
+                    # observed $1 order-field corruption as available risk budget.
+                    notional = max(notional, requested)
                 symbol = str(payload["symbol"])
                 inventory_id = book._legacy_inventory_aliases.get(
                     event.inventory_id, event.inventory_id
@@ -47,12 +56,20 @@ class InventoryBook:
                     position_id=str(payload["position_id"]),
                     units=units,
                     price=price,
-                    account_notional=float(
-                        payload.get("notional", units * price)
-                    ),
+                    account_notional=notional,
                     fee=float(payload.get("fee", 0.0)),
                     filled_at=event.occurred_at,
+                    economics_resolved=payload.get("economics_status") != "ECONOMICS_UNRESOLVED",
                 )
+            elif event.event_type in {"OPEN_ACCOUNT_NOTIONAL_RECONCILED", "OPEN_FILL_ECONOMICS_RECONCILED"}:
+                if event.payload.get("resolution") != "confirmed_closed_exposure":
+                    book.reconcile_entry_economics(
+                        position_id=str(event.payload["position_id"]),
+                        price=float(event.payload["price"]),
+                        account_notional=float(event.payload["notional"]),
+                        observed_at=event.occurred_at,
+                        resolve_price=event.event_type == "OPEN_FILL_ECONOMICS_RECONCILED",
+                    )
             elif event.event_type == "BROKER_QUANTITY_RECONCILED":
                 payload = event.payload
                 book.reconcile_broker_leg_units(
@@ -71,6 +88,7 @@ class InventoryBook:
                     units=float(payload["units"]),
                     entry_price_basis=float(payload["entry_price_basis"]),
                     fee=float(payload.get("fee", 0.0)),
+                    entry_economics_resolved=bool(payload.get("entry_economics_resolved", True)),
                 )
             elif event.event_type == "EXIT_FILLED":
                 payload = event.payload
@@ -117,6 +135,7 @@ class InventoryBook:
         fee: float,
         filled_at: datetime,
         account_notional: float | None = None,
+        economics_resolved: bool = True,
     ) -> InventoryState:
         if position_id in self._inventory_by_position_id:
             raise ValueError(f"Broker position already applied: {position_id}")
@@ -138,6 +157,7 @@ class InventoryBook:
             filled_at,
             side="BUY",
             account_notional=actual_account_notional,
+            economics_resolved=economics_resolved,
         )
         if existing is None:
             if self.active_for_symbol(normalized) is not None:
@@ -191,6 +211,36 @@ class InventoryBook:
         self._inventories[inventory_id] = updated
         self._inventory_by_position_id[position_id] = inventory_id
         return updated
+
+    def reconcile_entry_economics(
+        self, *, position_id: str, price: float, account_notional: float,
+        observed_at: datetime, resolve_price: bool,
+    ) -> None:
+        if not all(math.isfinite(v) and v > 0 for v in (price, account_notional)):
+            raise ValueError("Invalid reconciled entry economics")
+        iid = self._inventory_by_position_id.get(position_id)
+        if iid is None:
+            raise ValueError("Reconciled economics require an active broker leg")
+        inventory = self._inventories[iid]
+        legs = tuple(replace(leg, account_notional=account_notional,
+                             entry_price=price if resolve_price else leg.entry_price,
+                             economics_resolved=True if resolve_price else leg.economics_resolved)
+                     if leg.position_id == position_id else leg
+                     for leg in inventory.broker_legs)
+        changes = dict(broker_legs=legs, total_notional=sum(_leg_account_notional(leg) for leg in legs))
+        if resolve_price:
+            # No past extrema are inferred using the rejected basis. Restart the
+            # causal trailing bundle at resolution, preserving fill count/time.
+            changes.update(
+                average_entry_price=sum(leg.units * leg.entry_price for leg in legs) / inventory.total_units,
+                last_entry_price=legs[-1].entry_price, last_fill_at=observed_at,
+                trailing_min_since_open=None, trailing_max_since_min=None,
+                trailing_max_since_open=None, trailing_min_since_max=None,
+                min_price_since_last_entry=price, max_price_since_last_entry=price,
+                min_price_since_open=price, max_price_since_open=price,
+                mfe_pct=0.0, mae_pct=0.0,
+            )
+        self._inventories[iid] = replace(inventory, **changes)
 
     def reconcile_broker_leg_units(
         self,
@@ -284,6 +334,7 @@ class InventoryBook:
         units: float,
         entry_price_basis: float,
         fee: float,
+        entry_economics_resolved: bool = True,
     ) -> InventoryState:
         """Finalize PnL for quantity that was already reconciled from the broker."""
 
@@ -295,10 +346,11 @@ class InventoryBook:
         actual_entry_price = float(entry_price_basis)
         if actual_units <= 0 or actual_exit_price <= 0 or actual_entry_price <= 0:
             raise ValueError("Exit economics confirmation requires positive units/prices")
-        realized = actual_units * (actual_exit_price - actual_entry_price)
+        realized = actual_units * (actual_exit_price - actual_entry_price) if entry_economics_resolved else 0.0
         updated = replace(
             inventory,
             realized_pnl=inventory.realized_pnl + realized,
+            unresolved_exit_units=inventory.unresolved_exit_units + (0.0 if entry_economics_resolved else actual_units),
             fees_paid=inventory.fees_paid + float(fee),
         )
         self._inventories[inventory_id] = updated
@@ -329,7 +381,9 @@ class InventoryBook:
             )
         close_units = min(close_units, leg.units)
         remaining_units = max(0.0, leg.units - close_units)
-        realized = close_units * (exit_price - leg.entry_price)
+        # An emergency reduction still removes real exposure. It cannot turn
+        # the quarantined quote placeholder into a realized economic result.
+        realized = close_units * (exit_price - leg.entry_price) if leg.economics_resolved else 0.0
         leg_account_notional = _leg_account_notional(leg)
 
         if remaining_units <= _CLOSE_TOLERANCE:
@@ -357,6 +411,7 @@ class InventoryBook:
                 total_notional=0.0,
                 wallet_exposure_pct=0.0,
                 realized_pnl=inventory.realized_pnl + realized,
+                unresolved_exit_units=inventory.unresolved_exit_units + (0.0 if leg.economics_resolved else close_units),
                 fees_paid=inventory.fees_paid + fee,
                 last_fill_at=filled_at,
                 broker_legs=(),
@@ -374,6 +429,7 @@ class InventoryBook:
                 average_entry_price=cost / total_units,
                 total_notional=account_notional,
                 realized_pnl=inventory.realized_pnl + realized,
+                unresolved_exit_units=inventory.unresolved_exit_units + (0.0 if leg.economics_resolved else close_units),
                 fees_paid=inventory.fees_paid + fee,
                 last_fill_at=filled_at,
                 broker_legs=remaining_legs,
@@ -387,7 +443,7 @@ class InventoryBook:
 
     def observe_candle(self, *, symbol: str, high: float, low: float, close: float) -> None:
         inventory = self.active_for_symbol(symbol)
-        if inventory is None:
+        if inventory is None or not inventory.economics_resolved:
             return
         tmin = inventory.trailing_min_since_open
         tmaxmin = inventory.trailing_max_since_min

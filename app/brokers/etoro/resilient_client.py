@@ -1,11 +1,10 @@
 import logging
 import math
 import time
-from datetime import datetime, timezone
 
 import requests
 
-from app.brokers.base import OpenPositionResult
+from app.brokers.base import BrokerAccountPreflight, BrokerPositionEconomics
 from app.brokers.etoro.etoro_client import EtoroClient
 from app.brokers.etoro.order_confirmation_error import (
     EtoroOrderConfirmationUnknownError,
@@ -18,17 +17,113 @@ from app.brokers.etoro.order_response_parser import (
     is_order_executed,
     is_order_rejected,
 )
+from app.brokers.etoro.pending_orders_preflight import pending_open_order_descriptions
 from app.brokers.etoro.pnl_position_amount import position_amount_usd
-from app.brokers.etoro.position_instrument_cache import (
-    remember_position_instrument_id,
-)
-from app.brokers.etoro.trade_side import ensure_side_is_allowed, normalize_side
+from app.brokers.etoro.portfolio_position_parser import extract_open_position_units
 
 logger = logging.getLogger(__name__)
 
 
 class ResilientEtoroClient(EtoroClient):
     """Preserve exposure while accepted open orders remain uncertain."""
+
+    @property
+    def requires_external_activity_ack(self) -> bool:
+        return self.env == "demo"
+
+    def get_account_preflight(self) -> BrokerAccountPreflight:
+        return BrokerAccountPreflight(
+            position_units=extract_open_position_units(self.get_portfolio()),
+            pending_open_orders=pending_open_order_descriptions(self),
+        )
+
+    def get_open_position_economics(self, position_ids):
+        if self.settings.base_currency.strip().upper() != "USD":
+            raise ValueError("Exact eToro economics require USD account currency")
+        path = ("/api/v1/trading/info/demo/pnl" if self.env == "demo"
+                else "/api/v1/trading/info/real/pnl")
+        payload = self._get(path)
+        # Reuse the strict amount parser, including envelope/duplicate validation.
+        result = {}
+        for position_id in position_ids:
+            amount = position_amount_usd(payload, position_id)
+            if amount is None:
+                continue
+            position = next(p for p in payload["clientPortfolio"]["positions"]
+                            if str(p.get("positionId")) == str(position_id))
+            expected_instrument = self.position_instruments.get(str(position_id))
+            if (expected_instrument is None
+                    or position.get("instrumentId") != expected_instrument
+                    or position.get("isBuy") is not True
+                    or isinstance(position.get("leverage"), bool)
+                    or position.get("leverage") != 1):
+                raise ValueError("Exact eToro economics position identity mismatch")
+            units, price = position.get("units"), position.get("openRate")
+            for value in (units, price):
+                if (isinstance(value, bool) or not isinstance(value, (float, int))
+                        or not math.isfinite(value) or value <= 0):
+                    raise ValueError("Invalid exact eToro economics price/units")
+            result[str(position_id)] = BrokerPositionEconomics(
+                position_id=str(position_id), units=float(units),
+                entry_price=float(price), account_notional=amount,
+                source="etoro_exact_pnl_position_usd", broker_response=position,
+            )
+        return result
+
+    def _translate_open_confirmation_error(
+        self,
+        *,
+        order_id,
+        reference_id,
+        symbol,
+        side,
+        amount,
+        submitted_at,
+        cause,
+    ):
+        if isinstance(cause, EtoroOrderRejectedError):
+            return None
+        return EtoroOrderConfirmationUnknownError(
+            order_id=order_id,
+            reference_id=reference_id,
+            symbol=symbol.strip().upper(),
+            side=side,
+            amount=amount,
+            submitted_at=submitted_at,
+            cause=cause,
+        )
+
+    def _invalid_open_execution_error(
+        self,
+        *,
+        order_id,
+        reference_id,
+        symbol,
+        side,
+        amount,
+        submitted_at,
+        details,
+        execution_count,
+    ):
+        return EtoroOrderConfirmationUnknownError(
+            order_id=order_id,
+            reference_id=reference_id,
+            symbol=symbol.strip().upper(),
+            side=side,
+            amount=amount,
+            submitted_at=submitted_at,
+            cause=RuntimeError(
+                'unsupported executed position count: '
+                f'{execution_count}'
+            ),
+        )
+
+    def _resolve_open_notional(self, *, position_id, requested, reported):
+        return self._resolve_suspicious_account_notional(
+            position_id=position_id,
+            requested=requested,
+            reported=reported,
+        )
 
     def _wait_for_executed_order(
         self,
@@ -118,114 +213,3 @@ class ResilientEtoroClient(EtoroClient):
             position_id, reported, pnl_amount,
         )
         return pnl_amount
-
-    def open_position(
-        self,
-        symbol: str,
-        side: str,
-        amount: float,
-        stop_loss: float,
-        take_profit: float,
-    ) -> OpenPositionResult:
-        normalized_side = normalize_side(side)
-        ensure_side_is_allowed(normalized_side)
-        instrument_id = self._find_instrument_id(symbol)
-        payload = self._build_open_order_payload(
-            instrument_id=instrument_id,
-            side=normalized_side,
-            amount=amount,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-        )
-        logger.warning(
-            'Sending eToro order | env=%s | symbol=%s | side=%s | '
-            'transaction=%s | instrument_id=%s | amount=%s | '
-            'bot_stop_loss=%s | take_profit=%s | StopLossRate=%s | '
-            'TakeProfitRate=%s | leverage=%s | payload=%s',
-            self.env,
-            symbol,
-            normalized_side,
-            payload.get('transaction'),
-            instrument_id,
-            amount,
-            stop_loss,
-            take_profit,
-            payload.get('StopLossRate'),
-            payload.get('TakeProfitRate'),
-            payload.get('leverage'),
-            payload,
-        )
-        submitted_at = datetime.now(timezone.utc)
-        order_response = self._post(self._open_order_path(), payload)
-        order_id = self._extract_order_id(order_response)
-        reference_id = self._extract_reference_id(order_response)
-        logger.info(
-            'eToro order submitted | order_id=%s | reference_id=%s',
-            order_id,
-            reference_id,
-        )
-        try:
-            order_details = self._wait_for_executed_order(
-                order_id,
-                require_position_details=True,
-            )
-        except EtoroOrderRejectedError:
-            # Only an unambiguous terminal broker status proves no fill.
-            raise
-        except Exception as exc:
-            raise EtoroOrderConfirmationUnknownError(
-                order_id=order_id,
-                reference_id=reference_id,
-                symbol=symbol.strip().upper(),
-                side=normalized_side,
-                amount=amount,
-                submitted_at=submitted_at,
-                cause=exc,
-            ) from exc
-
-        executed_positions = self._extract_executed_position_details_list(
-            order_details
-        )
-        if len(executed_positions) != 1:
-            raise EtoroOrderConfirmationUnknownError(
-                order_id=order_id,
-                reference_id=reference_id,
-                symbol=symbol.strip().upper(),
-                side=normalized_side,
-                amount=amount,
-                submitted_at=submitted_at,
-                cause=RuntimeError(
-                    'unsupported executed position count: '
-                    f'{len(executed_positions)}'
-                ),
-            )
-        executed_position = executed_positions[0]
-        # Even a P&L GET failure must not hide the known confirmed broker ID.
-        remember_position_instrument_id(
-            position_instruments=self.position_instruments,
-            position_id=executed_position.position_id,
-            instrument_id=instrument_id,
-        )
-        account_notional = self._resolve_suspicious_account_notional(
-            position_id=executed_position.position_id,
-            requested=float(amount),
-            reported=executed_position.executed_notional,
-        )
-        logger.info(
-            'eToro position confirmed | order_id=%s | position_id=%s | '
-            'instrument_id=%s | side=%s | executed_entry_price=%s | '
-            'executed_units=%s | executed_notional=%s',
-            order_id,
-            executed_position.position_id,
-            instrument_id,
-            normalized_side,
-            executed_position.executed_entry_price,
-            executed_position.executed_units,
-            account_notional,
-        )
-        return OpenPositionResult(
-            position_id=executed_position.position_id,
-            executed_entry_price=executed_position.executed_entry_price,
-            executed_units=executed_position.executed_units,
-            executed_notional=account_notional,
-        )

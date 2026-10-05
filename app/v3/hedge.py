@@ -7,7 +7,6 @@ from app.v3.models import (
     DecisionReason,
     DecisionRecord,
     ExecutionStyle,
-    HedgeState,
     IntentPurpose,
     OrderIntent,
     PortfolioState,

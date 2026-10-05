@@ -11,7 +11,6 @@ from app.execution.sl_tp_profile import EffectiveSlTpResolver
 from app.execution.trade_candidate import TradeCandidate
 from app.instruments.models import RiskProfile, TpFeasibilityConfig
 
-
 TP_FEASIBILITY_MODEL_VERSION = 'tp_feasibility_score_v4'
 TP_FEASIBILITY_HARD_REJECTION_PREFIX = 'candidate_selection_tp_feasibility_'
 

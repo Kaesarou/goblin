@@ -1,6 +1,5 @@
 """A queued manual CLOSE is never proof that an old DEMO position filled."""
 
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest

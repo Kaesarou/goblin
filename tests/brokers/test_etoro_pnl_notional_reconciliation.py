@@ -6,6 +6,10 @@ from app.brokers.etoro.pnl_position_amount import position_amount_usd
 from app.brokers.etoro.resilient_client import ResilientEtoroClient
 from app.config.settings import Settings
 
+# P&L nests positions under clientPortfolio and uses positionId (not the
+# portfolio endpoint's positionID):
+# https://api-portal.etoro.com/api-reference/trading--demo/get-account-pnl-and-portfolio-details
+
 
 def _client(monkeypatch, *, instrument_price=100.0, units=3.0,
             order_notional=1.0, pnl=None):
@@ -50,7 +54,7 @@ def test_one_dollar_order_field_uses_exact_pnl_position_usd_amount(monkeypatch):
 def test_european_instrument_amount_stays_usd_not_units_times_euro_price(monkeypatch):
     client, _ = _client(monkeypatch, instrument_price=210.0, units=1.4,
                         pnl={"clientPortfolio": {"positions": [
-                            {"positionID": "position-1", "amount": 327.0},
+                            {"positionId": "position-1", "amount": 327.0},
                         ]}})
     result = client.open_position("SAP.DE", "BUY", 327.0, 100.0, 2_100.0)
     assert result.executed_notional == 327.0
@@ -93,3 +97,35 @@ def test_pnl_parser_rejects_duplicate_or_invalid_amounts():
         position_amount_usd({"clientPortfolio": {"positions": [
             {"positionId": "p1", "amount": True},
         ]}}, "p1")
+
+
+def _exact_position(**changes):
+    return {"positionId": "position-1", "instrumentId": 100,
+            "isBuy": True, "leverage": 1, "units": 3.0,
+            "openRate": 100.01, "amount": 300.0, "orderId": "order-1", **changes}
+
+
+def test_exact_economics_preserves_asset_price_and_usd_principal_in_one_governed_get(monkeypatch):
+    client, calls = _client(monkeypatch, pnl={"clientPortfolio": {"positions": [
+        _exact_position(openRate=210.5, units=1.4, amount=327.0),
+    ]}})
+    client.position_instruments["position-1"] = 100
+    result = client.get_open_position_economics(["position-1"])["position-1"]
+    assert result.entry_price == 210.5 and result.units == 1.4
+    assert result.account_notional == 327.0
+    assert result.broker_response["openRate"] == 210.5
+    assert calls == ["/api/v1/trading/info/demo/pnl"]
+
+
+@pytest.mark.parametrize("changes", [
+    {"instrumentId": 200}, {"isBuy": False}, {"leverage": 2},
+    {"leverage": True}, {"units": None}, {"units": float("nan")},
+    {"openRate": True}, {"openRate": float("inf")}, {"amount": -1.0},
+])
+def test_exact_economics_fails_closed_on_invalid_identity_and_numbers(monkeypatch, changes):
+    client, _ = _client(monkeypatch, pnl={"clientPortfolio": {"positions": [
+        _exact_position(**changes),
+    ]}})
+    client.position_instruments["position-1"] = 100
+    with pytest.raises(ValueError):
+        client.get_open_position_economics(["position-1"])

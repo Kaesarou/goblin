@@ -1,5 +1,5 @@
-from types import SimpleNamespace
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 from app.market.models import Candle
 from app.v3.runtime import GoblinV3Runtime
@@ -74,3 +74,22 @@ def test_replayed_persisted_candle_is_skipped_before_feature_and_mtf_mutation():
     assert runtime.trade_journal.events[0][0] == "v3_candle_replay_skipped"
     assert runtime.trade_journal.events[0][1]["symbol"] == "BAYN.DE"
     assert runtime.trade_journal.events[0][1]["last_processed_opened_at"] == opened_at
+
+    # A session rejection still takes priority when the same candle is replayed
+    # after the market has closed; neither path reaches MTF or feature state.
+    runtime._maintenance_errors = set()
+    runtime._session_at = lambda symbol, timestamp: SimpleNamespace(
+        session_active=False,
+        collect_snapshots=False,
+        session_24_7=False,
+        session_end_time=None,
+    )
+    runtime._process_closed_candle(
+        "BAYN.DE", result, opened_at + timedelta(minutes=1, seconds=2),
+        source="clock",
+    )
+    assert runtime.metrics["candle_session_rejections"] == 1
+    assert runtime.metrics["candle_replay_skips"] == 1
+    assert [name for name, _ in runtime.trade_journal.events] == [
+        "v3_candle_replay_skipped", "v3_candle_session_rejected",
+    ]

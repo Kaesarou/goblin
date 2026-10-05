@@ -10,7 +10,6 @@ from app.instruments.models import (
 from app.risk.stale_position_guard import StalePositionConfig
 from app.risk.trade_cost_model import TradeCostConfig
 
-
 US_INTRADAY_FIXED_PROFILE = 'us_intraday_fixed_v1'
 
 

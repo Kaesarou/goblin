@@ -9,6 +9,8 @@ on:
     branches:
       - main
       - develop
+      - alpaca-experimental
+      - refactor/simplify-goblin-for-multibroker
 
 jobs:
   pytest:
