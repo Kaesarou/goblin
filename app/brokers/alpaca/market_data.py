@@ -4,7 +4,7 @@ import queue
 from datetime import UTC, datetime
 
 from app.brokers.alpaca.schema import number, timestamp
-from app.brokers.alpaca.stream import AlpacaStream
+from app.brokers.alpaca.stream import AlpacaStream, QuoteQueueOverflow
 from app.market.models import MarketSnapshot, PriceSource
 from app.market_data.contracts import LiveMarketDataFeed
 from app.market_data.models import MarketDataEvent, MarketDataSource
@@ -105,8 +105,19 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
             on_message=self._on_quote,
             connector=connector,
             silence_seconds=global_silence_seconds,
+            diagnostics_context=self._queue_diagnostics,
         )
         self.invalid_quotes = self.ordering_drops = self.queue_overflows = 0
+        self.queue_high_watermark = self.discarded_quotes = 0
+
+    def _queue_diagnostics(self) -> dict:
+        return {
+            "queue_capacity": self._queue.maxsize,
+            "queue_size": self._queue.qsize(),
+            "queue_high_watermark": self.queue_high_watermark,
+            "queue_overflows": self.queue_overflows,
+            "discarded_quotes": self.discarded_quotes,
+        }
 
     @property
     def requires_websocket_health(self) -> bool:
@@ -135,6 +146,7 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
             # An old queued quote must not regain entry authority merely
             # because a replacement socket has authenticated successfully.
             self.ordering_drops += 1
+            self.discarded_quotes += 1
             return None
         return event
 
@@ -152,25 +164,24 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
             "mode": "alpaca_websocket",
             "invalid_quotes": self.invalid_quotes,
             "ordering_drops": self.ordering_drops,
-            "queue_overflows": self.queue_overflows,
-            "queue_size": self._queue.qsize(),
+            **self._queue_diagnostics(),
             "trade_updates": self._trade_stream.diagnostics() if self._trade_stream else None,
         }
 
-    def _on_quote(self, message: dict) -> None:
+    def _on_quote(self, message: dict) -> bool:
         symbol = message.get("S")
         if symbol not in self._stream.subscribed_symbols():
-            return
+            return False
         now = datetime.now(UTC)
         try:
             snapshot = quote_snapshot(symbol, message, received_at=now)
         except (ValueError, TypeError):
             self.invalid_quotes += 1
-            return
+            return False
         previous = self._last_timestamp.get(symbol)
         if previous is not None and snapshot.timestamp <= previous:
             self.ordering_drops += 1
-            return
+            return False
         self._last_timestamp[symbol] = snapshot.timestamp
         event = MarketDataEvent(
             symbol,
@@ -181,12 +192,17 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
         )
         try:
             self._queue.put_nowait(event)
+            self.queue_high_watermark = max(self.queue_high_watermark, self._queue.qsize())
+            return True
         except queue.Full as exc:
             self.queue_overflows += 1
+            self.queue_high_watermark = self._queue.maxsize
+            self.discarded_quotes += 1  # The triggering quote was not enqueued.
             # Discard buffered stale quotes before reconnecting and rebuilding freshness.
             while not self._queue.empty():
                 try:
                     self._queue.get_nowait()
+                    self.discarded_quotes += 1
                 except queue.Empty:
                     break
-            raise RuntimeError("Alpaca quote queue overflow") from exc
+            raise QuoteQueueOverflow() from exc

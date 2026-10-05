@@ -5,7 +5,9 @@ entry/exit planner, candle builder, feature state, journals and task lanes are
 not replaced. Broker selection and bootstrap guards are exercised unchanged.
 """
 
+import gzip
 import json
+import logging
 import queue
 import threading
 import time
@@ -336,6 +338,15 @@ def test_quote_disconnect_rest_fallback_is_reduce_only_then_resubscribes(tmp_pat
         socket = [s for s in harness.sockets if s.market][-1]
         socket.frames.put(ConnectionError("Simulated disconnection"))
         eventually(lambda: not runtime.live_market_data.connection_healthy())
+        eventually(lambda: runtime.live_market_data.diagnostics()["last_disconnect"] is not None)
+        transport = runtime._heartbeat_metrics()["market_data_transport"]
+        assert transport["last_disconnect"]["reason"] == "network_error"
+        assert transport["trade_updates"]["healthy"] is True
+        runtime.heartbeat.maybe_emit(
+            journal=runtime.trade_journal, logger=logging.getLogger(__name__),
+            metrics=runtime._heartbeat_metrics(), open_positions=1, active_symbols=1,
+            now=runtime.heartbeat.last_emitted_at + timedelta(minutes=10),
+        )
         # Block immediately, even before the per-symbol silence timeout.
         assert not runtime._operational_entry_allowed("AAPL")
         harness.now += timedelta(seconds=20)
@@ -360,6 +371,14 @@ def test_quote_disconnect_rest_fallback_is_reduce_only_then_resubscribes(tmp_pat
         assert len(harness.api.submissions) == 2
 
     harness.run(scenario)
+
+    heartbeats = []
+    for path in Path(harness.settings.run_manifest_path).parent.rglob("trades.jsonl.gz"):
+        with gzip.open(path, "rt") as journal:
+            heartbeats.extend(d for line in journal
+                              if (d := json.loads(line))["event_type"] == "session_heartbeat")
+    assert any(h["payload"]["market_data_transport"]["last_disconnect"]["reason"] == "network_error"
+               for h in heartbeats)
 
 
 def test_trade_stream_reconnect_and_duplicate_fill_do_not_rebook_inventory(tmp_path, monkeypatch):
