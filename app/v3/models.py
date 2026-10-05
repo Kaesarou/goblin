@@ -34,16 +34,22 @@ class RecoverabilityAssessment:
 @dataclass(frozen=True)
 class BrokerLeg:
     position_id:str; units:float; entry_price:float; opened_at:datetime; side:str='BUY'; account_notional:float|None=None
+    economics_resolved: bool = True
 
 @dataclass(frozen=True)
 class InventoryState:
     inventory_id:str; symbol:str; opened_at:datetime; total_units:float; average_entry_price:float; entry_fill_count:int; last_entry_at:datetime; last_entry_price:float; total_notional:float; wallet_exposure_pct:float
     initial_entry_units:float|None=None; profit_exit_fill_count:int=0; realized_pnl:float=0.0; fees_paid:float=0.0; carry_paid:float=0.0
+    unresolved_exit_units: float = 0.0
     last_fill_at:datetime|None=None
     # Passivbot-compatible trailing bundle. These four values preserve path ordering,
     # which min/max alone cannot represent. They reset after every fill.
     trailing_min_since_open:float|None=None; trailing_max_since_min:float|None=None; trailing_max_since_open:float|None=None; trailing_min_since_max:float|None=None
     min_price_since_last_entry:float|None=None; max_price_since_last_entry:float|None=None; min_price_since_open:float|None=None; max_price_since_open:float|None=None; mfe_pct:float=0.0; mae_pct:float=0.0; recoverability:RecoverabilityAssessment|None=None; broker_legs:tuple[BrokerLeg,...]=(); status:InventoryStatus=InventoryStatus.ACTIVE
+
+    @property
+    def economics_resolved(self) -> bool:
+        return all(leg.economics_resolved for leg in self.broker_legs)
 
 @dataclass(frozen=True)
 class HedgeState:

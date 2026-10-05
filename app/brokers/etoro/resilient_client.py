@@ -4,7 +4,7 @@ import time
 
 import requests
 
-from app.brokers.base import BrokerAccountPreflight
+from app.brokers.base import BrokerAccountPreflight, BrokerPositionEconomics
 from app.brokers.etoro.etoro_client import EtoroClient
 from app.brokers.etoro.order_confirmation_error import (
     EtoroOrderConfirmationUnknownError,
@@ -36,6 +36,39 @@ class ResilientEtoroClient(EtoroClient):
             position_units=extract_open_position_units(self.get_portfolio()),
             pending_open_orders=pending_open_order_descriptions(self),
         )
+
+    def get_open_position_economics(self, position_ids):
+        if self.settings.base_currency.strip().upper() != "USD":
+            raise ValueError("Exact eToro economics require USD account currency")
+        path = ("/api/v1/trading/info/demo/pnl" if self.env == "demo"
+                else "/api/v1/trading/info/real/pnl")
+        payload = self._get(path)
+        # Reuse the strict amount parser, including envelope/duplicate validation.
+        result = {}
+        for position_id in position_ids:
+            amount = position_amount_usd(payload, position_id)
+            if amount is None:
+                continue
+            position = next(p for p in payload["clientPortfolio"]["positions"]
+                            if str(p.get("positionId")) == str(position_id))
+            expected_instrument = self.position_instruments.get(str(position_id))
+            if (expected_instrument is None
+                    or position.get("instrumentId") != expected_instrument
+                    or position.get("isBuy") is not True
+                    or isinstance(position.get("leverage"), bool)
+                    or position.get("leverage") != 1):
+                raise ValueError("Exact eToro economics position identity mismatch")
+            units, price = position.get("units"), position.get("openRate")
+            for value in (units, price):
+                if (isinstance(value, bool) or not isinstance(value, (float, int))
+                        or not math.isfinite(value) or value <= 0):
+                    raise ValueError("Invalid exact eToro economics price/units")
+            result[str(position_id)] = BrokerPositionEconomics(
+                position_id=str(position_id), units=float(units),
+                entry_price=float(price), account_notional=amount,
+                source="etoro_exact_pnl_position_usd", broker_response=position,
+            )
+        return result
 
     def _translate_open_confirmation_error(
         self,
