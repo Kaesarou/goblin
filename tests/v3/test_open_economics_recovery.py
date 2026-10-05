@@ -6,6 +6,7 @@ from datetime import timedelta
 import pytest
 
 from app.brokers.base import BrokerPositionEconomics, OpenPositionResult
+from app.brokers.cached_broker import CachedBrokerClient
 from app.market.models import MarketSnapshot
 from app.v3.book import InventoryBook
 from app.v3.live_execution import V3BrokerExecutor
@@ -21,6 +22,7 @@ def causal_clock(monkeypatch):
 
 class Broker:
     open_price_sanity_required = True
+    requires_external_activity_ack = False
 
     def __init__(self, price, notional):
         self.result = OpenPositionResult("p1", price, 3.0, notional,
@@ -36,6 +38,9 @@ class Broker:
         self.opens += 1
         return self.result
 
+    def prepare_open_order_id(self, _action_id):
+        return None
+
     def remember_position_instrument(self, *_args):
         pass
 
@@ -49,11 +54,12 @@ class Broker:
         return self.closed_units
 
 
-def setup_executor(tmp_path, price=53.0, ask=56.02, notional=300.0):
+def setup_executor(tmp_path, price=53.0, ask=56.02, notional=300.0, *, cached=False):
     from app.v3.persistence import InventoryEventStore
     broker = Broker(price, notional)
     store = InventoryEventStore(tmp_path / "economics.sqlite")
-    executor = V3BrokerExecutor(broker=broker, task_runner=ImmediateRunner(), event_store=store,
+    executor = V3BrokerExecutor(broker=CachedBrokerClient(broker) if cached else broker,
+                                task_runner=ImmediateRunner(), event_store=store,
                                 book=InventoryBook(), strategy_version="ETORO5", model_version=None)
     intent = OrderIntent("open-1", IntentPurpose.INITIAL_ENTRY, "IFX.DE", "BUY", 300.0,
                          NOW, ExecutionStyle.MARKET)
@@ -124,6 +130,23 @@ def test_credible_etoro_fill_keeps_broker_price_and_needs_no_extra_get(tmp_path)
     assert executor.book.active_for_symbol("IFX.DE").average_entry_price == 56.03
     assert not executor._schedule_open_economics_revalidation(NOW)
     assert broker.reads == 0
+
+
+def test_production_cache_wrapper_keeps_quarantine_and_uncached_recovery_authority(tmp_path):
+    executor, broker, store, _, _ = setup_executor(tmp_path, cached=True, notional=1.0)
+    assert not executor.book.active_for_symbol("IFX.DE").economics_resolved
+    assert not executor.new_risk_allowed
+    broker.evidence = {"p1": evidence(price=53.0)}
+    executor._schedule_open_economics_revalidation(NOW)
+    executor.drain()
+    assert not executor.new_risk_allowed
+    # A later authoritative answer must not be hidden by a recovery TTL cache.
+    broker.evidence = {"p1": evidence()}
+    executor._schedule_open_economics_revalidation(NOW + timedelta(seconds=61))
+    executor.drain()
+    assert executor.new_risk_allowed and broker.reads == 2
+    restored = restart(executor, executor.broker, store)
+    assert restored.new_risk_allowed
 
 
 def test_unresolved_close_does_not_invent_zero_resolved_pnl(tmp_path):
