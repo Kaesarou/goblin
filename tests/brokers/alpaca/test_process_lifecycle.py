@@ -23,6 +23,7 @@ from app.runtime.storage_scope import RuntimeStorageScope
 from app.v3.book import InventoryBook
 from app.v3.persistence import InventoryEventStore
 from app.v3.runtime import GoblinV3Runtime
+from app.v3.state_store import V3RuntimeStateStore
 from tests.brokers.alpaca.test_execution import TradingApi
 from tests.brokers.alpaca.test_runtime_integration import NOW, Harness, eventually
 from tests.runtime.test_storage_scope import storage_settings
@@ -52,6 +53,17 @@ def _child(root, connection, messages, scenario, offset):
         harness.now = NOW + timedelta(seconds=offset)
         original_run = GoblinV3Runtime.run
         original_startup = GoblinV3Runtime.startup
+        if scenario == "recover":
+            original_delete_retry = V3RuntimeStateStore.delete_close_retry
+
+            def slow_retry_cleanup(store, action_id):
+                # Pending-close removal precedes durable retry cleanup and halt
+                # retirement. Make the driver's cross-thread observation window
+                # deterministic instead of depending on CI SQLite/CPU timing.
+                threading.Event().wait(0.05)
+                original_delete_retry(store, action_id)
+
+            patch.setattr(V3RuntimeStateStore, "delete_close_retry", slow_retry_cleanup)
 
         def send_quote(runtime, seconds, bid=100):
             before = runtime.coordinator.metrics["accepted_events"]
@@ -92,7 +104,8 @@ def _child(root, connection, messages, scenario, offset):
                 elif scenario == "recover":
                     eventually(lambda: runtime.book.active_for_symbol("AAPL") is not None
                                and not runtime.executor._pending_open_confirmations
-                               and not runtime.executor._pending_close_confirmations)
+                               and not runtime.executor._pending_close_confirmations
+                               and runtime.executor.new_risk_allowed)
                     inventory = runtime.book.active_for_symbol("AAPL")
                     messages.put(("recovered", {
                         "units": inventory.total_units, "entries": inventory.entry_fill_count,
