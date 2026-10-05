@@ -8,6 +8,7 @@ from app.brokers.base import (
     BrokerAccountPreflight,
     BrokerClient,
     BrokerCloseExecution,
+    BrokerPositionEconomics,
     ClosePositionSubmission,
 )
 
@@ -36,6 +37,16 @@ class CachedBrokerClient(BrokerClient):
     @property
     def requires_external_activity_ack(self) -> bool:
         return self.delegate.requires_external_activity_ack
+
+    @property
+    def open_price_sanity_required(self) -> bool:
+        return self.delegate.open_price_sanity_required
+
+    def get_open_position_economics(
+        self, position_ids: Iterable[str],
+    ) -> dict[str, BrokerPositionEconomics]:
+        # Recovery authority must use fresh broker evidence, never a TTL cache.
+        return self.delegate.get_open_position_economics(position_ids)
 
     def get_account_preflight(self) -> BrokerAccountPreflight | None:
         # Startup safety must never depend on the equity/position TTL caches.
