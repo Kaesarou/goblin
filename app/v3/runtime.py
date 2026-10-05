@@ -1371,6 +1371,7 @@ class GoblinV3Runtime:
                 sorted(self._decision_reason_counts.items())
             ),
             "market_data_coordinator": dict(self.coordinator.metrics),
+            "market_data_transport": self.live_market_data.diagnostics(),
             "broker_confirmation": self.executor.confirmation_metrics(),
             "journal_budget": self._journal_budget_metrics(),
             "stop_reason": self.stop_reason,

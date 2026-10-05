@@ -1,10 +1,28 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
+from collections import Counter
+from datetime import UTC, datetime
 
 from app.brokers.alpaca.environment import AlpacaEnvironment
+
+logger = logging.getLogger(__name__)
+
+
+class StreamFailure(RuntimeError):
+    """A fixed diagnostic category, never a broker frame or exception message."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
+class QuoteQueueOverflow(StreamFailure):
+    def __init__(self):
+        super().__init__("quote_queue_overflow")
 
 
 def _connect(url):
@@ -27,6 +45,8 @@ class AlpacaStream:
         feed: str | None = None,
         connector=None,
         silence_seconds=15.0,
+        stable_reset_seconds=60.0,
+        diagnostics_context=None,
         environment: AlpacaEnvironment = AlpacaEnvironment.DEMO,
     ) -> None:
         if feed not in {None, "iex", "sip"}:
@@ -41,6 +61,16 @@ class AlpacaStream:
         self._callback = on_message
         self._connector = connector or _connect
         self._silence_seconds = silence_seconds
+        self._stable_reset_seconds = stable_reset_seconds
+        self._diagnostics_context = diagnostics_context or (lambda: {})
+        self._stable_since: float | None = None
+        self._last_accepted_data: float | None = None
+        self._backoff_reset_ready = False
+        self._connected_at: float | None = None
+        self._last_disconnect: dict | None = None
+        self._disconnect_reasons: Counter[str] = Counter()
+        self._reconnect_delay = 0.0
+        self._messages_received = 0
         self._stop = threading.Event()
         self._changed = threading.Event()
         self._thread: threading.Thread | None = None
@@ -91,7 +121,51 @@ class AlpacaStream:
             "connections": self.connections,
             "last_error": self._last_error,
             "fatal": self._fatal is not None,
+            "messages_received": self._messages_received,
+            "last_data_age_seconds": (
+                max(0.0, time.monotonic() - self._last_data) if self._messages_received else None
+            ),
+            "disconnect_reasons": dict(self._disconnect_reasons),
+            "last_disconnect": self._last_disconnect,
+            "reconnect_delay_seconds": self._reconnect_delay,
         }
+
+    def _record_disconnect(self, exc: Exception, delay: float) -> None:
+        now = time.monotonic()
+        if isinstance(exc, StreamFailure):
+            reason = exc.reason
+        elif isinstance(exc, PermissionError):
+            reason = "authorization_or_subscription_denied"
+        elif type(exc).__name__.startswith("ConnectionClosed"):
+            reason = "remote_close"
+        elif isinstance(exc, TimeoutError):
+            reason = "transport_timeout"
+        elif isinstance(exc, (ConnectionError, OSError)):
+            reason = "network_error"
+        elif isinstance(exc, (ValueError, TypeError)):
+            reason = "invalid_frame"
+        else:
+            reason = "stream_error"
+        self._last_error = type(exc).__name__
+        close_code = getattr(getattr(exc, "rcvd", None), "code", None)
+        self._disconnect_reasons[reason] += 1
+        self._reconnect_delay = delay
+        # Exception text, remote close reasons and frames may contain secrets.
+        self._last_disconnect = {
+            "at": datetime.now(UTC).isoformat(),
+            "stream": "market" if self._market else "trade_updates",
+            "connection_id": self.connections,
+            "reason": reason,
+            "error_type": self._last_error,
+            "close_code": close_code if isinstance(close_code, int) else None,
+            "connection_duration_seconds": (
+                max(0.0, now - self._connected_at) if self._connected_at is not None else 0.0
+            ),
+            "last_data_age_seconds": max(0.0, now - self._last_data),
+            "retry_delay_seconds": delay,
+            **self._diagnostics_context(),
+        }
+        logger.warning("alpaca_stream_disconnected %s", json.dumps(self._last_disconnect))
 
     def _run(self) -> None:
         delay = 1.0
@@ -106,14 +180,19 @@ class AlpacaStream:
                 delay = 1.0
             except PermissionError as exc:
                 self._fatal = exc
-                self._last_error = str(exc)
+                self._healthy = False
+                self._applied = ()
+                self._record_disconnect(exc, 0.0)
                 return
             except Exception as exc:
-                # Never log frames: the authentication frame contains secrets.
-                self._last_error = type(exc).__name__
                 # Invalidate transport authority before the reconnect backoff.
                 self._healthy = False
                 self._applied = ()
+                if self._stop.is_set():
+                    break
+                if self._backoff_reset_ready:
+                    delay = 1.0
+                self._record_disconnect(exc, delay)
                 self._stop.wait(delay)
                 delay = min(30.0, delay * 2)
             finally:
@@ -122,6 +201,11 @@ class AlpacaStream:
 
     def _connection(self, symbols: tuple[str, ...]) -> None:
         self.connections += 1
+        self._connected_at = time.monotonic()
+        self._stable_since = None
+        self._last_accepted_data = None
+        self._backoff_reset_ready = False
+        self._reconnect_delay = 0.0
         deadline = time.monotonic() + 10
         authenticated = False
         self._last_data = time.monotonic()
@@ -129,9 +213,14 @@ class AlpacaStream:
             websocket.send(json.dumps(self._auth))
             while not self._stop.is_set() and not self._changed.is_set():
                 if not self._healthy and time.monotonic() > deadline:
-                    raise TimeoutError("Alpaca authentication/subscription timeout")
+                    raise StreamFailure("authentication_subscription_timeout")
                 if self._market and self._healthy and not self.healthy():
-                    raise TimeoutError("Alpaca quotes silent")
+                    raise StreamFailure("quotes_silent")
+                if (self.healthy() and self._stable_since is not None
+                        and (not self._market or (self._last_accepted_data is not None
+                             and time.monotonic() - self._last_accepted_data < self._silence_seconds))
+                        and time.monotonic() - self._stable_since >= self._stable_reset_seconds):
+                    self._backoff_reset_ready = True
                 try:
                     frame = json.loads(websocket.recv(timeout=0.5))
                 except TimeoutError:
@@ -145,7 +234,7 @@ class AlpacaStream:
                     if kind == "error" or message.get("action") == "error":
                         if message.get("code") in {400, 401, 402, 403, 405, 409}:
                             raise PermissionError("Alpaca denied authentication or subscription")
-                        raise RuntimeError("Alpaca stream error")
+                        raise StreamFailure("broker_stream_error")
                     auth_ok = (
                         kind == "success" and message.get("msg") == "authenticated"
                         if self._market
@@ -170,6 +259,18 @@ class AlpacaStream:
                             raise PermissionError("Alpaca subscription incomplete")
                         self._healthy = True
                         self._applied = symbols
+                        if not self._market:
+                            # An idle order-update stream is normal; quotes are
+                            # required only for a market stream's stable period.
+                            self._stable_since = time.monotonic()
                     elif self._healthy and kind == ("q" if self._market else "trade_updates"):
                         self._last_data = time.monotonic()
-                        self._callback(message if self._market else data)
+                        self._messages_received += 1
+                        accepted = self._callback(message if self._market else data)
+                        if accepted is not False:
+                            accepted_at = time.monotonic()
+                            if self._stable_since is None or (self._market
+                                    and self._last_accepted_data is not None
+                                    and accepted_at - self._last_accepted_data >= self._silence_seconds):
+                                self._stable_since = accepted_at
+                            self._last_accepted_data = accepted_at

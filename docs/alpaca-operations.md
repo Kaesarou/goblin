@@ -104,3 +104,31 @@ réconciliation explicite ; leur traitement automatique sort du périmètre dém
 Les estimations de frais eToro5 restent celles de la stratégie de recherche
 figée. Elles ne représentent pas les frais Alpaca réels ni une preuve de
 performance équivalente entre brokers.
+# Stream recovery diagnostics
+
+Each `session_heartbeat` and V3 run checkpoint now includes
+`market_data_transport`, separately from the order-update stream diagnostics.
+It records connection count, last-data age, disconnect counts by cause, the
+last disconnect and retry delay, queue capacity/size/high-watermark, overflows
+and discarded quotes. A bounded `alpaca_stream_disconnected` JSON record is
+also written to `goblin.log` for every failed connection, including failures
+between heartbeats. Exception messages, broker frames and remote close reason
+text are excluded; only the numeric WebSocket close code is retained.
+
+Reconnect delay grows from 1 to 30 seconds during repeated failures. A market
+connection resets that delay after 60 seconds of authenticated, subscribed
+operation with valid quotes and no quote gap reaching the silence timeout.
+The trading stream may be idle and uses stable subscribed operation instead.
+Authentication alone or repeated invalid quotes cannot reset market backoff.
+
+Queue saturation remains fail-closed: queued quotes and the triggering quote
+are discarded, transport entry authority is revoked, and a new connection
+authenticates and resubscribes. Buffered quotes from an older connection cannot
+restore entry authority. Queue size and strategy parameters are unchanged.
+
+For the next audit, distinguish `quotes_silent`,
+`authentication_subscription_timeout`, `quote_queue_overflow`, `remote_close`,
+`network_error`, and broker/protocol failures before selecting further fixes.
+These diagnostics do not retrospectively identify the cause of older runs'
+reconnections. Archive existing logs and retain the SQLite state when starting
+a fresh comparison run.

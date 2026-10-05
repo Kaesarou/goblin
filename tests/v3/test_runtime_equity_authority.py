@@ -39,7 +39,7 @@ def runtime_for_test(tmp_path, *, with_eu=False):
         settings=settings, symbols=symbols, run_id="integrity-test", instrument_registry=registry,
         execution_broker=SimpleNamespace(account_equity_source=ACCOUNT_EQUITY_SOURCE),
         rest_market_data=SimpleNamespace(),
-        live_market_data=SimpleNamespace(requires_websocket_health=False),
+        live_market_data=SimpleNamespace(requires_websocket_health=False, diagnostics=lambda: {}),
         candle_builders={symbol: QualityAwareCandleBuilder() for symbol in symbols},
         trading_session_service=TradingSessionService({
             AssetClass.EQUITY_US: AssetTradingSessionConfig(
