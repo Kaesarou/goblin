@@ -1,8 +1,11 @@
 from __future__ import annotations
+
 import hashlib
 from dataclasses import replace
 from datetime import timedelta
+
 from app.v3.models import *
+
 
 def _id(*p):return hashlib.sha256('|'.join(map(str,p)).encode()).hexdigest()[:24]
 def _mult(m,ratio,w1,wH,wE):return max(1.0,1+m.volatility_1m*w1+m.volatility_1h*wH+max(0,ratio)*wE)
@@ -26,6 +29,7 @@ class InventoryPlanner:
         if not market.quality_ok:return self._decision(market,DecisionReason.MARKET_DATA_INVALID)
         inv=portfolio.inventory_for(market.symbol)
         if inv is None:return DecisionBatch()
+        if not inv.economics_resolved:return self._decision(market,DecisionReason.NO_ACTION,{'reason':'entry_economics_unresolved'})
         # Normal close and re-entry may coexist as resting intents in the reference
         # strategy. They point in opposite economic directions and are reconciled
         # independently by the execution environment.
@@ -41,6 +45,7 @@ class InventoryPlanner:
     def plan_existing_inventory_without_equity(self,*,market,inventory):
         if not market.quality_ok:return self._decision(market,DecisionReason.MARKET_DATA_INVALID)
         if inventory is None or not self.equity_independent_exit_supported():return DecisionBatch()
+        if not inventory.economics_resolved:return self._decision(market,DecisionReason.NO_ACTION,{'reason':'entry_economics_unresolved'})
         # Reuse the frozen _exit implementation unchanged. Infinite equity is only
         # a mathematical device for exposure/equity -> 0; it is never persisted,
         # reported as broker equity or allowed to authorize BUY/reentry.

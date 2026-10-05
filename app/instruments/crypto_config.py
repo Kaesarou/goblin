@@ -11,7 +11,6 @@ from app.risk.stale_position_guard import StalePositionConfig
 from app.risk.trade_cost_model import TradeCostConfig
 from app.strategies.entry_confirmation import EntryConfirmationConfig
 
-
 CRYPTO_INTRADAY_FIXED_PROFILE = 'crypto_intraday_fixed_v1'
 
 

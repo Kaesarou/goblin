@@ -81,7 +81,7 @@ class PostTpReentryGuard:
         config_for_candidate: Callable[['TradeCandidate'], PostTpReentryConfig],
         now: datetime,
     ) -> PostTpReentryFilterResult:
-        selected: list['TradeCandidate'] = []
+        selected: list[TradeCandidate] = []
         rejected: list[RejectedPostTpReentryCandidate] = []
         for candidate in candidates:
             decision = self.check(candidate=candidate, config=config_for_candidate(candidate), now=now)

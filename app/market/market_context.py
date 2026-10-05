@@ -439,34 +439,11 @@ class MarketContextService:
                     config.maximum_context_age_seconds
                 ),
             )
-            return BenchmarkContext(
-                symbol=symbol,
-                available=True,
-                direction=_direction_from_return(
-                    session_return,
-                    config.minimum_benchmark_move_percent,
-                ),
-                session_return_percent=_round_optional(session_return),
-                momentum_percent=_round_optional(momentum),
-                spread_percent=_round_optional(_spread_percent(snapshot)),
-                snapshot_age_seconds=round(
-                    max(
-                        0.0,
-                        (
-                            as_of - _as_utc(snapshot.timestamp)
-                        ).total_seconds(),
-                    ),
-                    3,
-                ),
+            return _build_benchmark_context(
+                symbol, snapshot, session_return, momentum, as_of, config,
             )
-        return BenchmarkContext(
-            symbol=configured_symbols[0] if configured_symbols else None,
-            available=False,
-            direction=MarketDirection.UNKNOWN,
-            session_return_percent=None,
-            momentum_percent=None,
-            spread_percent=None,
-            snapshot_age_seconds=None,
+        return _unavailable_benchmark_context(
+            configured_symbols[0] if configured_symbols else None,
         )
 
     def _research_breadth_context(
@@ -493,38 +470,7 @@ class MarketContextService:
             ]
             if value is not None
         ]
-        valid = len(returns)
-        coverage = valid / len(eligible) if eligible else 0.0
-        advancing = sum(
-            value > config.unchanged_band_percent for value in returns
-        )
-        declining = sum(
-            value < -config.unchanged_band_percent for value in returns
-        )
-        unchanged = valid - advancing - declining
-        advancing_ratio = advancing / valid if valid else 0.0
-        available = (
-            valid >= config.minimum_breadth_sample_size
-            and coverage >= config.minimum_breadth_coverage_ratio
-        )
-        return BreadthContext(
-            available=available,
-            direction=(
-                _breadth_direction(advancing_ratio, config)
-                if available
-                else MarketDirection.UNKNOWN
-            ),
-            eligible_symbols=len(eligible),
-            valid_symbols=valid,
-            coverage_ratio=round(coverage, 4),
-            advancing_count=advancing,
-            declining_count=declining,
-            unchanged_count=unchanged,
-            advancing_ratio=round(advancing_ratio, 4),
-            median_session_return_percent=_round_optional(
-                _median(returns)
-            ),
-        )
+        return _build_breadth_context(returns, len(eligible), config)
 
     def _research_sector_context(
         self,
@@ -567,32 +513,7 @@ class MarketContextService:
             ]
             if value is not None
         ]
-        valid = len(returns)
-        advancing_ratio = (
-            sum(
-                value > config.unchanged_band_percent
-                for value in returns
-            )
-            / valid
-            if valid
-            else None
-        )
-        available = valid >= config.minimum_sector_sample_size
-        return SectorContext(
-            sector=sector,
-            available=available,
-            direction=(
-                _breadth_direction(advancing_ratio or 0.0, config)
-                if available
-                else MarketDirection.UNKNOWN
-            ),
-            member_count=len(members),
-            valid_member_count=valid,
-            advancing_ratio=_round_optional(advancing_ratio),
-            median_session_return_percent=_round_optional(
-                _median(returns)
-            ),
-        )
+        return _build_sector_context(sector, returns, len(members), config)
 
     def _momentum_percent_before(
         self,
@@ -736,29 +657,11 @@ class MarketContextService:
                 window_seconds=config.momentum_window_seconds,
                 maximum_reference_lag_seconds=config.maximum_context_age_seconds,
             )
-            return BenchmarkContext(
-                symbol=symbol,
-                available=True,
-                direction=_direction_from_return(
-                    session_return,
-                    config.minimum_benchmark_move_percent,
-                ),
-                session_return_percent=_round_optional(session_return),
-                momentum_percent=_round_optional(momentum),
-                spread_percent=_round_optional(_spread_percent(snapshot)),
-                snapshot_age_seconds=round(
-                    max(0.0, (as_of - _as_utc(snapshot.timestamp)).total_seconds()),
-                    3,
-                ),
+            return _build_benchmark_context(
+                symbol, snapshot, session_return, momentum, as_of, config,
             )
-        return BenchmarkContext(
-            symbol=configured_symbols[0] if configured_symbols else None,
-            available=False,
-            direction=MarketDirection.UNKNOWN,
-            session_return_percent=None,
-            momentum_percent=None,
-            spread_percent=None,
-            snapshot_age_seconds=None,
+        return _unavailable_benchmark_context(
+            configured_symbols[0] if configured_symbols else None,
         )
 
     def _breadth_context(
@@ -777,33 +680,7 @@ class MarketContextService:
             for value in [self._session_return(symbol, session_key)]
             if value is not None
         ]
-        valid = len(returns)
-        coverage = valid / len(eligible) if eligible else 0.0
-        advancing = sum(value > config.unchanged_band_percent for value in returns)
-        declining = sum(value < -config.unchanged_band_percent for value in returns)
-        unchanged = valid - advancing - declining
-        advancing_ratio = advancing / valid if valid else 0.0
-        available = (
-            valid >= config.minimum_breadth_sample_size
-            and coverage >= config.minimum_breadth_coverage_ratio
-        )
-        direction = (
-            _breadth_direction(advancing_ratio, config)
-            if available
-            else MarketDirection.UNKNOWN
-        )
-        return BreadthContext(
-            available=available,
-            direction=direction,
-            eligible_symbols=len(eligible),
-            valid_symbols=valid,
-            coverage_ratio=round(coverage, 4),
-            advancing_count=advancing,
-            declining_count=declining,
-            unchanged_count=unchanged,
-            advancing_ratio=round(advancing_ratio, 4),
-            median_session_return_percent=_round_optional(_median(returns)),
-        )
+        return _build_breadth_context(returns, len(eligible), config)
 
     def _sector_context(
         self,
@@ -829,27 +706,7 @@ class MarketContextService:
             for value in [self._session_return(member, session_key)]
             if value is not None
         ]
-        valid = len(returns)
-        advancing_ratio = (
-            sum(value > config.unchanged_band_percent for value in returns) / valid
-            if valid
-            else None
-        )
-        available = valid >= config.minimum_sector_sample_size
-        direction = (
-            _breadth_direction(advancing_ratio or 0.0, config)
-            if available
-            else MarketDirection.UNKNOWN
-        )
-        return SectorContext(
-            sector=sector,
-            available=available,
-            direction=direction,
-            member_count=len(members),
-            valid_member_count=valid,
-            advancing_ratio=_round_optional(advancing_ratio),
-            median_session_return_percent=_round_optional(_median(returns)),
-        )
+        return _build_sector_context(sector, returns, len(members), config)
 
     def _session_return(self, symbol: str, session_key: str | None) -> float | None:
         snapshot = self._latest.get(symbol)
@@ -1016,6 +873,91 @@ def _direction_from_return(
     if value <= -minimum_move_percent:
         return MarketDirection.BEARISH
     return MarketDirection.NEUTRAL
+
+
+def _build_benchmark_context(
+    symbol: str, snapshot: MarketSnapshot, session_return: float | None,
+    momentum: float | None, as_of: datetime, config: MarketContextConfig,
+) -> BenchmarkContext:
+    return BenchmarkContext(
+        symbol=symbol,
+        available=True,
+        direction=_direction_from_return(
+            session_return, config.minimum_benchmark_move_percent,
+        ),
+        session_return_percent=_round_optional(session_return),
+        momentum_percent=_round_optional(momentum),
+        spread_percent=_round_optional(_spread_percent(snapshot)),
+        snapshot_age_seconds=round(
+            max(0.0, (as_of - _as_utc(snapshot.timestamp)).total_seconds()), 3,
+        ),
+    )
+
+
+def _unavailable_benchmark_context(symbol: str | None) -> BenchmarkContext:
+    return BenchmarkContext(
+        symbol=symbol,
+        available=False,
+        direction=MarketDirection.UNKNOWN,
+        session_return_percent=None,
+        momentum_percent=None,
+        spread_percent=None,
+        snapshot_age_seconds=None,
+    )
+
+
+def _build_breadth_context(
+    returns: list[float], eligible_count: int, config: MarketContextConfig,
+) -> BreadthContext:
+    valid = len(returns)
+    coverage = valid / eligible_count if eligible_count else 0.0
+    advancing = sum(value > config.unchanged_band_percent for value in returns)
+    declining = sum(value < -config.unchanged_band_percent for value in returns)
+    unchanged = valid - advancing - declining
+    advancing_ratio = advancing / valid if valid else 0.0
+    available = (
+        valid >= config.minimum_breadth_sample_size
+        and coverage >= config.minimum_breadth_coverage_ratio
+    )
+    return BreadthContext(
+        available=available,
+        direction=(
+            _breadth_direction(advancing_ratio, config)
+            if available else MarketDirection.UNKNOWN
+        ),
+        eligible_symbols=eligible_count,
+        valid_symbols=valid,
+        coverage_ratio=round(coverage, 4),
+        advancing_count=advancing,
+        declining_count=declining,
+        unchanged_count=unchanged,
+        advancing_ratio=round(advancing_ratio, 4),
+        median_session_return_percent=_round_optional(_median(returns)),
+    )
+
+
+def _build_sector_context(
+    sector: str, returns: list[float], member_count: int,
+    config: MarketContextConfig,
+) -> SectorContext:
+    valid = len(returns)
+    advancing_ratio = (
+        sum(value > config.unchanged_band_percent for value in returns) / valid
+        if valid else None
+    )
+    available = valid >= config.minimum_sector_sample_size
+    return SectorContext(
+        sector=sector,
+        available=available,
+        direction=(
+            _breadth_direction(advancing_ratio or 0.0, config)
+            if available else MarketDirection.UNKNOWN
+        ),
+        member_count=member_count,
+        valid_member_count=valid,
+        advancing_ratio=_round_optional(advancing_ratio),
+        median_session_return_percent=_round_optional(_median(returns)),
+    )
 
 
 def _breadth_direction(

@@ -25,56 +25,16 @@ def test_extract_open_positions_from_client_portfolio():
     ]
 
 
-def test_extract_open_positions_from_top_level_positions():
-    payload = {
-        'positions': [
-            {
-                'positionId': 3549893989,
-                'instrumentID': 1001,
-            }
-        ]
-    }
-
-    assert extract_open_positions(payload) == [
-        {
-            'positionId': 3549893989,
-            'instrumentID': 1001,
-        }
-    ]
-
-
-def test_extract_open_positions_from_nested_data_payload():
-    payload = {
-        'data': {
-            'clientPortfolio': {
-                'positions': [
-                    {
-                        'PositionID': 3549893989,
-                        'instrumentID': 1001,
-                    }
-                ]
-            }
-        }
-    }
-
-    assert extract_open_positions(payload) == [
-        {
-            'PositionID': 3549893989,
-            'instrumentID': 1001,
-        }
-    ]
-
-
 def test_extract_open_positions_ignores_non_dict_positions():
     payload = {
-        'positions': [
+        'clientPortfolio': {'positions': [
             'ignored',
             123,
             {
                 'positionID': 3549893989,
                 'instrumentID': 1001,
             },
-        ]
+        ]}
     }
 
     assert extract_open_positions(payload) == [
@@ -86,7 +46,9 @@ def test_extract_open_positions_ignores_non_dict_positions():
 
 
 def test_extract_open_positions_returns_empty_list_when_positions_is_not_a_list():
-    assert extract_open_positions({'positions': {'positionID': 3549893989}}) == []
+    assert extract_open_positions(
+        {'clientPortfolio': {'positions': {'positionID': 3549893989}}}
+    ) == []
 
 
 def test_extract_open_positions_returns_empty_list_when_missing():
@@ -109,15 +71,17 @@ def test_contains_open_position_when_position_exists_in_client_portfolio():
     )
 
 
-def test_contains_open_position_accepts_position_id_key_variants():
-    assert contains_open_position(
+def test_contains_open_position_rejects_noncanonical_position_id_field():
+    assert not contains_open_position(
         {
-            'positions': [
-                {
-                    'PositionId': 3549893989,
-                    'instrumentID': 1001,
-                }
-            ]
+            'clientPortfolio': {
+                'positions': [
+                    {
+                        'PositionId': 3549893989,
+                        'instrumentID': 1001,
+                    }
+                ]
+            }
         },
         '3549893989',
     )
@@ -126,12 +90,14 @@ def test_contains_open_position_accepts_position_id_key_variants():
 def test_contains_open_position_accepts_int_position_id_argument():
     assert contains_open_position(
         {
-            'positions': [
-                {
-                    'PositionId': '3549893989',
-                    'instrumentID': 1001,
-                }
-            ]
+            'clientPortfolio': {
+                'positions': [
+                    {
+                        'positionID': '3549893989',
+                        'instrumentID': 1001,
+                    }
+                ]
+            }
         },
         3549893989,
     )

@@ -9,7 +9,6 @@ from app.risk.structural_stop import calculate_structural_stop
 from app.strategies.signals import Signal
 from app.utils.commons import spread_percent
 
-
 SlTpMode = Literal['fixed']
 SlTpSource = str
 

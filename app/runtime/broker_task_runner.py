@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import StrEnum
 from queue import SimpleQueue
 from threading import Lock
-from typing import Any, Callable
+from typing import Any
 from uuid import uuid4
 
 

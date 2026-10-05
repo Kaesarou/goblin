@@ -4,25 +4,31 @@ import logging
 import math
 import time
 from collections import Counter
-from dataclasses import dataclass, replace
+from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import Mapping
 
-from app.brokers.etoro.account_equity_mapper import ACCOUNT_EQUITY_SOURCE
 from app.market.data_quality import MarketDataStatus, MarketDataValidator
-from app.market.models import MarketSnapshot
+from app.market.models import Candle, MarketSnapshot
 from app.market_data.coordinator import MarketDataCoordinator
 from app.market_data.models import MarketDataEvent, MarketDataSource
 from app.runtime.broker_task_runner import BrokerTaskLane, BrokerTaskRunner
 from app.runtime.runtime_policy import (
     CANDLE_CLOCK_GRACE_SECONDS,
     CANDLE_MAX_CARRY_FORWARD_AGE_SECONDS,
-    DECISION_WINDOW_GRACE_SECONDS,
     POSITION_FALLBACK_INTERVAL_SECONDS,
     WS_POSITION_SILENCE_SECONDS,
 )
 from app.runtime.session_runtime import session_timestamp_rejection_reason
+from app.runtime.trading_session_window import TradingSessionDecision
 from app.v3.book import InventoryBook
+from app.v3.decision_window import (
+    V3DecisionWindowBatch as _DecisionWindowBatch,
+)
+from app.v3.decision_window import (
+    V3DecisionWindowCoordinator as _DecisionWindowCoordinator,
+)
+from app.v3.decision_window import decision_quote_for_candle as _decision_quote
 from app.v3.features import OnlineFeatureEngine, OnlineFeatureSnapshot
 from app.v3.forager import ForagerCandidate, NoVolumeForager
 from app.v3.intents import RestingIntentBook
@@ -48,99 +54,6 @@ _MATERIAL_DECISION_REASONS = frozenset(
         DecisionReason.UNSTUCK,
     }
 )
-
-
-@dataclass
-class _DecisionWindow:
-    closed_at: datetime
-    expected_symbols: set[str]
-    feature_by_symbol: dict[str, OnlineFeatureSnapshot]
-    snapshot_by_symbol: dict[str, MarketSnapshot]
-    quality_by_symbol: dict[str, bool]
-
-
-@dataclass(frozen=True)
-class V3DecisionWindowBatch:
-    closed_at: datetime
-    expected_symbols: tuple[str, ...]
-    completed_symbols: tuple[str, ...]
-    missing_symbols: tuple[str, ...]
-    finalization_reason: str
-    features: Mapping[str, OnlineFeatureSnapshot]
-    snapshots: Mapping[str, MarketSnapshot]
-    quality: Mapping[str, bool]
-
-
-class V3DecisionWindowCoordinator:
-    """Synchronize completed M1 states without candidate-domain coupling."""
-
-    def __init__(self, *, grace_seconds: float = DECISION_WINDOW_GRACE_SECONDS) -> None:
-        self.grace_seconds = float(grace_seconds)
-        self._windows: dict[datetime, _DecisionWindow] = {}
-        self._finalized: set[datetime] = set()
-
-    def record(
-        self,
-        *,
-        feature: OnlineFeatureSnapshot,
-        snapshot: MarketSnapshot,
-        quality_ok: bool,
-        expected_symbols: set[str],
-    ) -> bool:
-        key = _utc(feature.asof)
-        if key in self._finalized:
-            return False
-        window = self._windows.setdefault(
-            key,
-            _DecisionWindow(key, set(expected_symbols), {}, {}, {}),
-        )
-        window.expected_symbols.update(expected_symbols)
-        window.feature_by_symbol[feature.symbol] = feature
-        window.snapshot_by_symbol[feature.symbol] = snapshot
-        window.quality_by_symbol[feature.symbol] = bool(quality_ok)
-        return True
-
-    def reset_symbol(self, symbol: str) -> None:
-        for key, window in list(self._windows.items()):
-            window.expected_symbols.discard(symbol)
-            window.feature_by_symbol.pop(symbol, None)
-            window.snapshot_by_symbol.pop(symbol, None)
-            window.quality_by_symbol.pop(symbol, None)
-            if not window.expected_symbols and not window.feature_by_symbol:
-                self._windows.pop(key)
-
-    def pop_ready(self, *, now: datetime) -> tuple[V3DecisionWindowBatch, ...]:
-        actual_now = _utc(now)
-        ready: list[tuple[datetime, str]] = []
-        for key, window in self._windows.items():
-            complete = window.expected_symbols.issubset(window.feature_by_symbol)
-            expired = actual_now >= key + timedelta(seconds=self.grace_seconds)
-            if complete:
-                ready.append((key, "all_symbols_completed"))
-            elif expired:
-                ready.append((key, "grace_expired"))
-
-        result: list[V3DecisionWindowBatch] = []
-        for key, reason in sorted(ready):
-            window = self._windows.pop(key)
-            self._finalized.add(key)
-            completed = set(window.feature_by_symbol)
-            result.append(
-                V3DecisionWindowBatch(
-                    closed_at=key,
-                    expected_symbols=tuple(sorted(window.expected_symbols)),
-                    completed_symbols=tuple(sorted(completed)),
-                    missing_symbols=tuple(sorted(window.expected_symbols - completed)),
-                    finalization_reason=reason,
-                    features=dict(window.feature_by_symbol),
-                    snapshots=dict(window.snapshot_by_symbol),
-                    quality=dict(window.quality_by_symbol),
-                )
-            )
-
-        cutoff = actual_now - timedelta(days=1)
-        self._finalized = {value for value in self._finalized if value >= cutoff}
-        return tuple(result)
 
 
 class GoblinV3Runtime:
@@ -221,7 +134,7 @@ class GoblinV3Runtime:
             websocket_required=live_market_data.requires_websocket_health,
             symbol_silence_seconds=WS_POSITION_SILENCE_SECONDS,
         )
-        self.windows = V3DecisionWindowCoordinator()
+        self.windows = _DecisionWindowCoordinator()
         self.forager = NoVolumeForager()
         self.intent_book = RestingIntentBook()
         self.book = InventoryBook.from_events(event_store.events())
@@ -600,43 +513,9 @@ class GoblinV3Runtime:
             quality_degraded=result.quality.degraded,
         )
         session = self._session_at(symbol, candle.opened_at)
-        invalid_session = session_timestamp_rejection_reason(
-            decision=session, timestamp=candle.opened_at,
-        )
-        if (invalid_session is not None or
-                (not session.session_24_7 and session.session_end_time is not None
-                 and _utc(candle.closed_at) > _utc(session.session_end_time))):
-            self.metrics["candle_session_rejections"] += 1
-            self._record_maintenance_error(
-                f"candle_session:{symbol}", "v3_candle_session_rejected",
-                {"symbol": symbol, "opened_at": candle.opened_at,
-                 "reason": invalid_session or "candle_crosses_session_end"},
-            )
-            return
-
-        last_processed_opened_at = self.feature_engine.last_opened_at(symbol)
-        if (
-            last_processed_opened_at is not None
-            and _utc(candle.opened_at) <= _utc(last_processed_opened_at)
+        if not self._candle_is_processable(
+            symbol=symbol, candle=candle, session=session, source=source,
         ):
-            # The restart cache is authoritative for causal features. A newly
-            # constructed candle builder can replay the last already-persisted M1
-            # after a process restart; treating that as a fresh feature update used
-            # to crash the runtime with a non-causal-order exception. Skip the
-            # replay before MTF/book/feature mutation and keep an explicit audit
-            # event rather than silently mutating state twice.
-            self.metrics["candle_replay_skips"] += 1
-            self.trade_journal.write(
-                "v3_candle_replay_skipped",
-                {
-                    "symbol": symbol,
-                    "opened_at": candle.opened_at,
-                    "closed_at": candle.closed_at,
-                    "last_processed_opened_at": last_processed_opened_at,
-                    "finalization_source": source,
-                    "reason": "already_processed_feature_state",
-                },
-            )
             return
 
         self._clear_maintenance_error(
@@ -656,7 +535,7 @@ class GoblinV3Runtime:
             close=candle.close,
         )
 
-        decision_snapshot, quote_in_bucket = _decision_quote_for_candle(
+        decision_snapshot, quote_in_bucket = _decision_quote(
             result=result,
             latest_snapshot=self.latest_snapshots.get(symbol),
             candle=candle,
@@ -720,11 +599,55 @@ class GoblinV3Runtime:
                 },
             )
 
+    def _candle_is_processable(
+        self, *, symbol: str, candle: Candle,
+        session: TradingSessionDecision, source: str,
+    ) -> bool:
+        invalid_session = session_timestamp_rejection_reason(
+            decision=session, timestamp=candle.opened_at,
+        )
+        if (invalid_session is not None or
+                (not session.session_24_7 and session.session_end_time is not None
+                 and _utc(candle.closed_at) > _utc(session.session_end_time))):
+            self.metrics["candle_session_rejections"] += 1
+            self._record_maintenance_error(
+                f"candle_session:{symbol}", "v3_candle_session_rejected",
+                {"symbol": symbol, "opened_at": candle.opened_at,
+                 "reason": invalid_session or "candle_crosses_session_end"},
+            )
+            return False
+
+        last_processed_opened_at = self.feature_engine.last_opened_at(symbol)
+        if (
+            last_processed_opened_at is not None
+            and _utc(candle.opened_at) <= _utc(last_processed_opened_at)
+        ):
+            # The restart cache is authoritative for causal features. A newly
+            # constructed candle builder can replay the last already-persisted M1
+            # after a process restart; treating that as a fresh feature update used
+            # to crash the runtime with a non-causal-order exception. Skip the
+            # replay before MTF/book/feature mutation and keep an explicit audit
+            # event rather than silently mutating state twice.
+            self.metrics["candle_replay_skips"] += 1
+            self.trade_journal.write(
+                "v3_candle_replay_skipped",
+                {
+                    "symbol": symbol,
+                    "opened_at": candle.opened_at,
+                    "closed_at": candle.closed_at,
+                    "last_processed_opened_at": last_processed_opened_at,
+                    "finalization_source": source,
+                    "reason": "already_processed_feature_state",
+                },
+            )
+            return False
+        return True
+
     def _flush_decision_windows(self, now: datetime) -> None:
         for batch in self.windows.pop_ready(now=now):
             self._process_decision_window(batch)
 
-    def _process_decision_window(self, batch: V3DecisionWindowBatch) -> None:
+    def _process_decision_window(self, batch: _DecisionWindowBatch) -> None:
         self.runtime_state_store.save_feature_engine(
             self.feature_engine,
             symbols=batch.completed_symbols,
@@ -794,17 +717,10 @@ class GoblinV3Runtime:
                 portfolio=portfolio,
                 allow_new_risk=market.entry_allowed,
             )
-            intents = tuple(
-                intent
-                for intent in decision.intents
-                if intent.reduce_only or market.entry_allowed
-            )
-            self.intent_book.replace_symbol(inventory.symbol, intents)
-            self.metrics["intents_planned"] += len(intents)
-            self._journal_decision(
+            self._apply_planned_decision(
                 inventory.symbol,
                 decision,
-                intents,
+                allow_new_risk=market.entry_allowed,
                 extra={"role": "active_inventory"},
             )
 
@@ -829,17 +745,10 @@ class GoblinV3Runtime:
                 market=ranked.market,
                 portfolio=portfolio,
             )
-            intents = tuple(
-                intent
-                for intent in decision.intents
-                if intent.reduce_only or ranked.market.entry_allowed
-            )
-            self.intent_book.replace_symbol(ranked.market.symbol, intents)
-            self.metrics["intents_planned"] += len(intents)
-            self._journal_decision(
+            self._apply_planned_decision(
                 ranked.market.symbol,
                 decision,
-                intents,
+                allow_new_risk=ranked.market.entry_allowed,
                 extra={
                     "role": "flat_forager",
                     "forager_score": ranked.score,
@@ -884,27 +793,40 @@ class GoblinV3Runtime:
                 market=market,
                 inventory=inventory,
             )
-            intents = tuple(intent for intent in decision.intents if intent.reduce_only)
             # Resting intents are one-candle strategy objects. A fresh,
             # authoritative no-equity proof therefore replaces the prior exact
             # or proof intent even when the new result is empty. This prevents a
             # stale SELL from surviving a later candle that no longer proves an
             # exit under the frozen geometry.
-            self.intent_book.replace_symbol(inventory.symbol, intents)
-            self.metrics["intents_planned"] += len(intents)
-            self._journal_decision(
+            self._apply_planned_decision(
                 inventory.symbol,
                 decision,
-                intents,
+                allow_new_risk=False,
                 extra={
                     "role": "active_inventory",
                     "planning_mode": "equity_independent_proof",
                 },
             )
 
+    def _apply_planned_decision(
+        self,
+        symbol: str,
+        decision: DecisionBatch,
+        *,
+        allow_new_risk: bool,
+        extra: dict[str, object],
+    ) -> None:
+        intents = tuple(
+            intent for intent in decision.intents
+            if intent.reduce_only or allow_new_risk
+        )
+        self.intent_book.replace_symbol(symbol, intents)
+        self.metrics["intents_planned"] += len(intents)
+        self._journal_decision(symbol, decision, intents, extra=extra)
+
     def _record_incomplete_decision_window(
         self,
-        batch: V3DecisionWindowBatch,
+        batch: _DecisionWindowBatch,
     ) -> None:
         if not (
             batch.missing_symbols
@@ -997,8 +919,7 @@ class GoblinV3Runtime:
                         and isinstance(equity, (int, float))
                         and math.isfinite(equity) and equity > 0):
                     now = datetime.now(UTC)
-                    source = ("paper_broker" if self.settings.broker == "paper"
-                              else ACCOUNT_EQUITY_SOURCE)
+                    source = self.execution_broker.account_equity_source
                     self.runtime_state_store.save_broker_equity(
                         value=equity, observed_at=now, source=source,
                     )
@@ -1459,35 +1380,6 @@ class GoblinV3Runtime:
         except Exception:
             self.metrics["errors"] += 1
             logger.exception("V3 research boundary failed")
-
-
-def _decision_quote_for_candle(*, result, latest_snapshot, candle):
-    """Return the newest causal quote and whether it belongs to this M1 bucket.
-
-    A rollover event may already have advanced ``latest_snapshot`` into the next
-    minute. The closed candle therefore owns its explicit ``decision_snapshot``.
-    Older quotes are allowed only as non-authoritative provenance for carried
-    candles; future quotes are never relabelled onto the closed state.
-    """
-    explicit = getattr(result, "decision_snapshot", None)
-    if explicit is not None:
-        timestamp = _utc(explicit.timestamp)
-        opened_at = _utc(candle.opened_at)
-        closed_at = _utc(candle.closed_at)
-        if opened_at <= timestamp < closed_at:
-            return explicit, True
-        if timestamp < closed_at:
-            return explicit, False
-        return None, False
-
-    if latest_snapshot is None:
-        return None, False
-    timestamp = _utc(latest_snapshot.timestamp)
-    closed_at = _utc(candle.closed_at)
-    if timestamp >= closed_at:
-        return None, False
-    opened_at = _utc(candle.opened_at)
-    return latest_snapshot, opened_at <= timestamp < closed_at
 
 
 def _utc(value: datetime) -> datetime:

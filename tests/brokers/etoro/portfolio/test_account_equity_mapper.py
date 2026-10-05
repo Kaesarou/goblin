@@ -1,11 +1,16 @@
 import pytest
+
 from app.brokers.etoro.account_equity_mapper import extract_account_equity
 
 
 def test_aggregate_equity_is_the_documented_total():
     payload = {"accountTotals": {"accountTotalValue": 43210.0}, "credit": 99999}
     assert extract_account_equity(payload) == 43210.0
-    assert extract_account_equity({"data": payload}) == 43210.0
+
+
+def test_aggregate_equity_requires_the_documented_root_field():
+    with pytest.raises(ValueError, match="accountTotals"):
+        extract_account_equity({"data": {"accountTotals": {"accountTotalValue": 43210.0}}})
 
 
 @pytest.mark.parametrize("value", [None, True, False, "100", "bad", [], {}, 0, -1, float("nan"), float("inf"), -float("inf")])

@@ -24,7 +24,8 @@ def _executor(tmp_path, monkeypatch, payload, *, pnl=None):
     ))
     monkeypatch.setattr(client, "get_portfolio", lambda: payload)
     if pnl is None:
-        pnl = {"ordersForOpen": [], "orders": []}
+        # /pnl has its own clientPortfolio envelope, just like /portfolio.
+        pnl = {"clientPortfolio": {"ordersForOpen": [], "orders": []}}
     def get_pnl(path):
         assert path == "/api/v1/trading/info/demo/pnl"
         return pnl
@@ -99,10 +100,10 @@ def test_pending_manual_close_starts_observing_without_buy_or_duplicate_close(tm
 
 def test_pending_open_from_old_account_starts_readonly_not_as_new_risk(tmp_path, monkeypatch):
     executor = _executor(tmp_path, monkeypatch,
-                         {"clientPortfolio": {"positions": []}}, pnl={
+                         {"clientPortfolio": {"positions": []}}, pnl={"clientPortfolio": {
                              "ordersForOpen": [{"orderId": "pending-2808", "amount": 327.0}],
                              "orders": [],
-                         })
+                         }})
     assert executor.verify_known_broker_legs() == ()
     assert not executor.new_risk_allowed
     assert executor.halted_reason == "external_broker_activity_observation_only"
@@ -153,8 +154,8 @@ def test_closed_historical_broker_row_is_not_open_exposure(tmp_path, monkeypatch
 
 @pytest.mark.parametrize("field", ("ordersForOpen", "orders"))
 def test_pending_open_is_not_interpreted_as_a_flat_account(tmp_path, monkeypatch, field):
-    pnl = {"ordersForOpen": [], "orders": []}
-    pnl[field] = [{"orderId": "pending-2808", "amount": 327.0}]
+    pnl = {"clientPortfolio": {"ordersForOpen": [], "orders": []}}
+    pnl["clientPortfolio"][field] = [{"orderId": "pending-2808", "amount": 327.0}]
     executor = _executor(tmp_path, monkeypatch,
                          {"clientPortfolio": {"positions": []}}, pnl=pnl)
     assert executor.verify_known_broker_legs() == ()
@@ -165,9 +166,11 @@ def test_pending_open_is_not_interpreted_as_a_flat_account(tmp_path, monkeypatch
 
 @pytest.mark.parametrize("pnl", (
     {"credit": 100_000},
-    {"ordersForOpen": []},
-    {"ordersForOpen": [], "orders": None},
-    {"ordersForOpen": [None], "orders": []},
+    {"ordersForOpen": [], "orders": []},
+    {"clientPortfolio": None},
+    {"clientPortfolio": {"ordersForOpen": []}},
+    {"clientPortfolio": {"ordersForOpen": [], "orders": None}},
+    {"clientPortfolio": {"ordersForOpen": [None], "orders": []}},
 ))
 def test_incomplete_pending_order_data_fails_closed(tmp_path, monkeypatch, pnl):
     executor = _executor(tmp_path, monkeypatch,

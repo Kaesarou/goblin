@@ -1,7 +1,7 @@
 import logging
 import time
 from collections.abc import Iterable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import requests
@@ -15,30 +15,29 @@ from app.brokers.base import (
     OpenPositionResult,
 )
 from app.brokers.etoro.account_equity_mapper import ACCOUNT_EQUITY_SOURCE, extract_account_equity
-from app.brokers.etoro.attempt_delay import delay_seconds_for_attempt
 from app.brokers.etoro.broker_environment import broker_environment_from_name
 from app.brokers.etoro.close_order_details_parser import extract_close_execution
 from app.brokers.etoro.close_order_payload_builder import build_close_order_payload
 from app.brokers.etoro.endpoint_paths import (
+    aggregate_portfolio_path,
     close_order_lookup_path,
     close_position_path,
     demo_portfolio_path,
     instrument_search_path,
     open_order_path,
     order_lookup_path,
-    aggregate_portfolio_path,
     real_portfolio_path,
 )
 from app.brokers.etoro.get_rate_governor import (
-    ETORO_GET_429_FALLBACK_SECONDS,
     EtoroGetRateGovernor,
 )
 from app.brokers.etoro.http_failure import raise_for_failed_response
 from app.brokers.etoro.http_headers_builder import build_headers
 from app.brokers.etoro.http_response_payload import response_payload
 from app.brokers.etoro.http_retry_policy import (
+    apply_429_cooldown,
     default_get_max_attempts,
-    is_retryable_http_status,
+    get_with_retries,
 )
 from app.brokers.etoro.http_url_builder import build_http_url
 from app.brokers.etoro.instrument_cache import (
@@ -83,6 +82,8 @@ class EtoroClient(BrokerClient):
     """
 
     etoro_api_base_url = 'https://public-api.etoro.com'
+    account_equity_source = ACCOUNT_EQUITY_SOURCE
+    open_price_sanity_required = True
 
     def __init__(
         self,
@@ -141,20 +142,42 @@ class EtoroClient(BrokerClient):
             payload.get('leverage'),
             payload,
         )
+        submitted_at = datetime.now(UTC)
         order_response = self._post(self._open_order_path(), payload)
-        order_id = extract_order_id(order_response)
-        reference_id = extract_reference_id(order_response)
+        order_id = self._extract_order_id(order_response)
+        reference_id = self._extract_reference_id(order_response)
         logger.info('eToro order submitted | order_id=%s | reference_id=%s', order_id, reference_id)
-        order_details = self._wait_for_executed_order(
-            order_id,
-            require_position_details=True,
-        )
-        executed_positions = extract_executed_position_details_list(order_details)
+
+        try:
+            order_details = self._wait_for_executed_order(
+                order_id,
+                require_position_details=True,
+            )
+        except Exception as exc:
+            translated = self._translate_open_confirmation_error(
+                order_id=order_id,
+                reference_id=reference_id,
+                symbol=symbol,
+                side=normalized_side,
+                amount=amount,
+                submitted_at=submitted_at,
+                cause=exc,
+            )
+            if translated is None:
+                raise
+            raise translated from exc
+
+        executed_positions = self._extract_executed_position_details_list(order_details)
         if len(executed_positions) != 1:
-            raise RuntimeError(
-                'eToro order executed with unsupported position execution '
-                f'count: order_id={order_id}, '
-                f'count={len(executed_positions)}, details={order_details}'
+            raise self._invalid_open_execution_error(
+                order_id=order_id,
+                reference_id=reference_id,
+                symbol=symbol,
+                side=normalized_side,
+                amount=amount,
+                submitted_at=submitted_at,
+                details=order_details,
+                execution_count=len(executed_positions),
             )
         executed_position = executed_positions[0]
         remember_position_instrument_id(
@@ -162,12 +185,59 @@ class EtoroClient(BrokerClient):
             position_id=executed_position.position_id,
             instrument_id=instrument_id,
         )
+        account_notional = self._resolve_open_notional(
+            position_id=executed_position.position_id,
+            requested=float(amount),
+            reported=executed_position.executed_notional,
+        )
         return OpenPositionResult(
             position_id=executed_position.position_id,
             executed_entry_price=executed_position.executed_entry_price,
             executed_units=executed_position.executed_units,
-            executed_notional=executed_position.executed_notional,
+            executed_notional=account_notional,
+            broker_response=order_details,
         )
+
+    def _translate_open_confirmation_error(
+        self,
+        *,
+        order_id: str,
+        reference_id: str | None,
+        symbol: str,
+        side: str,
+        amount: float,
+        submitted_at: datetime,
+        cause: Exception,
+    ) -> Exception | None:
+        """Translate confirmation failures when an adapter needs stronger semantics."""
+        return None
+
+    def _invalid_open_execution_error(
+        self,
+        *,
+        order_id: str,
+        reference_id: str | None,
+        symbol: str,
+        side: str,
+        amount: float,
+        submitted_at: datetime,
+        details: dict,
+        execution_count: int,
+    ) -> Exception:
+        return RuntimeError(
+            'eToro order executed with unsupported position execution '
+            f'count: order_id={order_id}, count={execution_count}, '
+            f'details={details}'
+        )
+
+    def _resolve_open_notional(
+        self,
+        *,
+        position_id: str,
+        requested: float,
+        reported: float | None,
+    ) -> float | None:
+        return reported
 
     def close_position(
         self,
@@ -189,7 +259,7 @@ class EtoroClient(BrokerClient):
                 cause=exc,
             ) from exc
 
-        submitted_at = datetime.now(timezone.utc)
+        submitted_at = datetime.now(UTC)
         try:
             response = self._post(
                 self._close_position_path(position_id),
@@ -246,7 +316,7 @@ class EtoroClient(BrokerClient):
                 reference_id=reference_id,
             )
 
-        accepted_at = datetime.now(timezone.utc)
+        accepted_at = datetime.now(UTC)
         logger.info(
             'eToro close submitted | position_id=%s | close_order_id=%s | '
             'reference_id=%s | units_to_deduct=%s',
@@ -358,7 +428,7 @@ class EtoroClient(BrokerClient):
             params=params,
             timeout=default_request_timeout_seconds(),
         )
-        self._apply_429_cooldown(response, governor)
+        apply_429_cooldown(response, governor)
         if not response.ok:
             raise_for_failed_response(response)
         return response_payload(response)
@@ -367,54 +437,18 @@ class EtoroClient(BrokerClient):
              governor: EtoroGetRateGovernor | None = None) -> dict:
         governor = governor or self._get_governor()
         url = build_http_url(self.etoro_api_base_url, path)
-        max_attempts = default_get_max_attempts()
-        for attempt in range(1, max_attempts + 1):
-            governor.acquire()
-            try:
-                response = requests.get(
-                    url,
-                    headers=self.headers,
-                    params=params,
-                    timeout=default_request_timeout_seconds(),
-                )
-            except requests.RequestException as exc:
-                logger.warning(
-                    'eToro GET failed | attempt=%s/%s | url=%s | params=%s | error=%s',
-                    attempt,
-                    max_attempts,
-                    url,
-                    params,
-                    exc,
-                )
-                if attempt == max_attempts:
-                    raise
-                time.sleep(delay_seconds_for_attempt(attempt))
-                continue
-
-            self._apply_429_cooldown(response, governor)
-            if (
-                is_retryable_http_status(response.status_code)
-                and attempt < max_attempts
-            ):
-                logger.warning(
-                    'eToro GET retryable error | attempt=%s/%s | status=%s | url=%s | params=%s',
-                    attempt,
-                    max_attempts,
-                    response.status_code,
-                    url,
-                    params,
-                )
-                retry_after = _retry_after_seconds(response)
-                time.sleep(
-                    retry_after
-                    if retry_after is not None
-                    else delay_seconds_for_attempt(attempt)
-                )
-                continue
-            if not response.ok:
-                raise_for_failed_response(response)
-            return response_payload(response)
-        raise RuntimeError(f'eToro GET failed after retries | url={url}')
+        response = get_with_retries(
+            url=url,
+            params=params,
+            headers=lambda: self.headers,
+            governor=governor,
+            max_attempts=default_get_max_attempts(),
+            logger=logger,
+            operation='eToro',
+        )
+        if not response.ok:
+            raise_for_failed_response(response)
+        return response_payload(response)
 
     def _get_governor(self) -> EtoroGetRateGovernor:
         governor = getattr(self, '_get_rate_governor', None)
@@ -429,16 +463,6 @@ class EtoroClient(BrokerClient):
             governor = EtoroGetRateGovernor()
             self._order_lookup_get_rate_governor = governor
         return governor
-
-    def _apply_429_cooldown(self, response, governor: EtoroGetRateGovernor) -> None:
-        if getattr(response, 'status_code', None) != 429:
-            return
-        retry_after = _retry_after_seconds(response)
-        governor.defer(
-            retry_after
-            if retry_after is not None
-            else ETORO_GET_429_FALLBACK_SECONDS
-        )
 
     def _post(self, path: str, payload: dict) -> dict:
         url = build_http_url(self.etoro_api_base_url, path)
@@ -548,24 +572,6 @@ class EtoroClient(BrokerClient):
 
     def _extract_reference_id(self, payload: dict) -> str | None:
         return extract_reference_id(payload)
-
-    def _is_close_response_accepted(self, payload: dict, position_id: str) -> bool:
-        return is_close_response_accepted(payload, position_id)
-
-    def _is_order_rejected(self, payload: dict) -> bool:
-        return is_order_rejected(payload)
-
-
-def _retry_after_seconds(response) -> float | None:
-    value = response.headers.get('Retry-After')
-    if value in (None, ''):
-        return None
-    try:
-        seconds = float(value)
-    except (TypeError, ValueError):
-        return None
-    return max(0.0, seconds)
-
 
 def _optional_order_id(payload: dict) -> str | None:
     try:

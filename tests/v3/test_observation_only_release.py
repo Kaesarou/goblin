@@ -1,8 +1,8 @@
 """A DEMO release must wait for broker-flat evidence before enabling BUYs."""
 
 import importlib.util
-from pathlib import Path
 from datetime import datetime, timezone
+from pathlib import Path
 
 from app.brokers.cached_broker import CachedBrokerClient
 from app.brokers.etoro.resilient_client import ResilientEtoroClient
@@ -25,7 +25,9 @@ def test_observation_mode_stops_buy_with_empty_sqlite_and_flat_broker(tmp_path, 
         etoro_api_key="fake", etoro_user_key="fake",
     ))
     monkeypatch.setattr(client, "get_portfolio", lambda: {"clientPortfolio": {"positions": []}})
-    monkeypatch.setattr(client, "_get", lambda path: {"ordersForOpen": [], "orders": []})
+    monkeypatch.setattr(client, "_get", lambda path: {
+        "clientPortfolio": {"ordersForOpen": [], "orders": []},
+    })
     sqlite = tmp_path / "goblin.sqlite"
     store = InventoryEventStore(sqlite)
     executor = V3BrokerExecutor(
