@@ -108,6 +108,26 @@ def test_silence_is_distinguished_from_auth_timeout(monkeypatch, ack, reason):
     assert stream.diagnostics()["last_disconnect"]["retry_delay_seconds"] == 1
 
 
+def test_market_silence_is_normal_when_executable_data_is_not_expected(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("app.brokers.alpaca.stream.time.monotonic", lambda: clock[0])
+    stream = AlpacaStream(
+        api_key="key", secret_key="secret", on_message=lambda _: None, feed="iex"
+    )
+    stream.set_data_expected(False)
+    socket = ScriptedSocket(
+        clock,
+        acknowledged() + [(16, TimeoutError()), (0, ConnectionError("end"))],
+    )
+    stream._connector = lambda _: socket
+
+    with pytest.raises(ConnectionError, match="end"):
+        stream._connection(("AAPL",))
+
+    assert stream.healthy()
+    assert stream.diagnostics()["data_expected"] is False
+
+
 def test_slow_consumer_overflow_is_bounded_and_recovers_with_fresh_quotes(monkeypatch):
     clock = [100.0]
     monkeypatch.setattr("app.brokers.alpaca.stream.time.monotonic", lambda: clock[0])
