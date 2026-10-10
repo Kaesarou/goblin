@@ -77,6 +77,17 @@ class ResilientEtoroClient(EtoroClient):
         raw = fill.get("broker_response")
         if not isinstance(raw, dict):
             return None
+        # The historical order is evidence only for the exact USD BUY we own;
+        # it must not rearm a position using another currency or an ambiguous
+        # multi-position execution.
+        if self.settings.base_currency.strip().upper() != "USD":
+            return None
+        if raw.get("orderCurrency") != "USD":
+            return None
+        if raw.get("action") not in (None, "open"):
+            return None
+        if raw.get("transaction") not in (None, "buy"):
+            return None
         position_id = str(fill.get("position_id", ""))
         raw_requested = fill.get("requested_notional")
         if raw_requested is None:
@@ -85,14 +96,10 @@ class ResilientEtoroClient(EtoroClient):
             requested = float(raw_requested)
         except (TypeError, ValueError):
             return None
-        matching = [
-            details
-            for details in extract_executed_position_details_list(raw)
-            if details.position_id == position_id
-        ]
-        if len(matching) != 1:
+        executions = extract_executed_position_details_list(raw)
+        if len(executions) != 1 or executions[0].position_id != position_id:
             return None
-        details = matching[0]
+        details = executions[0]
         exposure = convergent_account_exposure(
             requested=requested,
             initial_exposure_account_currency=(
