@@ -118,7 +118,8 @@ def test_persisted_order_response_recovers_exact_notional_without_network(monkey
         "requested_notional": 328.0,
         "notional": 328.0,
         "broker_response": {
-            "orderCurrency": "USD",
+            # Actual eToro DEMO payloads use lowercase "usd".
+            "orderCurrency": "usd",
             "action": "open",
             "transaction": "buy",
             "positionExecutions": [{
