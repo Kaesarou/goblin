@@ -11,6 +11,8 @@ from app.brokers.etoro.order_confirmation_error import (
     EtoroOrderRejectedError,
 )
 from app.brokers.etoro.order_response_parser import (
+    convergent_account_exposure,
+    extract_executed_position_details_list,
     extract_order_error_code,
     extract_order_error_message,
     has_executed_position_details,
@@ -69,6 +71,50 @@ class ResilientEtoroClient(EtoroClient):
                 source="etoro_exact_pnl_position_usd", broker_response=position,
             )
         return result
+
+    def recover_open_position_economics_from_fill(self, fill):
+        """Re-evaluate durable order evidence after restart without another POST."""
+        raw = fill.get("broker_response")
+        if not isinstance(raw, dict):
+            return None
+        position_id = str(fill.get("position_id", ""))
+        try:
+            requested = float(fill.get("requested_notional", fill["notional"]))
+        except (KeyError, TypeError, ValueError):
+            return None
+        matching = [
+            details
+            for details in extract_executed_position_details_list(raw)
+            if details.position_id == position_id
+        ]
+        if len(matching) != 1:
+            return None
+        details = matching[0]
+        exposure = convergent_account_exposure(
+            requested=requested,
+            initial_exposure_account_currency=(
+                details.initial_exposure_account_currency
+            ),
+            margin_account_currency=details.margin_account_currency,
+            leverage=details.leverage,
+        )
+        if exposure is None:
+            return None
+        return BrokerPositionEconomics(
+            position_id=position_id,
+            units=details.executed_units,
+            entry_price=details.executed_entry_price,
+            account_notional=exposure,
+            source="etoro_order_convergent_account_exposure",
+            broker_response={
+                "orderId": details.opening_order_id,
+                "initialExposureAccountCurrency": (
+                    details.initial_exposure_account_currency
+                ),
+                "marginAccountCurrency": details.margin_account_currency,
+                "leverage": details.leverage,
+            },
+        )
 
     def _translate_open_confirmation_error(
         self,
@@ -208,23 +254,15 @@ class ResilientEtoroClient(EtoroClient):
         # initial exposure in account currency. Prospectively, DEMO has returned
         # investedAmountCurrency=1.0 for ~USD 328 unleveraged positions while
         # both initial exposure and account margin independently agree near the
-        # requested cash amount. Promote that evidence only when all three
-        # invariants agree; otherwise keep the existing exact-P&L fallback.
-        exposure = initial_exposure_account_currency
-        margin = margin_account_currency
-        exposure_proven = (
-            leverage == 1
-            and exposure is not None
-            and margin is not None
-            and math.isfinite(exposure)
-            and math.isfinite(margin)
-            and exposure > 0
-            and margin > 0
-            and 0.8 * requested <= exposure <= 1.2 * requested
-            and 0.8 * requested <= margin <= 1.2 * requested
-            and abs(exposure / margin - 1.0) <= 0.01
+        # requested cash amount. Promote that evidence only when all invariants
+        # agree; otherwise keep the existing exact-P&L fallback.
+        exposure = convergent_account_exposure(
+            requested=requested,
+            initial_exposure_account_currency=initial_exposure_account_currency,
+            margin_account_currency=margin_account_currency,
+            leverage=leverage,
         )
-        if exposure_proven:
+        if exposure is not None:
             logger.warning(
                 'eToro suspicious invested amount resolved from convergent '
                 'account-exposure evidence | position_id=%s | '
@@ -232,11 +270,11 @@ class ResilientEtoroClient(EtoroClient):
                 'margin_account=%s | leverage=%s',
                 position_id,
                 reported,
-                exposure,
-                margin,
+                initial_exposure_account_currency,
+                margin_account_currency,
                 leverage,
             )
-            return float(exposure)
+            return exposure
         if self.settings.base_currency.strip().upper() != 'USD':
             logger.error('P&L notional cross-check requires USD account currency')
             return reported
