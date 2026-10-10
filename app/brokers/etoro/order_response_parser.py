@@ -10,6 +10,9 @@ class ExecutedPositionDetails:
     executed_entry_price: float
     executed_units: float
     executed_notional: float | None = None
+    initial_exposure_account_currency: float | None = None
+    margin_account_currency: float | None = None
+    leverage: float | None = None
 
 
 def extract_order_id(payload: dict) -> str:
@@ -61,6 +64,11 @@ def extract_executed_position_details_list(payload: dict) -> list[ExecutedPositi
         avg_price = _optional_float(opening_data.get('avgPrice'))
         units = _optional_float(opening_data.get('units'))
         invested_amount = _optional_float(execution.get('investedAmountCurrency'))
+        initial_exposure_account = _optional_float(
+            execution.get('initialExposureAccountCurrency')
+        )
+        margin_account = _optional_float(execution.get('marginAccountCurrency'))
+        leverage = _optional_float(execution.get('leverage'))
         # V3 opens by cash amount. eToro is authoritative for the resulting units;
         # deriving units locally from amount / avgPrice is unsafe for FX-converted
         # equities and broker rounding. The account-currency invested amount is
@@ -83,6 +91,9 @@ def extract_executed_position_details_list(payload: dict) -> list[ExecutedPositi
                     if invested_amount is not None and invested_amount > 0
                     else None
                 ),
+                initial_exposure_account_currency=initial_exposure_account,
+                margin_account_currency=margin_account,
+                leverage=leverage,
             )
         )
     return executed_positions
