@@ -134,8 +134,7 @@ def test_preflight_accepts_no_quote_prices_when_market_is_closed():
 
     client.validate_feed_access(["AAPL"])
 
-    with pytest.raises(ValueError, match="numeric range"):
-        client.get_market_snapshots(["AAPL"])
+    assert client.get_market_snapshots(["AAPL"]) == {}
 
 
 def test_preflight_still_rejects_crossed_positive_quotes():
