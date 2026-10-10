@@ -82,7 +82,8 @@ class ResilientEtoroClient(EtoroClient):
         # multi-position execution.
         if self.settings.base_currency.strip().upper() != "USD":
             return None
-        if raw.get("orderCurrency") != "USD":
+        currency = raw.get("orderCurrency")
+        if not isinstance(currency, str) or currency.strip().upper() != "USD":
             return None
         if raw.get("action") not in (None, "open"):
             return None
