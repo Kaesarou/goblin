@@ -118,11 +118,23 @@ class ResilientEtoroClient(EtoroClient):
             ),
         )
 
-    def _resolve_open_notional(self, *, position_id, requested, reported):
+    def _resolve_open_notional(
+        self,
+        *,
+        position_id,
+        requested,
+        reported,
+        initial_exposure_account_currency=None,
+        margin_account_currency=None,
+        leverage=None,
+    ):
         return self._resolve_suspicious_account_notional(
             position_id=position_id,
             requested=requested,
             reported=reported,
+            initial_exposure_account_currency=initial_exposure_account_currency,
+            margin_account_currency=margin_account_currency,
+            leverage=leverage,
         )
 
     def _wait_for_executed_order(
@@ -174,8 +186,14 @@ class ResilientEtoroClient(EtoroClient):
         )
 
     def _resolve_suspicious_account_notional(
-        self, *, position_id: str, requested: float,
+        self,
+        *,
+        position_id: str,
+        requested: float,
         reported: float | None,
+        initial_exposure_account_currency: float | None = None,
+        margin_account_currency: float | None = None,
+        leverage: float | None = None,
     ) -> float | None:
         """Cross-check suspect order amounts using the exact P&L position in USD.
 
@@ -185,6 +203,40 @@ class ResilientEtoroClient(EtoroClient):
         if (reported is not None and math.isfinite(reported)
                 and 0.8 * requested <= reported <= 1.2 * requested):
             return reported
+
+        # eToro's order lookup documents initialExposureAccountCurrency as the
+        # initial exposure in account currency. Prospectively, DEMO has returned
+        # investedAmountCurrency=1.0 for ~USD 328 unleveraged positions while
+        # both initial exposure and account margin independently agree near the
+        # requested cash amount. Promote that evidence only when all three
+        # invariants agree; otherwise keep the existing exact-P&L fallback.
+        exposure = initial_exposure_account_currency
+        margin = margin_account_currency
+        exposure_proven = (
+            leverage == 1
+            and exposure is not None
+            and margin is not None
+            and math.isfinite(exposure)
+            and math.isfinite(margin)
+            and exposure > 0
+            and margin > 0
+            and 0.8 * requested <= exposure <= 1.2 * requested
+            and 0.8 * requested <= margin <= 1.2 * requested
+            and abs(exposure / margin - 1.0) <= 0.01
+        )
+        if exposure_proven:
+            logger.warning(
+                'eToro suspicious invested amount resolved from convergent '
+                'account-exposure evidence | position_id=%s | '
+                'order_invested_amount=%s | initial_exposure_account=%s | '
+                'margin_account=%s | leverage=%s',
+                position_id,
+                reported,
+                exposure,
+                margin,
+                leverage,
+            )
+            return float(exposure)
         if self.settings.base_currency.strip().upper() != 'USD':
             logger.error('P&L notional cross-check requires USD account currency')
             return reported
