@@ -33,6 +33,7 @@ class Broker:
         self.closed_units = {"p1": 0.0}
         self.opens = 0
         self.reads = 0
+        self.local_evidence = None
 
     def open_position(self, *_args):
         self.opens += 1
@@ -49,6 +50,9 @@ class Broker:
         if isinstance(self.evidence, Exception):
             raise self.evidence
         return self.evidence
+
+    def recover_open_position_economics_from_fill(self, _fill):
+        return self.local_evidence
 
     def get_open_position_units(self, _ids):
         return self.closed_units
@@ -122,6 +126,23 @@ def test_exact_pnl_price_and_notional_resolve_both_durable_halts(tmp_path):
     assert {"OPEN_ACCOUNT_NOTIONAL_RECONCILED", "OPEN_FILL_ECONOMICS_RECONCILED"} <= {
         e.event_type for e in store.events()}
     assert broker.opens == 1
+
+
+def test_durable_local_broker_evidence_can_rearm_without_remote_economics_get(tmp_path):
+    executor, broker, store, _, _ = setup_executor(tmp_path, notional=1.0)
+    broker.local_evidence = evidence()
+    assert executor._schedule_open_economics_revalidation(NOW)
+    executor.drain()
+
+    assert executor.new_risk_allowed
+    assert broker.reads == 0
+    assert executor.book.active_for_symbol("IFX.DE").total_notional == 300.0
+    resolution = next(
+        event
+        for event in store.events()
+        if event.event_type == "OPEN_ACCOUNT_NOTIONAL_RECONCILED"
+    )
+    assert resolution.payload["source"] == "etoro_exact_pnl_position_usd"
 
 
 def test_credible_etoro_fill_keeps_broker_price_and_needs_no_extra_get(tmp_path):

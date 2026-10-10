@@ -154,6 +154,17 @@ class BrokerClient(ABC):
         """Return exact uncached evidence; absence is not proof of a close."""
         raise NotImplementedError
 
+    def recover_open_position_economics_from_fill(
+        self,
+        fill: dict[str, Any],
+    ) -> BrokerPositionEconomics | None:
+        """Recover exact economics from durable original broker evidence.
+
+        Default adapters provide no local proof. Implementations must return
+        None unless persisted fill evidence is independently authoritative.
+        """
+        return None
+
     @property
     def requires_external_activity_ack(self) -> bool:
         """Whether an external-activity gate survives account/ledger resets."""

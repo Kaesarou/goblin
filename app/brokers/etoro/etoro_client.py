@@ -189,6 +189,11 @@ class EtoroClient(BrokerClient):
             position_id=executed_position.position_id,
             requested=float(amount),
             reported=executed_position.executed_notional,
+            initial_exposure_account_currency=(
+                executed_position.initial_exposure_account_currency
+            ),
+            margin_account_currency=executed_position.margin_account_currency,
+            leverage=executed_position.leverage,
         )
         return OpenPositionResult(
             position_id=executed_position.position_id,
@@ -236,6 +241,9 @@ class EtoroClient(BrokerClient):
         position_id: str,
         requested: float,
         reported: float | None,
+        initial_exposure_account_currency: float | None = None,
+        margin_account_currency: float | None = None,
+        leverage: float | None = None,
     ) -> float | None:
         return reported
 
