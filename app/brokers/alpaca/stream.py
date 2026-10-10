@@ -80,6 +80,7 @@ class AlpacaStream:
         self._fatal: Exception | None = None
         self._last_error: str | None = None
         self._last_data = 0.0
+        self._data_expected = True
         self.connections = 0
 
     def start(self, symbols=()) -> None:
@@ -107,9 +108,27 @@ class AlpacaStream:
                 "Alpaca stream failed; check credentials/feed entitlement"
             ) from self._fatal
 
+    def set_data_expected(self, expected: bool) -> None:
+        expected = bool(expected)
+        if expected == self._data_expected:
+            return
+        self._data_expected = expected
+        if expected:
+            # A session transition gets one normal silence window to receive a
+            # fresh quote. Per-symbol coordinator freshness still blocks entry
+            # authority until that quote is actually accepted.
+            self._last_data = time.monotonic()
+            self._stable_since = None
+            self._backoff_reset_ready = False
+
+    def data_expected(self) -> bool:
+        return self._data_expected
+
     def healthy(self) -> bool:
         return self._healthy and (
-            not self._market or time.monotonic() - self._last_data < self._silence_seconds
+            not self._market
+            or not self._data_expected
+            or time.monotonic() - self._last_data < self._silence_seconds
         )
 
     def subscribed_symbols(self) -> tuple[str, ...]:
@@ -118,6 +137,7 @@ class AlpacaStream:
     def diagnostics(self) -> dict:
         return {
             "healthy": self.healthy(),
+            "data_expected": self._data_expected,
             "connections": self.connections,
             "last_error": self._last_error,
             "fatal": self._fatal is not None,
@@ -214,7 +234,12 @@ class AlpacaStream:
             while not self._stop.is_set() and not self._changed.is_set():
                 if not self._healthy and time.monotonic() > deadline:
                     raise StreamFailure("authentication_subscription_timeout")
-                if self._market and self._healthy and not self.healthy():
+                if (
+                    self._market
+                    and self._healthy
+                    and self._data_expected
+                    and not self.healthy()
+                ):
                     raise StreamFailure("quotes_silent")
                 if (self.healthy() and self._stable_since is not None
                         and (not self._market or (self._last_accepted_data is not None
