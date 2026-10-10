@@ -31,7 +31,7 @@ from app.v3.decision_window import (
 from app.v3.decision_window import decision_quote_for_candle as _decision_quote
 from app.v3.features import OnlineFeatureEngine, OnlineFeatureSnapshot
 from app.v3.forager import ForagerCandidate, NoVolumeForager
-from app.v3.intents import RestingIntentBook
+from app.v3.intents import RestingIntentBook, RestingIntentObservation
 from app.v3.live_execution import V3BrokerExecutor
 from app.v3.models import DecisionBatch, DecisionReason, MarketState, OrderIntent
 from app.v3.persistence import InventoryEventStore
@@ -166,6 +166,7 @@ class GoblinV3Runtime:
         self._equity_source: str | None = None
         self._started = False
         self._stop_requested = False
+        self._stopped = False
         self.stop_reason: str | None = None
         self._last_fallback_monotonic = 0.0
         self._last_close_confirmation_monotonic = 0.0
@@ -222,13 +223,12 @@ class GoblinV3Runtime:
             )
 
         active_inventories = self._active_inventories()
-        if active_inventories:
+        recovery_symbols = set(self.executor.recovering_open_symbols)
+        if active_inventories or recovery_symbols:
             restored_feature_set = set(restored_features)
-            missing_feature_symbols = {
-                inventory.symbol
-                for inventory in active_inventories
-                if inventory.symbol not in restored_feature_set
-            }
+            missing_feature_symbols = (
+                {inventory.symbol for inventory in active_inventories} | recovery_symbols
+            ) - restored_feature_set
             if missing_feature_symbols:
                 self.executor.halted_reason = (
                     "missing_causal_feature_state_for_open_inventory:"
@@ -296,8 +296,15 @@ class GoblinV3Runtime:
             },
         )
 
+    def request_stop(self, *, reason: str = "requested") -> None:
+        # Signal-safe: the main loop owns cleanup, persistence and worker joins.
+        self._stop_requested = True
+        if self.stop_reason != "error":
+            self.stop_reason = reason
+
     def run(self, *, timeout_seconds: float = 1.0) -> None:
-        self.stop_reason = None
+        if not self._stop_requested:
+            self.stop_reason = None
         try:
             if not self._started:
                 self.startup()
@@ -313,6 +320,8 @@ class GoblinV3Runtime:
                 self._schedule_close_confirmation_checks(monotonic_now)
 
                 event = self.live_market_data.next_event(timeout_seconds)
+                if self._stop_requested:
+                    break
                 if event is not None:
                     self._handle_event(event, now)
 
@@ -343,14 +352,19 @@ class GoblinV3Runtime:
                 raise
 
     def stop(self) -> None:
-        if self._stop_requested and not self._started:
+        if self._stopped:
             return
         self._stop_requested = True
         try:
             self.live_market_data.stop()
         finally:
-            self.mutation_runner.close(wait=False)
-            self.maintenance_runner.close(wait=False)
+            # Keep the storage lease until dispatched broker calls finish and
+            # their completions are projected. A second process must not race
+            # a still-running worker after the main loop has stopped.
+            self.mutation_runner.close(wait=True)
+            self.maintenance_runner.close(wait=True)
+
+        self._drain_broker_tasks()
 
         self.runtime_state_store.save_feature_engine(self.feature_engine)
         self.runtime_state_store.save_inventory_book(
@@ -368,8 +382,11 @@ class GoblinV3Runtime:
             self._heartbeat_metrics(),
         )
         self._started = False
+        self._stopped = True
 
     def _handle_event(self, event: MarketDataEvent, now: datetime) -> None:
+        if self._stop_requested:
+            return
         symbol = event.symbol.strip().upper()
         precheck = self.coordinator.precheck(event)
         if not precheck.accepted:
@@ -434,6 +451,22 @@ class GoblinV3Runtime:
         )
 
         for intent in self.intent_book.triggered(snapshot):
+            if self._stop_requested:
+                break
+            crossing = self.intent_book.take_first_crossing(intent.intent_id)
+            if crossing is not None and intent.limit_price is not None:
+                self.trade_journal.write(
+                    "v3_resting_intent_crossed",
+                    {
+                        **self._resting_intent_payload(intent),
+                        **self._resting_observation_payload(crossing),
+                        "crossing_bid": snapshot.bid,
+                        "crossing_ask": snapshot.ask,
+                        "crossing_timestamp": snapshot.timestamp,
+                        "crossing_received_at": snapshot.received_at,
+                        "source": "fresh_quote",
+                    },
+                )
             if not intent.reduce_only and not (
                 session_allows_new_risk
                 and self._operational_entry_allowed(symbol)
@@ -442,6 +475,17 @@ class GoblinV3Runtime:
             if self.executor.schedule(intent, snapshot=snapshot):
                 self.intent_book.mark_dispatched(intent.intent_id)
                 self.metrics["orders_submitted"] += 1
+                if intent.limit_price is not None:
+                    self.trade_journal.write(
+                        "v3_resting_intent_dispatched",
+                        {
+                            **self._resting_intent_payload(intent),
+                            "dispatch_bid": snapshot.bid,
+                            "dispatch_ask": snapshot.ask,
+                            "dispatch_timestamp": snapshot.timestamp,
+                            "source": "fresh_quote",
+                        },
+                    )
                 self.trade_journal.write(
                     "v3_intent_triggered",
                     {
@@ -760,7 +804,11 @@ class GoblinV3Runtime:
                 self.book.active_for_symbol(symbol) is None
                 and symbol not in selected_flat
             ):
-                self.intent_book.replace_symbol(symbol, ())
+                self._replace_resting_intents(
+                    symbol,
+                    (),
+                    reason="flat_not_selected",
+                )
                 self._clear_logged_decision(symbol)
 
         self._record_incomplete_decision_window(batch)
@@ -820,7 +868,11 @@ class GoblinV3Runtime:
             intent for intent in decision.intents
             if intent.reduce_only or allow_new_risk
         )
-        self.intent_book.replace_symbol(symbol, intents)
+        self._replace_resting_intents(
+            symbol,
+            intents,
+            reason="decision_window_replaced",
+        )
         self.metrics["intents_planned"] += len(intents)
         self._journal_decision(symbol, decision, intents, extra=extra)
 
@@ -871,6 +923,13 @@ class GoblinV3Runtime:
             monotonic_now - self._last_fallback_monotonic
             < POSITION_FALLBACK_INTERVAL_SECONDS
         ):
+            return
+        expected = getattr(
+            self.live_market_data,
+            "executable_data_expected",
+            None,
+        )
+        if callable(expected) and not expected():
             return
         symbols = [inventory.symbol for inventory in self._active_inventories()]
         if not symbols:
@@ -961,7 +1020,10 @@ class GoblinV3Runtime:
                         },
                     )
             elif completion.kind == "v3_position_fallback":
-                self._handle_position_fallback_completion(completion)
+                # A late quote may finish during shutdown, after the mutation
+                # lane has closed. It must not dispatch a new exit then.
+                if not self._stop_requested:
+                    self._handle_position_fallback_completion(completion)
 
     def _handle_position_fallback_completion(self, completion) -> None:
         symbols = list((completion.context or {}).get("symbols", []))
@@ -994,6 +1056,8 @@ class GoblinV3Runtime:
                 continue
             recovered.append(symbol)
             for intent in self.intent_book.triggered(snapshot):
+                if self._stop_requested:
+                    break
                 if not intent.reduce_only:
                     continue
                 if self.executor.schedule(intent, snapshot=snapshot):
@@ -1068,6 +1132,15 @@ class GoblinV3Runtime:
             self.metrics["session_transitions"] += 1
         for session_key in ended_keys:
             self.market_context_service.reset_session(session_key)
+        set_data_expected = getattr(
+            self.live_market_data,
+            "set_data_expected",
+            None,
+        )
+        if callable(set_data_expected):
+            set_data_expected(
+                any(decision.session_active for decision in decisions.values())
+            )
         for symbol, decision in decisions.items():
             previous = self.session_decisions.get(symbol)
             self.session_decisions[symbol] = decision
@@ -1095,20 +1168,28 @@ class GoblinV3Runtime:
     def _operational_entry_allowed(self, symbol: str) -> bool:
         session = self.session_decisions.get(symbol)
         return bool(
-            session is not None
+            not self._stop_requested
+            and session is not None
             and getattr(session, "session_active", False)
             and getattr(session, "new_entries_allowed", False)
             and self._current_run_equity is not None
+            and self._transport_entry_allowed()
             and self.coordinator.entry_allowed(symbol)
             and self.executor.new_risk_allowed
         )
 
+    def _transport_entry_allowed(self) -> bool:
+        return (not self.live_market_data.requires_websocket_health
+                or self.live_market_data.connection_healthy())
+
     def _symbol_risk_authority(self, symbol: str) -> dict[str, object]:
         session = self.session_decisions.get(symbol)
         checks = {
+            "runtime_accepting_orders": not self._stop_requested,
             "session_active": bool(session and session.session_active),
             "session_new_entries_allowed": bool(session and session.new_entries_allowed),
             "market_data_entry_allowed": bool(self.coordinator.entry_allowed(symbol)),
+            "market_data_transport_healthy": self._transport_entry_allowed(),
             "current_run_equity_available": self._current_run_equity is not None,
             "executor_new_risk_allowed": self.executor.new_risk_allowed,
         }
@@ -1165,10 +1246,69 @@ class GoblinV3Runtime:
             if intent.symbol in symbol_set and intent.reduce_only:
                 by_symbol.setdefault(intent.symbol, []).append(intent)
         for symbol in symbol_set:
-            self.intent_book.replace_symbol(
+            self._replace_resting_intents(
                 symbol,
                 tuple(by_symbol.get(symbol, ())),
+                reason="new_risk_authority_revoked",
             )
+
+    def _replace_resting_intents(
+        self,
+        symbol: str,
+        intents: tuple[OrderIntent, ...],
+        *,
+        reason: str,
+    ) -> None:
+        change = self.intent_book.replace_symbol(symbol, intents)
+        for observation in change.removed:
+            intent = observation.intent
+            if intent.limit_price is None:
+                continue
+            self.trade_journal.write(
+                "v3_resting_intent_expired",
+                {
+                    **self._resting_intent_payload(intent),
+                    **self._resting_observation_payload(observation),
+                    "expiration_reason": reason,
+                },
+            )
+        for intent in change.added:
+            if intent.limit_price is None:
+                continue
+            self.trade_journal.write(
+                "v3_resting_intent_created",
+                {
+                    **self._resting_intent_payload(intent),
+                    "creation_reason": reason,
+                },
+            )
+
+    @staticmethod
+    def _resting_intent_payload(intent: OrderIntent) -> dict[str, object]:
+        return {
+            "intent_id": intent.intent_id,
+            "purpose": intent.purpose.value,
+            "symbol": intent.symbol,
+            "side": intent.side,
+            "limit_price": intent.limit_price,
+            "reduce_only": intent.reduce_only,
+            "created_at": intent.created_at,
+        }
+
+    @staticmethod
+    def _resting_observation_payload(
+        observation: RestingIntentObservation,
+    ) -> dict[str, object]:
+        return {
+            "observed_quote_count": observation.quote_count,
+            "max_bid_while_active": observation.max_bid,
+            "min_ask_while_active": observation.min_ask,
+            "first_quote_at": observation.first_quote_at,
+            "last_quote_at": observation.last_quote_at,
+            "first_crossed_at": observation.first_crossed_at,
+            "first_crossing_price": observation.first_crossing_price,
+            "closest_distance_bp": observation.closest_distance_bp,
+        }
 
     def _journal_decision(
         self,
@@ -1339,6 +1479,7 @@ class GoblinV3Runtime:
                 sorted(self._decision_reason_counts.items())
             ),
             "market_data_coordinator": dict(self.coordinator.metrics),
+            "market_data_transport": self.live_market_data.diagnostics(),
             "broker_confirmation": self.executor.confirmation_metrics(),
             "journal_budget": self._journal_budget_metrics(),
             "stop_reason": self.stop_reason,

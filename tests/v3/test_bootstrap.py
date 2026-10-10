@@ -73,7 +73,7 @@ def test_v3_manifest_declares_authority_and_replayable_log_budget(tmp_path):
         removed_runs=(),
     )
 
-    assert manifest["schema_version"] == 20
+    assert manifest["schema_version"] == 21
     assert manifest["strategy"]["name"] == "INVENTORY_RR5_V1"
     assert manifest["strategy"]["direction_model"] is None
     assert manifest["strategy"]["wait_confirmation"] is None
@@ -93,6 +93,7 @@ def test_v3_manifest_declares_authority_and_replayable_log_budget(tmp_path):
         "query_lane": "shared_serial_with_close_confirmation",
         "query_priority": [
             "active_close_mutation",
+            "active_open_recovery",
             "periodic_broker_reconciliation",
             "open_economics_revalidation",
             "economics_only_close_confirmation",

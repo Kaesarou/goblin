@@ -1,5 +1,7 @@
 from threading import Event
 
+import pytest
+
 from app.runtime.broker_task_runner import BrokerTaskLane, BrokerTaskRunner
 
 
@@ -84,7 +86,8 @@ def test_close_lane_is_not_blocked_by_slow_standard_broker_work():
     assert completions['open-order-1'].value == 'open-confirmed'
 
 
-def test_close_lane_is_not_blocked_by_slow_confirmation_query():
+@pytest.mark.parametrize("kind", ["v3_close_execution_lookup", "v3_open_execution_lookup"])
+def test_close_lane_is_not_blocked_by_slow_confirmation_query(kind):
     runner = BrokerTaskRunner()
     query_started = Event()
     release_query = Event()
@@ -100,7 +103,7 @@ def test_close_lane_is_not_blocked_by_slow_confirmation_query():
         return 'closed'
 
     runner.submit(
-        kind='v3_close_execution_lookup',
+        kind=kind,
         task_id='confirm-1',
         operation=slow_confirmation_lookup,
     )

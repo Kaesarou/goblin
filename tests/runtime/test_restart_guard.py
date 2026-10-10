@@ -1,6 +1,7 @@
 """The production restart guard is durable across separate processes."""
 
 import json
+import signal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,6 +9,54 @@ import pytest
 
 from app.runtime import restart_guard
 from scripts import demo_rearm_after_manual_closes
+
+
+@pytest.mark.parametrize("stage", ["spawn", "wait", "exit_race"])
+def test_stop_is_forwarded_even_during_spawn_and_handlers_are_restored(tmp_path, monkeypatch, stage):
+    monkeypatch.setenv("GOBLIN_RESTART_GUARD_PATH", str(tmp_path / "guard.json"))
+    handlers = {s: object() for s in (signal.SIGTERM, signal.SIGINT)}
+    original = dict(handlers)
+    sent = []
+
+    def install(signum, handler):
+        previous = handlers[signum]
+        handlers[signum] = handler
+        return previous
+
+    def send(signum):
+        sent.append(signum)
+        if stage == "exit_race":
+            raise ProcessLookupError
+
+    def wait():
+        if stage != "spawn":
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+        return -signal.SIGTERM
+
+    def spawn(_args):
+        if stage == "spawn":
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+        return SimpleNamespace(wait=wait, poll=lambda: None, send_signal=send)
+
+    monkeypatch.setattr(restart_guard.signal, "signal", install)
+    monkeypatch.setattr(restart_guard.subprocess, "Popen", spawn)
+    assert restart_guard.main() == 0
+    assert sent == [signal.SIGTERM]
+    assert handlers == original
+
+
+@pytest.mark.parametrize("broker", ["alpaca_demo", "alpacademo", "alpaca-demo", "paper"])
+def test_non_etoro_runtime_does_not_enter_etoro_demo_watcher(tmp_path, monkeypatch, broker):
+    monkeypatch.setenv("GOBLIN_RESTART_GUARD_PATH", str(tmp_path / "guard.json"))
+    monkeypatch.setenv("BROKER", broker)
+    monkeypatch.setenv("GOBLIN_OBSERVATION_ONLY", "0")
+    monkeypatch.setenv("GOBLIN_DEMO_AUTO_REARM_AFTER_MANUAL_CLOSE", "1")
+    launched = []
+    child = SimpleNamespace(wait=lambda: 0, poll=lambda: None, send_signal=lambda signum: None)
+    monkeypatch.setattr(restart_guard.subprocess, "Popen", lambda args: launched.append(args) or child)
+    monkeypatch.setattr(restart_guard.signal, "signal", lambda *_: None)
+    assert restart_guard.main() == 0
+    assert launched == [[restart_guard.sys.executable, "-m", "app.main"]]
 
 
 def test_production_compose_runs_guard_with_persistent_data_volume():

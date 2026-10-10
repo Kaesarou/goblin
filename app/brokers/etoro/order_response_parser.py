@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 
 EXECUTED_STATUS_NAMES = ('executed', 'filled')
@@ -10,6 +11,10 @@ class ExecutedPositionDetails:
     executed_entry_price: float
     executed_units: float
     executed_notional: float | None = None
+    initial_exposure_account_currency: float | None = None
+    margin_account_currency: float | None = None
+    leverage: float | None = None
+    opening_order_id: str | None = None
 
 
 def extract_order_id(payload: dict) -> str:
@@ -61,6 +66,11 @@ def extract_executed_position_details_list(payload: dict) -> list[ExecutedPositi
         avg_price = _optional_float(opening_data.get('avgPrice'))
         units = _optional_float(opening_data.get('units'))
         invested_amount = _optional_float(execution.get('investedAmountCurrency'))
+        initial_exposure_account = _optional_float(
+            execution.get('initialExposureAccountCurrency')
+        )
+        margin_account = _optional_float(execution.get('marginAccountCurrency'))
+        leverage = _optional_float(execution.get('leverage'))
         # V3 opens by cash amount. eToro is authoritative for the resulting units;
         # deriving units locally from amount / avgPrice is unsafe for FX-converted
         # equities and broker rounding. The account-currency invested amount is
@@ -83,9 +93,51 @@ def extract_executed_position_details_list(payload: dict) -> list[ExecutedPositi
                     if invested_amount is not None and invested_amount > 0
                     else None
                 ),
+                initial_exposure_account_currency=initial_exposure_account,
+                margin_account_currency=margin_account,
+                leverage=leverage,
+                opening_order_id=(
+                    None
+                    if opening_data.get('orderId') is None
+                    else str(opening_data.get('orderId'))
+                ),
             )
         )
     return executed_positions
+
+
+def convergent_account_exposure(
+    *,
+    requested: float,
+    initial_exposure_account_currency: float | None,
+    margin_account_currency: float | None,
+    leverage: float | None,
+) -> float | None:
+    """Prove unleveraged account exposure from independent order fields.
+
+    eToro documents both initialExposureAccountCurrency and
+    marginAccountCurrency in account currency. A suspicious invested amount is
+    accepted only when both independently agree with the requested cash amount
+    and with each other.
+    """
+    exposure = initial_exposure_account_currency
+    margin = margin_account_currency
+    if (
+        not math.isfinite(float(requested))
+        or requested <= 0
+        or leverage != 1
+        or exposure is None
+        or margin is None
+        or not math.isfinite(exposure)
+        or not math.isfinite(margin)
+        or exposure <= 0
+        or margin <= 0
+        or not (0.8 * requested <= exposure <= 1.2 * requested)
+        or not (0.8 * requested <= margin <= 1.2 * requested)
+        or abs(exposure / margin - 1.0) > 0.01
+    ):
+        return None
+    return float(exposure)
 
 
 def has_executed_position_details(payload: dict) -> bool:
@@ -173,9 +225,10 @@ def is_close_response_accepted(payload: dict, position_id: str) -> bool:
 
 
 def _optional_float(value: object) -> float | None:
-    if value is None:
+    if value is None or isinstance(value, bool):
         return None
-    return float(value)
+    result = float(value)
+    return result if math.isfinite(result) else None
 
 
 def _optional_int(value: object) -> int | None:

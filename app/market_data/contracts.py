@@ -8,8 +8,6 @@ from app.market_data.models import MarketDataEvent
 class RestMarketDataClient(Protocol):
     def get_market_snapshots(self, symbols: list[str]) -> dict[str, MarketSnapshot]: ...
 
-    def resolve_instrument_ids(self, symbols: list[str]) -> dict[str, int]: ...
-
 
 class LiveMarketDataFeed(ABC):
     @abstractmethod
@@ -38,6 +36,19 @@ class LiveMarketDataFeed(ABC):
     @abstractmethod
     def requires_websocket_health(self) -> bool:
         raise NotImplementedError
+
+    def set_data_expected(self, expected: bool) -> None:
+        """Tell the transport whether executable live data is currently expected.
+
+        Session-aware feeds may suppress silence recovery while their market is
+        closed. This never grants trading authority: session and per-symbol
+        freshness checks remain independent runtime gates.
+        """
+        return None
+
+    def executable_data_expected(self) -> bool:
+        """Return whether REST/WS executable quotes are expected right now."""
+        return True
 
     def connection_healthy(self) -> bool:
         """Return whether the primary transport is currently usable.

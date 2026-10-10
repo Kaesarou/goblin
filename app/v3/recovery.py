@@ -16,18 +16,25 @@ class RestartSafety:
 def evaluate_restart_safety(events: Iterable[InventoryEvent]) -> RestartSafety:
     """Prove that no broker mutation was interrupted at an unknowable boundary.
 
-    Open submissions are resolved only by a confirmed fill or explicit failure.
+    Open submissions are resolved only by a confirmed fill or explicit failure;
+    a persisted client identity permits read-only recovery with new risk halted.
     A close submission is safe to resume once the broker returned an accepted
     close-order id because V3 can restore that pending confirmation and continue
     polling. A directly confirmed EXIT_FILLED also resolves the close-start path
-    (notably paper execution). An explicit UNKNOWN outcome always fails closed.
+    (notably paper execution). A persisted client identity also permits read-only
+    recovery after an interrupted/unknown close. Unknown opens or closes without
+    a lookup identity still fail closed.
     """
 
     open_started: set[str] = set()
     open_resolved: set[str] = set()
+    recoverable_opens: set[str] = set()
     close_started: set[str] = set()
     close_submission_resolved: set[str] = set()
+    close_finalized: set[str] = set()
     explicit_unknown: set[str] = set()
+    unknown_closes: set[str] = set()
+    recoverable_closes: set[str] = set()
     acknowledged_closes: set[str] = set()
 
     for event in events:
@@ -38,30 +45,47 @@ def evaluate_restart_safety(events: Iterable[InventoryEvent]) -> RestartSafety:
             continue
         if event.event_type == "ORDER_SUBMISSION_STARTED":
             open_started.add(action_id)
+            if event.payload.get("client_order_id"):
+                recoverable_opens.add(action_id)
         elif event.event_type in {"ENTRY_FILLED", "ORDER_SUBMISSION_FAILED"}:
             open_resolved.add(action_id)
         elif event.event_type == "ORDER_SUBMISSION_UNKNOWN":
             explicit_unknown.add(action_id)
         elif event.event_type == "CLOSE_SUBMISSION_STARTED":
             close_started.add(action_id)
+            if event.payload.get("client_order_id"):
+                recoverable_closes.add(action_id)
         elif event.event_type in {
             "CLOSE_SUBMISSION_ACCEPTED",
             "CLOSE_SUBMISSION_FAILED",
             "EXIT_FILLED",
+            "EXIT_ECONOMICS_CONFIRMED",
+            "CLOSE_EXECUTION_REJECTED",
         }:
             close_submission_resolved.add(action_id)
+            if event.event_type != "CLOSE_SUBMISSION_ACCEPTED":
+                close_finalized.add(action_id)
+            elif event.payload.get("close_order_id"):
+                recoverable_closes.add(action_id)
         elif event.event_type == "CLOSE_SUBMISSION_UNKNOWN":
-            explicit_unknown.add(action_id)
+            unknown_closes.add(action_id)
+            if event.payload.get("close_order_id"):
+                recoverable_closes.add(action_id)
 
     # A close acknowledgment has no authority over an open submission.
     acknowledged_closes &= close_started
     explicit_unknown -= acknowledged_closes - open_started
+    explicit_unknown -= open_resolved | recoverable_opens
     close_submission_resolved.update(acknowledged_closes)
+    close_submission_resolved.update(recoverable_closes)
+    explicit_unknown.update(
+        unknown_closes - recoverable_closes - close_finalized - acknowledged_closes
+    )
     if explicit_unknown:
         unresolved = tuple(sorted(explicit_unknown))
         return RestartSafety(False, unresolved, "broker_submission_outcome_unknown")
 
-    unresolved_open = open_started - open_resolved
+    unresolved_open = open_started - open_resolved - recoverable_opens
     if unresolved_open:
         unresolved = tuple(sorted(unresolved_open))
         return RestartSafety(False, unresolved, "open_submission_interrupted_before_resolution")

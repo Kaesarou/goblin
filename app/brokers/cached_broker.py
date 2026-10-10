@@ -9,6 +9,7 @@ from app.brokers.base import (
     BrokerClient,
     BrokerCloseExecution,
     BrokerPositionEconomics,
+    BrokerPositionReconciliation,
     ClosePositionSubmission,
 )
 
@@ -48,9 +49,21 @@ class CachedBrokerClient(BrokerClient):
         # Recovery authority must use fresh broker evidence, never a TTL cache.
         return self.delegate.get_open_position_economics(position_ids)
 
+    def recover_open_position_economics_from_fill(
+        self,
+        fill: dict,
+    ) -> BrokerPositionEconomics | None:
+        return self.delegate.recover_open_position_economics_from_fill(fill)
+
     def get_account_preflight(self) -> BrokerAccountPreflight | None:
         # Startup safety must never depend on the equity/position TTL caches.
         return self.delegate.get_account_preflight()
+
+    def get_account_identity(self) -> str | None:
+        return self.delegate.get_account_identity()
+
+    def validate_universe(self, symbols: list[str], *, context_symbols: list[str]) -> None:
+        self.delegate.validate_universe(symbols, context_symbols=context_symbols)
 
     def get_account_equity(self) -> float:
         now = self._now()
@@ -77,25 +90,42 @@ class CachedBrokerClient(BrokerClient):
         amount: float,
         stop_loss: float,
         take_profit: float,
+        *,
+        client_order_id: str | None = None,
     ):
+        identity = {"client_order_id": client_order_id} if client_order_id is not None else {}
         result = self.delegate.open_position(
             symbol,
             side,
             amount,
             stop_loss,
             take_profit,
+            **identity,
         )
         self.invalidate_account_and_positions()
         return result
+
+    def prepare_open_order_id(self, action_id: str) -> str | None:
+        return self.delegate.prepare_open_order_id(action_id)
+
+    def get_open_execution(self, order_id: str, symbol: str, requested_notional: float):
+        return self.delegate.get_open_execution(order_id, symbol, requested_notional)
+
+    def prepare_close_order_id(self, action_id: str) -> str | None:
+        return self.delegate.prepare_close_order_id(action_id)
 
     def close_position(
         self,
         position_id: str,
         units_to_deduct: float | None = None,
+        *,
+        client_order_id: str | None = None,
     ) -> ClosePositionSubmission:
+        identity = {"client_order_id": client_order_id} if client_order_id is not None else {}
         submission = self.delegate.close_position(
             position_id,
             units_to_deduct=units_to_deduct,
+            **identity,
         )
         self.invalidate_account_and_positions()
         return submission
@@ -127,6 +157,13 @@ class CachedBrokerClient(BrokerClient):
 
     def get_rate_limit_metrics(self) -> dict[str, object]:
         return self.delegate.get_rate_limit_metrics()
+
+    def get_position_reconciliation(
+        self, position_ids: Iterable[str], *, close_order_ids: dict[str, str],
+    ) -> BrokerPositionReconciliation:
+        return self.delegate.get_position_reconciliation(
+            position_ids, close_order_ids=close_order_ids,
+        )
 
     def get_close_execution(
         self,

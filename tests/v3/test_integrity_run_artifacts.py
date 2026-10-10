@@ -32,7 +32,7 @@ def test_failed_run_checkpoints_qc_manifest_and_heartbeat_share_authority(tmp_pa
         run_id=runtime.run_id, started_at=NOW, run_paths=paths,
         latest_payload_schema_path=tmp_path / "payload-schema.json", removed_runs=(),
     )
-    assert manifest["schema_version"] == 20
+    assert manifest["schema_version"] == 21
     contracts = manifest["runtime"]["contracts"]
     assert contracts["v3_runtime"] == "inventory_runtime_v3_8"
     assert contracts["v3_runtime_state"] == "v3_runtime_state_v1"
