@@ -107,8 +107,11 @@ def extract_executed_position_details_list(payload: dict) -> list[ExecutedPositi
 
 
 def convergent_account_exposure(
-    details: ExecutedPositionDetails,
+    *,
     requested: float,
+    initial_exposure_account_currency: float | None,
+    margin_account_currency: float | None,
+    leverage: float | None,
 ) -> float | None:
     """Prove unleveraged account exposure from independent order fields.
 
@@ -117,12 +120,12 @@ def convergent_account_exposure(
     accepted only when both independently agree with the requested cash amount
     and with each other.
     """
-    exposure = details.initial_exposure_account_currency
-    margin = details.margin_account_currency
+    exposure = initial_exposure_account_currency
+    margin = margin_account_currency
     if (
         not math.isfinite(float(requested))
         or requested <= 0
-        or details.leverage != 1
+        or leverage != 1
         or exposure is None
         or margin is None
         or not math.isfinite(exposure)
