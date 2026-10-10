@@ -118,6 +118,9 @@ def test_persisted_order_response_recovers_exact_notional_without_network(monkey
         "requested_notional": 328.0,
         "notional": 328.0,
         "broker_response": {
+            "orderCurrency": "USD",
+            "action": "open",
+            "transaction": "buy",
             "positionExecutions": [{
                 "positionId": "position-1",
                 "investedAmountCurrency": 1.0,
@@ -143,6 +146,36 @@ def test_persisted_order_response_recovers_exact_notional_without_network(monkey
     assert evidence.source == "etoro_order_convergent_account_exposure"
     assert evidence.broker_response["orderId"] == "broker-open-1"
     assert calls == []
+
+
+@pytest.mark.parametrize("override", [
+    {"orderCurrency": "EUR"},
+    {"action": "close"},
+    {"transaction": "sell"},
+])
+def test_persisted_order_response_rejects_wrong_currency_or_direction(
+    monkeypatch, override,
+):
+    client, _ = _client(monkeypatch)
+    response = {
+        "orderCurrency": "USD",
+        "action": "open",
+        "transaction": "buy",
+        "positionExecutions": [{
+            "positionId": "position-1",
+            "investedAmountCurrency": 1.0,
+            "initialExposureAccountCurrency": 327.95,
+            "marginAccountCurrency": 327.96,
+            "leverage": 1,
+            "openingData": {"avgPrice": 65.31, "units": 4.480142},
+        }],
+    }
+    response.update(override)
+    assert client.recover_open_position_economics_from_fill({
+        "position_id": "position-1",
+        "requested_notional": 328.0,
+        "broker_response": response,
+    }) is None
 
 
 def test_persisted_order_response_does_not_recover_inconsistent_exposure(monkeypatch):
