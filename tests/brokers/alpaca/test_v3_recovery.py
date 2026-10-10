@@ -48,6 +48,45 @@ def confirm(executor):
     return executor.drain()
 
 
+def test_alpaca_profit_exit_dust_collapses_to_full_close(tmp_path):
+    client, api = broker(tmp_path)
+    executor = _executor(
+        tmp_path,
+        CachedBrokerClient(client),
+        InventoryBook(),
+    )
+    assert executor.schedule(
+        replace(_open_intent(), notional=50),
+        snapshot=_snapshot(),
+    )
+    assert executor.drain() == ("i1",)
+    inventory = executor.book.active_for_symbol("AAPL")
+    assert inventory is not None
+    assert inventory.total_units == pytest.approx(0.5)
+
+    assert executor.schedule(
+        _close_intent(inventory, 0.84, "dust-close"),
+        snapshot=_snapshot(110),
+    )
+    assert executor.drain() == ()
+    sell = api.submissions[-1]
+    assert sell["side"] == "sell"
+    assert sell["position_intent"] == "sell_to_close"
+    assert Decimal(sell["qty"]) == Decimal("0.500000000")
+
+    started = [
+        event
+        for event in executor.event_store.events()
+        if event.event_type == "CLOSE_SUBMISSION_STARTED"
+    ][-1]
+    assert started.payload["full_close"] is True
+    assert started.payload["dust_collapse"] is True
+
+    assert confirm(executor) == ("dust-close",)
+    assert executor.book.active_for_symbol("AAPL") is None
+    assert executor.new_risk_allowed
+
+
 @pytest.mark.parametrize("crash_before_completion", [False, True])
 @pytest.mark.parametrize("lost_response", [False, True])
 def test_close_identity_survives_lost_response_and_v3_completion_crash(
