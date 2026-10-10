@@ -891,6 +891,8 @@ class GoblinV3Runtime:
             < POSITION_FALLBACK_INTERVAL_SECONDS
         ):
             return
+        if not self.live_market_data.executable_data_expected():
+            return
         symbols = [inventory.symbol for inventory in self._active_inventories()]
         if not symbols:
             return
@@ -1092,6 +1094,9 @@ class GoblinV3Runtime:
             self.metrics["session_transitions"] += 1
         for session_key in ended_keys:
             self.market_context_service.reset_session(session_key)
+        self.live_market_data.set_data_expected(
+            any(decision.session_active for decision in decisions.values())
+        )
         for symbol, decision in decisions.items():
             previous = self.session_decisions.get(symbol)
             self.session_decisions[symbol] = decision
