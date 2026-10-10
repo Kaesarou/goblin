@@ -102,6 +102,9 @@ class AlpacaStream:
         if self._thread is not None:
             self._thread.join(timeout=12)
 
+    def stopping(self) -> bool:
+        return self._stop.is_set()
+
     def check_error(self) -> None:
         if self._fatal is not None:
             raise RuntimeError(
