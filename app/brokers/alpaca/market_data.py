@@ -78,9 +78,23 @@ class AlpacaRestMarketDataClient:
     def get_market_snapshots(self, symbols: list[str]) -> dict[str, MarketSnapshot]:
         quotes = self._latest_quotes(symbols)
         now = datetime.now(UTC)
-        return {
-            symbol: quote_snapshot(symbol, quotes[symbol], received_at=now) for symbol in symbols
-        }
+        snapshots: dict[str, MarketSnapshot] = {}
+        for symbol in symbols:
+            quote = quotes[symbol]
+            # A zero side means Alpaca currently has no executable quote, which
+            # is expected outside the stock session. It is absence of fallback
+            # evidence, not a transport/runtime error.
+            bid = number(quote.get("bp"))
+            ask = number(quote.get("ap"))
+            timestamp(quote.get("t"))
+            if bid == 0 or ask == 0:
+                continue
+            snapshots[symbol] = quote_snapshot(
+                symbol,
+                quote,
+                received_at=now,
+            )
+        return snapshots
 
 
 class AlpacaMarketDataFeed(LiveMarketDataFeed):
@@ -130,6 +144,12 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
 
     def update_symbols(self, symbols: list[str]) -> None:
         self._stream.update_symbols(symbols)
+
+    def set_data_expected(self, expected: bool) -> None:
+        self._stream.set_data_expected(expected)
+
+    def executable_data_expected(self) -> bool:
+        return self._stream.data_expected()
 
     def subscribed_symbols(self) -> tuple[str, ...]:
         return self._stream.subscribed_symbols()
