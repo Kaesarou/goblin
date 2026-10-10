@@ -11,8 +11,15 @@ from app.config.settings import Settings
 # https://api-portal.etoro.com/api-reference/trading--demo/get-account-pnl-and-portfolio-details
 
 
-def _client(monkeypatch, *, instrument_price=100.0, units=3.0,
-            order_notional=1.0, pnl=None):
+def _client(
+    monkeypatch,
+    *,
+    instrument_price=100.0,
+    units=3.0,
+    order_notional=1.0,
+    pnl=None,
+    execution_fields=None,
+):
     client = ResilientEtoroClient(settings=Settings.model_construct(
         broker="etoro_demo", base_currency="USD",
         etoro_api_key="api", etoro_user_key="user",
@@ -26,8 +33,10 @@ def _client(monkeypatch, *, instrument_price=100.0, units=3.0,
     monkeypatch.setattr(client, "_wait_for_executed_order", lambda *_args, **_kwargs: {
         "status": {"name": "Executed", "errorCode": 0},
         "positionExecutions": [{
-            "positionId": "position-1", "investedAmountCurrency": order_notional,
+            "positionId": "position-1",
+            "investedAmountCurrency": order_notional,
             "openingData": {"avgPrice": instrument_price, "units": units},
+            **(execution_fields or {}),
         }],
     })
     def get_pnl(path):
@@ -49,6 +58,147 @@ def test_one_dollar_order_field_uses_exact_pnl_position_usd_amount(monkeypatch):
     assert result.executed_notional == 299.0
     assert result.executed_units == 3.0
     assert calls == ["/api/v1/trading/info/demo/pnl"]
+
+
+def test_one_dollar_order_field_uses_convergent_documented_account_exposure(monkeypatch):
+    client, calls = _client(
+        monkeypatch,
+        order_notional=1.0,
+        pnl=RuntimeError("P&L must not be needed"),
+        execution_fields={
+            "initialExposureAccountCurrency": 327.95,
+            "marginAccountCurrency": 327.96,
+            "leverage": 1,
+        },
+    )
+    result = client.open_position("INTC", "BUY", 328.0, 50.0, 1_000.0)
+    assert result.executed_notional == pytest.approx(327.95)
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "execution_fields",
+    [
+        {
+            "initialExposureAccountCurrency": 327.95,
+            "marginAccountCurrency": 327.96,
+            "leverage": 2,
+        },
+        {
+            "initialExposureAccountCurrency": 327.95,
+            "marginAccountCurrency": 250.0,
+            "leverage": 1,
+        },
+        {
+            "initialExposureAccountCurrency": 100.0,
+            "marginAccountCurrency": 100.0,
+            "leverage": 1,
+        },
+    ],
+)
+def test_suspicious_order_notional_does_not_trust_inconsistent_exposure_fields(
+    monkeypatch,
+    execution_fields,
+):
+    client, calls = _client(
+        monkeypatch,
+        order_notional=1.0,
+        pnl={"clientPortfolio": {"positions": []}},
+        execution_fields=execution_fields,
+    )
+    result = client.open_position("INTC", "BUY", 328.0, 50.0, 1_000.0)
+    assert result.executed_notional == 1.0
+    assert calls == ["/api/v1/trading/info/demo/pnl"]
+
+
+def test_persisted_order_response_recovers_exact_notional_without_network(monkeypatch):
+    client, calls = _client(monkeypatch)
+    fill = {
+        "position_id": "position-1",
+        "requested_notional": 328.0,
+        "notional": 328.0,
+        "broker_response": {
+            # Actual eToro DEMO payloads use lowercase "usd".
+            "orderCurrency": "usd",
+            "action": "open",
+            "transaction": "buy",
+            "positionExecutions": [{
+                "positionId": "position-1",
+                "investedAmountCurrency": 1.0,
+                "initialExposureAccountCurrency": 327.95,
+                "marginAccountCurrency": 327.96,
+                "leverage": 1,
+                "openingData": {
+                    "avgPrice": 65.31,
+                    "units": 4.480142,
+                    "orderId": "broker-open-1",
+                },
+            }],
+        },
+    }
+
+    evidence = client.recover_open_position_economics_from_fill(fill)
+
+    assert evidence is not None
+    assert evidence.position_id == "position-1"
+    assert evidence.account_notional == pytest.approx(327.95)
+    assert evidence.units == pytest.approx(4.480142)
+    assert evidence.entry_price == pytest.approx(65.31)
+    assert evidence.source == "etoro_order_convergent_account_exposure"
+    assert evidence.broker_response["orderId"] == "broker-open-1"
+    assert calls == []
+
+
+@pytest.mark.parametrize("override", [
+    {"orderCurrency": "EUR"},
+    {"action": "close"},
+    {"transaction": "sell"},
+])
+def test_persisted_order_response_rejects_wrong_currency_or_direction(
+    monkeypatch, override,
+):
+    client, _ = _client(monkeypatch)
+    response = {
+        "orderCurrency": "USD",
+        "action": "open",
+        "transaction": "buy",
+        "positionExecutions": [{
+            "positionId": "position-1",
+            "investedAmountCurrency": 1.0,
+            "initialExposureAccountCurrency": 327.95,
+            "marginAccountCurrency": 327.96,
+            "leverage": 1,
+            "openingData": {"avgPrice": 65.31, "units": 4.480142},
+        }],
+    }
+    response.update(override)
+    assert client.recover_open_position_economics_from_fill({
+        "position_id": "position-1",
+        "requested_notional": 328.0,
+        "broker_response": response,
+    }) is None
+
+
+def test_persisted_order_response_does_not_recover_inconsistent_exposure(monkeypatch):
+    client, _ = _client(monkeypatch)
+    fill = {
+        "position_id": "position-1",
+        "requested_notional": 328.0,
+        "broker_response": {
+            "positionExecutions": [{
+                "positionId": "position-1",
+                "initialExposureAccountCurrency": 327.95,
+                "marginAccountCurrency": 200.0,
+                "leverage": 1,
+                "openingData": {
+                    "avgPrice": 65.31,
+                    "units": 4.480142,
+                },
+            }],
+        },
+    }
+
+    assert client.recover_open_position_economics_from_fill(fill) is None
 
 
 def test_european_instrument_amount_stays_usd_not_units_times_euro_price(monkeypatch):

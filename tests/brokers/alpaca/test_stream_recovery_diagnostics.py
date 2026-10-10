@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 
 import pytest
 
@@ -108,46 +110,69 @@ def test_silence_is_distinguished_from_auth_timeout(monkeypatch, ack, reason):
     assert stream.diagnostics()["last_disconnect"]["retry_delay_seconds"] == 1
 
 
-def test_slow_consumer_overflow_is_bounded_and_recovers_with_fresh_quotes(monkeypatch):
+def test_market_silence_is_normal_when_executable_data_is_not_expected(monkeypatch):
     clock = [100.0]
     monkeypatch.setattr("app.brokers.alpaca.stream.time.monotonic", lambda: clock[0])
-    feed = AlpacaMarketDataFeed(api_key="key", secret_key="secret", queue_capacity=4)
+    stream = AlpacaStream(
+        api_key="key", secret_key="secret", on_message=lambda _: None, feed="iex"
+    )
+    stream.set_data_expected(False)
+    socket = ScriptedSocket(
+        clock,
+        acknowledged() + [(16, TimeoutError()), (0, ConnectionError("end"))],
+    )
+    stream._connector = lambda _: socket
+
+    with pytest.raises(ConnectionError, match="end"):
+        stream._connection(("AAPL",))
+
+    assert stream.healthy()
+    assert stream.diagnostics()["data_expected"] is False
+
+
+def test_slow_consumer_backpressure_is_bounded_and_preserves_connection():
+    feed = AlpacaMarketDataFeed(
+        api_key="key",
+        secret_key="secret",
+        queue_capacity=1,
+    )
     stream = feed._stream
-    first = ScriptedSocket(clock, acknowledged() + [
-        (0.1, [{**QUOTE, "t": f"2026-09-25T14:00:0{i}Z"}]) for i in range(5)
-    ])
-    second = ScriptedSocket(clock, acknowledged() + [
-        (0.1, [{**QUOTE, "t": "2026-09-25T14:00:10Z"}]),
-    ])
-    sockets = iter([first, second])
-    stream._connector = lambda _: next(sockets)
-    received = []
-    callback = stream._callback
+    stream._healthy = True
+    stream._applied = ("AAPL",)
+    stream.connections = 1
+    feed._on_quote({**QUOTE, "t": "2026-09-25T14:00:00Z"})
 
-    def consume_after_reconnect(message):
-        accepted = callback(message)
-        if stream.connections == 2:
-            received.append(feed.next_event(0))
-            assert feed.connection_healthy()
-            stream._stop.set()
-        return accepted
+    completed = threading.Event()
 
-    stream._callback = consume_after_reconnect
+    def produce_second():
+        try:
+            assert feed._on_quote(
+                {**QUOTE, "t": "2026-09-25T14:00:01Z"}
+            )
+        finally:
+            completed.set()
 
-    def backoff(_):
-        assert not feed.connection_healthy()
-        assert feed.next_event(0) is None
-        d = feed.diagnostics()
-        assert d["queue_size"] == 0
-        assert d["discarded_quotes"] == 5
-        assert d["last_disconnect"]["reason"] == "quote_queue_overflow"
-        assert d["last_disconnect"]["queue_high_watermark"] == 4
+    producer = threading.Thread(target=produce_second)
+    producer.start()
+    deadline = time.monotonic() + 1
+    while feed.queue_backpressure_events == 0 and time.monotonic() < deadline:
+        time.sleep(0.001)
 
-    monkeypatch.setattr(stream._stop, "wait", backoff)
-    stream.update_symbols(["AAPL"])
-    stream._run()
-    assert len(received) == 1
-    assert received[0].connection_id == "2"
-    assert received[0].snapshot.timestamp.second == 10
-    assert feed.diagnostics()["queue_overflows"] == 1
-    assert all([m["action"] for m in s.sent] == ["auth", "subscribe"] for s in [first, second])
+    diagnostic = feed.diagnostics()
+    assert diagnostic["queue_size"] == 1
+    assert diagnostic["queue_high_watermark"] == 1
+    assert diagnostic["queue_backpressure_events"] == 1
+    assert diagnostic["queue_overflows"] == 0
+    assert diagnostic["discarded_quotes"] == 0
+    assert diagnostic["last_disconnect"] is None
+    assert not completed.is_set()
+
+    first = feed.next_event(0)
+    assert first.snapshot.timestamp.second == 0
+    assert completed.wait(1)
+    producer.join(timeout=1)
+    second = feed.next_event(0)
+    assert second.snapshot.timestamp.second == 1
+    assert feed.diagnostics()["discarded_quotes"] == 0
+
+

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import queue
+import time
 from datetime import UTC, datetime
 
 from app.brokers.alpaca.schema import number, timestamp
-from app.brokers.alpaca.stream import AlpacaStream, QuoteQueueOverflow
+from app.brokers.alpaca.stream import AlpacaStream
 from app.market.models import MarketSnapshot, PriceSource
 from app.market_data.contracts import LiveMarketDataFeed
 from app.market_data.models import MarketDataEvent, MarketDataSource
@@ -78,9 +79,23 @@ class AlpacaRestMarketDataClient:
     def get_market_snapshots(self, symbols: list[str]) -> dict[str, MarketSnapshot]:
         quotes = self._latest_quotes(symbols)
         now = datetime.now(UTC)
-        return {
-            symbol: quote_snapshot(symbol, quotes[symbol], received_at=now) for symbol in symbols
-        }
+        snapshots: dict[str, MarketSnapshot] = {}
+        for symbol in symbols:
+            quote = quotes[symbol]
+            # A zero side means Alpaca currently has no executable quote, which
+            # is expected outside the stock session. It is absence of fallback
+            # evidence, not a transport/runtime error.
+            bid = number(quote.get("bp"))
+            ask = number(quote.get("ap"))
+            timestamp(quote.get("t"))
+            if bid == 0 or ask == 0:
+                continue
+            snapshots[symbol] = quote_snapshot(
+                symbol,
+                quote,
+                received_at=now,
+            )
+        return snapshots
 
 
 class AlpacaMarketDataFeed(LiveMarketDataFeed):
@@ -109,6 +124,8 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
         )
         self.invalid_quotes = self.ordering_drops = self.queue_overflows = 0
         self.queue_high_watermark = self.discarded_quotes = 0
+        self.queue_backpressure_events = 0
+        self.queue_backpressure_wait_seconds = 0.0
 
     def _queue_diagnostics(self) -> dict:
         return {
@@ -116,6 +133,11 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
             "queue_size": self._queue.qsize(),
             "queue_high_watermark": self.queue_high_watermark,
             "queue_overflows": self.queue_overflows,
+            "queue_backpressure_events": self.queue_backpressure_events,
+            "queue_backpressure_wait_seconds": round(
+                self.queue_backpressure_wait_seconds,
+                6,
+            ),
             "discarded_quotes": self.discarded_quotes,
         }
 
@@ -130,6 +152,12 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
 
     def update_symbols(self, symbols: list[str]) -> None:
         self._stream.update_symbols(symbols)
+
+    def set_data_expected(self, expected: bool) -> None:
+        self._stream.set_data_expected(expected)
+
+    def executable_data_expected(self) -> bool:
+        return self._stream.data_expected()
 
     def subscribed_symbols(self) -> tuple[str, ...]:
         return self._stream.subscribed_symbols()
@@ -192,17 +220,32 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
         )
         try:
             self._queue.put_nowait(event)
-            self.queue_high_watermark = max(self.queue_high_watermark, self._queue.qsize())
+            self.queue_high_watermark = max(
+                self.queue_high_watermark,
+                self._queue.qsize(),
+            )
             return True
-        except queue.Full as exc:
-            self.queue_overflows += 1
+        except queue.Full:
+            # Local overload must never erase an executable crossing. Apply
+            # backpressure to the WebSocket consumer instead of purging FIFO
+            # history. The queue remains memory-bounded and preserves causal
+            # order; shutdown can still interrupt the wait promptly.
+            self.queue_backpressure_events += 1
             self.queue_high_watermark = self._queue.maxsize
-            self.discarded_quotes += 1  # The triggering quote was not enqueued.
-            # Discard buffered stale quotes before reconnecting and rebuilding freshness.
-            while not self._queue.empty():
+            started = time.monotonic()
+            while not self._stream.stopping():
                 try:
-                    self._queue.get_nowait()
-                    self.discarded_quotes += 1
-                except queue.Empty:
-                    break
-            raise QuoteQueueOverflow() from exc
+                    self._queue.put(event, timeout=0.1)
+                    self.queue_backpressure_wait_seconds += max(
+                        0.0,
+                        time.monotonic() - started,
+                    )
+                    return True
+                except queue.Full:
+                    continue
+            self.queue_backpressure_wait_seconds += max(
+                0.0,
+                time.monotonic() - started,
+            )
+            self.discarded_quotes += 1
+            return False

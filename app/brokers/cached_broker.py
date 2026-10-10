@@ -49,6 +49,12 @@ class CachedBrokerClient(BrokerClient):
         # Recovery authority must use fresh broker evidence, never a TTL cache.
         return self.delegate.get_open_position_economics(position_ids)
 
+    def recover_open_position_economics_from_fill(
+        self,
+        fill: dict,
+    ) -> BrokerPositionEconomics | None:
+        return self.delegate.recover_open_position_economics_from_fill(fill)
+
     def get_account_preflight(self) -> BrokerAccountPreflight | None:
         # Startup safety must never depend on the equity/position TTL caches.
         return self.delegate.get_account_preflight()

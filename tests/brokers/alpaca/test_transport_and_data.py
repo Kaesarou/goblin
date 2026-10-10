@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 from datetime import UTC, datetime
 
 import pytest
@@ -134,8 +136,7 @@ def test_preflight_accepts_no_quote_prices_when_market_is_closed():
 
     client.validate_feed_access(["AAPL"])
 
-    with pytest.raises(ValueError, match="numeric range"):
-        client.get_market_snapshots(["AAPL"])
+    assert client.get_market_snapshots(["AAPL"]) == {}
 
 
 def test_preflight_still_rejects_crossed_positive_quotes():
@@ -221,17 +222,39 @@ def test_stream_denied_or_incomplete_subscription_fails_closed(frames):
     assert not stream.healthy()
 
 
-def test_feed_drops_out_of_order_quotes_and_fails_on_queue_overflow():
+def test_feed_drops_out_of_order_quotes_and_backpressures_without_data_loss():
     feed = AlpacaMarketDataFeed(api_key="key", secret_key="secret", queue_capacity=1)
     feed._stream._healthy = True
     feed._stream._applied = ("AAPL",)
+    feed._stream.connections = 1
     feed._on_quote(QUOTE)
-    feed._on_quote(QUOTE)
+    assert feed._on_quote(QUOTE) is False
     assert feed.ordering_drops == 1
-    with pytest.raises(RuntimeError, match="overflow"):
-        feed._on_quote({**QUOTE, "t": "2026-09-25T14:00:01Z"})
-    assert feed.next_event(0) is None
-    assert feed.queue_overflows == 1
+
+    result = []
+    second = {**QUOTE, "t": "2026-09-25T14:00:01Z"}
+
+    def produce():
+        result.append(feed._on_quote(second))
+
+    producer = threading.Thread(target=produce)
+    producer.start()
+    deadline = time.monotonic() + 1
+    while feed.queue_backpressure_events == 0 and time.monotonic() < deadline:
+        time.sleep(0.001)
+
+    assert feed.queue_backpressure_events == 1
+    assert producer.is_alive()
+    first_event = feed.next_event(0)
+    producer.join(timeout=1)
+    assert not producer.is_alive()
+    second_event = feed.next_event(0)
+
+    assert result == [True]
+    assert first_event.snapshot.timestamp.second == 0
+    assert second_event.snapshot.timestamp.second == 1
+    assert feed.queue_overflows == 0
+    assert feed.discarded_quotes == 0
 
 
 def test_reconnect_does_not_restore_authority_to_quotes_queued_by_previous_socket():

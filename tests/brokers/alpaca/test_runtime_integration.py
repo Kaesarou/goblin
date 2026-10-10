@@ -274,6 +274,34 @@ def test_closed_market_without_executable_rest_prices_can_bootstrap(tmp_path, mo
     assert not harness.api.submissions
 
 
+def test_closed_session_suppresses_position_rest_fallback(tmp_path, monkeypatch):
+    harness = Harness(tmp_path, monkeypatch)
+
+    def scenario(runtime):
+        harness.open_from_quotes(runtime)
+        harness.now = NOW + timedelta(hours=8)
+        runtime._refresh_sessions(harness.now)
+        assert runtime.session_decisions["AAPL"].session_active is False
+        assert runtime.live_market_data.executable_data_expected() is False
+        assert runtime.live_market_data.diagnostics()["data_expected"] is False
+
+        before = sum(
+            1 for _, path, _ in harness.calls if path == "/v2/stocks/quotes/latest"
+        )
+        runtime._run_position_fallback_if_due(
+            harness.now,
+            time.monotonic() + 60,
+        )
+        runtime._drain_broker_tasks()
+        after = sum(
+            1 for _, path, _ in harness.calls if path == "/v2/stocks/quotes/latest"
+        )
+        assert after == before
+        assert runtime.metrics["errors"] == 0
+
+    harness.run(scenario)
+
+
 def test_benchmark_is_context_only_and_does_not_require_fractional_order_permission(tmp_path, monkeypatch):
     harness = Harness(tmp_path, monkeypatch)
     harness.asset_patches["SPY"] = {"fractionable": False, "tradable": False}

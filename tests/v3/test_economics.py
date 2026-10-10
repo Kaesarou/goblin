@@ -1,7 +1,13 @@
 from datetime import datetime, timezone
 
 from app.v3.config import EconomicsConfig, EconomicsPolicy
-from app.v3.economics import BrokerCostSchedule, EconomicsModel
+from app.v3.economics import (
+    ALPACA_FIXED_FEE_ASSUMPTION_PER_REQUEST,
+    ETORO_FIXED_FEE_ASSUMPTION_PER_REQUEST,
+    BrokerCostSchedule,
+    EconomicsModel,
+    broker_cost_schedule,
+)
 from app.v3.models import MarketState
 
 NOW = datetime(2026, 8, 25, tzinfo=timezone.utc)
@@ -38,3 +44,13 @@ def test_require_net_positive_rejects_same_trade():
         side="BUY",
     )
     assert not decision.allowed
+
+
+def test_broker_cost_schedule_keeps_etoro_and_alpaca_assumptions_separate():
+    etoro = broker_cost_schedule("etoro_demo")
+    alpaca = broker_cost_schedule("alpaca_demo")
+
+    assert etoro.fixed_fee_per_fill == ETORO_FIXED_FEE_ASSUMPTION_PER_REQUEST
+    assert alpaca.fixed_fee_per_fill == ALPACA_FIXED_FEE_ASSUMPTION_PER_REQUEST
+    assert etoro.fixed_fee_per_fill == 1.0
+    assert alpaca.fixed_fee_per_fill == 0.0
