@@ -31,7 +31,7 @@ from app.v3.decision_window import (
 from app.v3.decision_window import decision_quote_for_candle as _decision_quote
 from app.v3.features import OnlineFeatureEngine, OnlineFeatureSnapshot
 from app.v3.forager import ForagerCandidate, NoVolumeForager
-from app.v3.intents import RestingIntentBook
+from app.v3.intents import RestingIntentBook, RestingIntentObservation
 from app.v3.live_execution import V3BrokerExecutor
 from app.v3.models import DecisionBatch, DecisionReason, MarketState, OrderIntent
 from app.v3.persistence import InventoryEventStore
@@ -453,6 +453,20 @@ class GoblinV3Runtime:
         for intent in self.intent_book.triggered(snapshot):
             if self._stop_requested:
                 break
+            crossing = self.intent_book.take_first_crossing(intent.intent_id)
+            if crossing is not None and intent.limit_price is not None:
+                self.trade_journal.write(
+                    "v3_resting_intent_crossed",
+                    {
+                        **self._resting_intent_payload(intent),
+                        **self._resting_observation_payload(crossing),
+                        "crossing_bid": snapshot.bid,
+                        "crossing_ask": snapshot.ask,
+                        "crossing_timestamp": snapshot.timestamp,
+                        "crossing_received_at": snapshot.received_at,
+                        "source": "fresh_quote",
+                    },
+                )
             if not intent.reduce_only and not (
                 session_allows_new_risk
                 and self._operational_entry_allowed(symbol)
@@ -461,6 +475,17 @@ class GoblinV3Runtime:
             if self.executor.schedule(intent, snapshot=snapshot):
                 self.intent_book.mark_dispatched(intent.intent_id)
                 self.metrics["orders_submitted"] += 1
+                if intent.limit_price is not None:
+                    self.trade_journal.write(
+                        "v3_resting_intent_dispatched",
+                        {
+                            **self._resting_intent_payload(intent),
+                            "dispatch_bid": snapshot.bid,
+                            "dispatch_ask": snapshot.ask,
+                            "dispatch_timestamp": snapshot.timestamp,
+                            "source": "fresh_quote",
+                        },
+                    )
                 self.trade_journal.write(
                     "v3_intent_triggered",
                     {
@@ -779,7 +804,11 @@ class GoblinV3Runtime:
                 self.book.active_for_symbol(symbol) is None
                 and symbol not in selected_flat
             ):
-                self.intent_book.replace_symbol(symbol, ())
+                self._replace_resting_intents(
+                    symbol,
+                    (),
+                    reason="flat_not_selected",
+                )
                 self._clear_logged_decision(symbol)
 
         self._record_incomplete_decision_window(batch)
@@ -839,7 +868,11 @@ class GoblinV3Runtime:
             intent for intent in decision.intents
             if intent.reduce_only or allow_new_risk
         )
-        self.intent_book.replace_symbol(symbol, intents)
+        self._replace_resting_intents(
+            symbol,
+            intents,
+            reason="decision_window_replaced",
+        )
         self.metrics["intents_planned"] += len(intents)
         self._journal_decision(symbol, decision, intents, extra=extra)
 
@@ -1213,10 +1246,69 @@ class GoblinV3Runtime:
             if intent.symbol in symbol_set and intent.reduce_only:
                 by_symbol.setdefault(intent.symbol, []).append(intent)
         for symbol in symbol_set:
-            self.intent_book.replace_symbol(
+            self._replace_resting_intents(
                 symbol,
                 tuple(by_symbol.get(symbol, ())),
+                reason="new_risk_authority_revoked",
             )
+
+    def _replace_resting_intents(
+        self,
+        symbol: str,
+        intents: tuple[OrderIntent, ...],
+        *,
+        reason: str,
+    ) -> None:
+        change = self.intent_book.replace_symbol(symbol, intents)
+        for observation in change.removed:
+            intent = observation.intent
+            if intent.limit_price is None:
+                continue
+            self.trade_journal.write(
+                "v3_resting_intent_expired",
+                {
+                    **self._resting_intent_payload(intent),
+                    **self._resting_observation_payload(observation),
+                    "expiration_reason": reason,
+                },
+            )
+        for intent in change.added:
+            if intent.limit_price is None:
+                continue
+            self.trade_journal.write(
+                "v3_resting_intent_created",
+                {
+                    **self._resting_intent_payload(intent),
+                    "creation_reason": reason,
+                },
+            )
+
+    @staticmethod
+    def _resting_intent_payload(intent: OrderIntent) -> dict[str, object]:
+        return {
+            "intent_id": intent.intent_id,
+            "purpose": intent.purpose.value,
+            "symbol": intent.symbol,
+            "side": intent.side,
+            "limit_price": intent.limit_price,
+            "reduce_only": intent.reduce_only,
+            "created_at": intent.created_at,
+        }
+
+    @staticmethod
+    def _resting_observation_payload(
+        observation: RestingIntentObservation,
+    ) -> dict[str, object]:
+        return {
+            "observed_quote_count": observation.quote_count,
+            "max_bid_while_active": observation.max_bid,
+            "min_ask_while_active": observation.min_ask,
+            "first_quote_at": observation.first_quote_at,
+            "last_quote_at": observation.last_quote_at,
+            "first_crossed_at": observation.first_crossed_at,
+            "first_crossing_price": observation.first_crossing_price,
+            "closest_distance_bp": observation.closest_distance_bp,
+        }
 
     def _journal_decision(
         self,
