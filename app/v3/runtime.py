@@ -166,6 +166,7 @@ class GoblinV3Runtime:
         self._equity_source: str | None = None
         self._started = False
         self._stop_requested = False
+        self._stopped = False
         self.stop_reason: str | None = None
         self._last_fallback_monotonic = 0.0
         self._last_close_confirmation_monotonic = 0.0
@@ -222,13 +223,12 @@ class GoblinV3Runtime:
             )
 
         active_inventories = self._active_inventories()
-        if active_inventories:
+        recovery_symbols = set(self.executor.recovering_open_symbols)
+        if active_inventories or recovery_symbols:
             restored_feature_set = set(restored_features)
-            missing_feature_symbols = {
-                inventory.symbol
-                for inventory in active_inventories
-                if inventory.symbol not in restored_feature_set
-            }
+            missing_feature_symbols = (
+                {inventory.symbol for inventory in active_inventories} | recovery_symbols
+            ) - restored_feature_set
             if missing_feature_symbols:
                 self.executor.halted_reason = (
                     "missing_causal_feature_state_for_open_inventory:"
@@ -296,8 +296,15 @@ class GoblinV3Runtime:
             },
         )
 
+    def request_stop(self, *, reason: str = "requested") -> None:
+        # Signal-safe: the main loop owns cleanup, persistence and worker joins.
+        self._stop_requested = True
+        if self.stop_reason != "error":
+            self.stop_reason = reason
+
     def run(self, *, timeout_seconds: float = 1.0) -> None:
-        self.stop_reason = None
+        if not self._stop_requested:
+            self.stop_reason = None
         try:
             if not self._started:
                 self.startup()
@@ -313,6 +320,8 @@ class GoblinV3Runtime:
                 self._schedule_close_confirmation_checks(monotonic_now)
 
                 event = self.live_market_data.next_event(timeout_seconds)
+                if self._stop_requested:
+                    break
                 if event is not None:
                     self._handle_event(event, now)
 
@@ -343,14 +352,19 @@ class GoblinV3Runtime:
                 raise
 
     def stop(self) -> None:
-        if self._stop_requested and not self._started:
+        if self._stopped:
             return
         self._stop_requested = True
         try:
             self.live_market_data.stop()
         finally:
-            self.mutation_runner.close(wait=False)
-            self.maintenance_runner.close(wait=False)
+            # Keep the storage lease until dispatched broker calls finish and
+            # their completions are projected. A second process must not race
+            # a still-running worker after the main loop has stopped.
+            self.mutation_runner.close(wait=True)
+            self.maintenance_runner.close(wait=True)
+
+        self._drain_broker_tasks()
 
         self.runtime_state_store.save_feature_engine(self.feature_engine)
         self.runtime_state_store.save_inventory_book(
@@ -368,8 +382,11 @@ class GoblinV3Runtime:
             self._heartbeat_metrics(),
         )
         self._started = False
+        self._stopped = True
 
     def _handle_event(self, event: MarketDataEvent, now: datetime) -> None:
+        if self._stop_requested:
+            return
         symbol = event.symbol.strip().upper()
         precheck = self.coordinator.precheck(event)
         if not precheck.accepted:
@@ -434,6 +451,8 @@ class GoblinV3Runtime:
         )
 
         for intent in self.intent_book.triggered(snapshot):
+            if self._stop_requested:
+                break
             if not intent.reduce_only and not (
                 session_allows_new_risk
                 and self._operational_entry_allowed(symbol)
@@ -961,7 +980,10 @@ class GoblinV3Runtime:
                         },
                     )
             elif completion.kind == "v3_position_fallback":
-                self._handle_position_fallback_completion(completion)
+                # A late quote may finish during shutdown, after the mutation
+                # lane has closed. It must not dispatch a new exit then.
+                if not self._stop_requested:
+                    self._handle_position_fallback_completion(completion)
 
     def _handle_position_fallback_completion(self, completion) -> None:
         symbols = list((completion.context or {}).get("symbols", []))
@@ -994,6 +1016,8 @@ class GoblinV3Runtime:
                 continue
             recovered.append(symbol)
             for intent in self.intent_book.triggered(snapshot):
+                if self._stop_requested:
+                    break
                 if not intent.reduce_only:
                     continue
                 if self.executor.schedule(intent, snapshot=snapshot):
@@ -1095,20 +1119,28 @@ class GoblinV3Runtime:
     def _operational_entry_allowed(self, symbol: str) -> bool:
         session = self.session_decisions.get(symbol)
         return bool(
-            session is not None
+            not self._stop_requested
+            and session is not None
             and getattr(session, "session_active", False)
             and getattr(session, "new_entries_allowed", False)
             and self._current_run_equity is not None
+            and self._transport_entry_allowed()
             and self.coordinator.entry_allowed(symbol)
             and self.executor.new_risk_allowed
         )
 
+    def _transport_entry_allowed(self) -> bool:
+        return (not self.live_market_data.requires_websocket_health
+                or self.live_market_data.connection_healthy())
+
     def _symbol_risk_authority(self, symbol: str) -> dict[str, object]:
         session = self.session_decisions.get(symbol)
         checks = {
+            "runtime_accepting_orders": not self._stop_requested,
             "session_active": bool(session and session.session_active),
             "session_new_entries_allowed": bool(session and session.new_entries_allowed),
             "market_data_entry_allowed": bool(self.coordinator.entry_allowed(symbol)),
+            "market_data_transport_healthy": self._transport_entry_allowed(),
             "current_run_equity_available": self._current_run_equity is not None,
             "executor_new_risk_allowed": self.executor.new_risk_allowed,
         }
@@ -1339,6 +1371,7 @@ class GoblinV3Runtime:
                 sorted(self._decision_reason_counts.items())
             ),
             "market_data_coordinator": dict(self.coordinator.metrics),
+            "market_data_transport": self.live_market_data.diagnostics(),
             "broker_confirmation": self.executor.confirmation_metrics(),
             "journal_budget": self._journal_budget_metrics(),
             "stop_reason": self.stop_reason,

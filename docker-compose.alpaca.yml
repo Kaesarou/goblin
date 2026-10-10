@@ -1,0 +1,26 @@
+name: goblin-alpaca
+
+services:
+  goblin:
+    image: ${GOBLIN_IMAGE:?GOBLIN_IMAGE must reference an immutable GHCR image}
+    container_name: goblin-alpaca
+    init: true
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    command: ["python", "-m", "app.runtime.restart_guard"]
+    restart: "on-failure:5"
+    stop_signal: SIGTERM
+    stop_grace_period: 2m
+    healthcheck:
+      test: ["CMD", "python", "-m", "scripts.alpaca_deployment_check", "--health"]
+      interval: 10s
+      timeout: 5s
+      retries: 9
+      start_period: 90s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"

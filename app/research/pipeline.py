@@ -79,7 +79,7 @@ class SideNeutralResearchPipeline:
         research_symbols: Mapping[str, AssetClass],
         asset_class_by_symbol: Mapping[str, AssetClass],
         journal: JsonlJournal,
-        payload_schema_observer: EtoroPayloadSchemaObserver,
+        payload_schema_observer: EtoroPayloadSchemaObserver | None,
         market_context_service,
         multi_timeframe_service,
         collection_started_at: datetime | None = None,
@@ -154,6 +154,8 @@ class SideNeutralResearchPipeline:
         merged: Mapping[str, object],
         observed_at: datetime,
     ) -> None:
+        if self.payload_schema_observer is None:
+            return
         normalized_symbol = symbol.strip().upper()
         self.payload_schema_observer.observe_payload(
             patch=patch,
@@ -276,7 +278,8 @@ class SideNeutralResearchPipeline:
     def flush(self) -> bool:
         schema_written = True
         try:
-            schema_written = self.payload_schema_observer.flush(force=True)
+            if self.payload_schema_observer is not None:
+                schema_written = self.payload_schema_observer.flush(force=True)
         except Exception as exc:  # noqa: BLE001 - isolation boundary
             self._record_failure('payload_schema_flush', exc)
             schema_written = False

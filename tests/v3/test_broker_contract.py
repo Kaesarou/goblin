@@ -99,5 +99,5 @@ def test_v3_core_does_not_import_concrete_broker_adapters():
                        else [alias.name for alias in node.names]
                        if isinstance(node, ast.Import) else [])
             assert not any(module and module.startswith((
-                "app.brokers.etoro", "app.brokers.paper"
+                "app.brokers.etoro", "app.brokers.paper", "app.brokers.alpaca"
             )) for module in modules), path.name

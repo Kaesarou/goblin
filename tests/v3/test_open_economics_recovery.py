@@ -38,6 +38,9 @@ class Broker:
         self.opens += 1
         return self.result
 
+    def prepare_open_order_id(self, _action_id):
+        return None
+
     def remember_position_instrument(self, *_args):
         pass
 

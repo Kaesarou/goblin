@@ -1,8 +1,19 @@
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
+
+
+@dataclass(frozen=True)
+class BrokerOpenOrder:
+    """Journal-backed BUY identity; status alone is never execution proof."""
+
+    order_id: str
+    position_id: str
+    symbol: str
+    requested_notional: float
+    status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -11,6 +22,7 @@ class OpenPositionResult:
     executed_entry_price: float | None = None
     executed_units: float | None = None
     executed_notional: float | None = None
+    order: BrokerOpenOrder | None = None
     broker_response: dict[str, Any] | None = None
 
 
@@ -32,6 +44,22 @@ class BrokerAccountPreflight:
 
     position_units: dict[str, float | None]
     pending_open_orders: tuple[str, ...] = ()
+    pending_close_orders: dict[str, str] = field(default_factory=dict)  # order ID -> leg ID
+    open_orders: dict[str, BrokerOpenOrder] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class BrokerPositionReconciliation:
+    """Actual leg units with cumulative close fills from the same observation.
+
+    Close evidence is keyed by the requested lookup identity and must belong to
+    that leg. It explains an in-flight quantity reduction; it is not a terminal
+    fill or permission to release the mutation. Empty evidence retains portfolio
+    reconciliation for adapters without cumulative order attribution.
+    """
+
+    position_units: dict[str, float | None]
+    close_filled_units: dict[str, float] = field(default_factory=dict)
 
 
 class OpenPositionRejectedError(RuntimeError):
@@ -112,8 +140,9 @@ class ClosePositionSubmissionUnknownError(RuntimeError):
 class BrokerClient(ABC):
     """Execution and account contract.
 
-    Market-data access is deliberately excluded. Paper, demo and live execution
-    all consume the same independent eToro market-data pipeline.
+    Market-data access is deliberately excluded. The runtime factory selects
+    the independent market-data provider from BROKER; local paper execution
+    retains the eToro market-data pipeline.
     """
 
     account_equity_source = "broker_account_equity"
@@ -139,6 +168,13 @@ class BrokerClient(ABC):
         """
         return None
 
+    def get_account_identity(self) -> str | None:
+        """Read a stable broker account ID without caching credentials as identity."""
+        return None
+
+    def validate_universe(self, symbols: list[str], *, context_symbols: list[str]) -> None:
+        """Optional read-only startup validation, never an order or a symbol substitution."""
+
     @abstractmethod
     def get_account_equity(self) -> float:
         raise NotImplementedError
@@ -151,14 +187,41 @@ class BrokerClient(ABC):
         amount: float,
         stop_loss: float,
         take_profit: float,
+        *,
+        client_order_id: str | None = None,
     ) -> OpenPositionResult:
         raise NotImplementedError
+
+    def prepare_open_order_id(self, action_id: str) -> str | None:
+        """Choose a durable lookup identity before submitting a BUY, without I/O."""
+        return None
+
+    def get_open_execution(
+        self, order_id: str, symbol: str, requested_notional: float,
+    ) -> OpenPositionResult | None:
+        """Look up terminal execution for this exact request, without resubmission.
+
+        None means pending or absent, not rejected. Only authoritative terminal
+        zero-fill evidence may raise OpenPositionRejectedError.
+        """
+        raise NotImplementedError
+
+    def prepare_close_order_id(self, action_id: str) -> str | None:
+        """Choose a lookup identity before submission, without network I/O.
+
+        The executor persists this identity before dispatch. Supporting adapters
+        must accept it as ``client_order_id`` and never resubmit it on recovery.
+        None retains the broker-assigned identity flow.
+        """
+        return None
 
     @abstractmethod
     def close_position(
         self,
         position_id: str,
         units_to_deduct: float | None = None,
+        *,
+        client_order_id: str | None = None,
     ) -> ClosePositionSubmission:
         """Submit one full or partial close request and return on acceptance.
 
@@ -202,6 +265,12 @@ class BrokerClient(ABC):
     def get_rate_limit_metrics(self) -> dict[str, object]:
         """Return broker read-rate telemetry when the implementation exposes it."""
         return {}
+
+    def get_position_reconciliation(
+        self, position_ids: Iterable[str], *, close_order_ids: dict[str, str],
+    ) -> BrokerPositionReconciliation:
+        """Read quantities and optional order evidence, bypassing caches."""
+        return BrokerPositionReconciliation(self.get_open_position_units(position_ids))
 
     def remember_position_instrument(self, position_id: str, symbol: str) -> None:
         """Restore broker-specific metadata needed to manage a position."""

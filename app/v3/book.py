@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import datetime
 
 from app.v3.models import BrokerLeg, InventoryState, InventoryStatus, PortfolioState
+from app.v3.open_recovery import partial_open_event_valid
 from app.v3.persistence import InventoryEvent
 
 _CLOSE_TOLERANCE = 1e-9
@@ -32,7 +33,8 @@ class InventoryBook:
                 price = float(payload["price"])
                 notional = float(payload.get("notional", units * price))
                 requested = payload.get("requested_notional")
-                if (payload.get("notional_source") == "broker_confirmed_account_currency"
+                if (not partial_open_event_valid(payload)
+                        and payload.get("notional_source") == "broker_confirmed_account_currency"
                         and isinstance(requested, (int, float)) and not isinstance(requested, bool)
                         and math.isfinite(requested) and requested > 0
                         and not 0.8 * requested <= notional <= 1.2 * requested):

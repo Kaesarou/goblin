@@ -15,6 +15,7 @@ from app.v3.features import OnlineFeatureEngine
 V3_RUNTIME_STATE_VERSION = "v3_runtime_state_v1"
 V3_BROKER_EQUITY_STATE_VERSION = "v3_broker_equity_reference_v1"
 V3_CLOSE_RETRY_STATE_VERSION = "v3_close_retry_scheduler_v1"
+V3_OPEN_RETRY_STATE_VERSION = "v3_open_retry_scheduler_v1"
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,13 @@ class CloseRetryState:
     last_http_status: int | None = None
     last_result_state: str = "pending"
     version: str = V3_CLOSE_RETRY_STATE_VERSION
+
+
+@dataclass(frozen=True)
+class OpenRetryState(CloseRetryState):
+    """Same scheduler fields, in a separate namespace from close confirmations."""
+
+    version: str = V3_OPEN_RETRY_STATE_VERSION
 
 
 class V3RuntimeStateStore:
@@ -110,6 +118,35 @@ class V3RuntimeStateStore:
     def delete_close_retry(self, action_id: str) -> None:
         with self._connect() as connection:
             connection.execute("DELETE FROM v3_close_retry WHERE action_id=?", (action_id,))
+
+    def save_open_retry(self, state: OpenRetryState) -> None:
+        if (not state.action_id or state.attempt_count < 0
+                or state.version != V3_OPEN_RETRY_STATE_VERSION):
+            raise ValueError("Invalid open retry state")
+        payload = asdict(state)
+        payload["next_attempt_at"] = _required_utc(state.next_attempt_at).isoformat()
+        with self._connect() as connection:
+            connection.execute("INSERT OR REPLACE INTO v3_open_retry VALUES (?, ?)",
+                               (state.action_id, json.dumps(payload, sort_keys=True)))
+
+    def load_open_retries(self) -> dict[str, OpenRetryState]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT action_id, state_json FROM v3_open_retry").fetchall()
+        result = {}
+        for action_id, raw in rows:
+            payload = json.loads(raw)
+            if payload.get("version") != V3_OPEN_RETRY_STATE_VERSION:
+                raise RuntimeError("Unsupported open retry state version")
+            payload["next_attempt_at"] = _required_utc(datetime.fromisoformat(payload["next_attempt_at"]))
+            state = OpenRetryState(**payload)
+            if state.action_id != action_id or state.attempt_count < 0:
+                raise ValueError("Invalid persisted open retry state")
+            result[action_id] = state
+        return result
+
+    def delete_open_retry(self, action_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute("DELETE FROM v3_open_retry WHERE action_id=?", (action_id,))
 
     def save_feature_engine(
         self,
@@ -306,6 +343,9 @@ class V3RuntimeStateStore:
                     observed_at TEXT NOT NULL, source TEXT NOT NULL, version TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS v3_close_retry(
+                    action_id TEXT PRIMARY KEY, state_json TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS v3_open_retry(
                     action_id TEXT PRIMARY KEY, state_json TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS v3_feature_state(

@@ -17,7 +17,9 @@ class BrokerTaskLane(StrEnum):
 
 
 CLOSE_TASK_KINDS = frozenset({'close_position'})
-QUERY_TASK_KINDS = frozenset({'v3_close_execution_lookup', 'v3_broker_reconciliation'})
+QUERY_TASK_KINDS = frozenset({
+    'v3_close_execution_lookup', 'v3_open_execution_lookup', 'v3_broker_reconciliation',
+})
 
 
 @dataclass(frozen=True)
