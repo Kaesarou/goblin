@@ -270,6 +270,7 @@ class AlpacaBrokerClient(BrokerClient):
         return OpenPositionResult(
             row["position_id"], float(price), float(qty), float(notional),
             self._open_order(row, payload),
+            broker_response=dict(payload),
         )
 
     def get_open_execution(self, order_id, symbol, requested_notional):

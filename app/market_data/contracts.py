@@ -37,6 +37,19 @@ class LiveMarketDataFeed(ABC):
     def requires_websocket_health(self) -> bool:
         raise NotImplementedError
 
+    def set_data_expected(self, expected: bool) -> None:
+        """Tell the transport whether executable live data is currently expected.
+
+        Session-aware feeds may suppress silence recovery while their market is
+        closed. This never grants trading authority: session and per-symbol
+        freshness checks remain independent runtime gates.
+        """
+        return None
+
+    def executable_data_expected(self) -> bool:
+        """Return whether REST/WS executable quotes are expected right now."""
+        return True
+
     def connection_healthy(self) -> bool:
         """Return whether the primary transport is currently usable.
 

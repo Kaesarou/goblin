@@ -28,7 +28,7 @@ from app.runtime.storage_scope import RuntimeStorageScope
 from app.runtime.trading_session_window import trading_session_service_from_settings
 from app.utils.logging import configure_logging
 from app.v3.config import RecoverabilityConfig, etoro5_research_config
-from app.v3.economics import BrokerCostSchedule, EconomicsModel
+from app.v3.economics import EconomicsModel, broker_cost_schedule
 from app.v3.features import OnlineFeatureEngine
 from app.v3.manifest import (
     build_run_id,
@@ -47,7 +47,6 @@ from app.v3.state_store import V3RuntimeStateStore
 logger = logging.getLogger(__name__)
 
 V3_PROFILE = "RR5_ETORO5_PROSPECTIVE_VALIDATION"
-ETORO_FIXED_FEE_ASSUMPTION_PER_REQUEST = 1.0
 
 
 def build_candle_builders(
@@ -272,15 +271,14 @@ def _run_main(settings: Settings, storage: RuntimeStorageScope) -> None:
         hedge=config.hedge,
     )
     recoverability_scorer = RecoverabilityScorer.from_default_artifact()
+    cost_schedule = broker_cost_schedule(settings.broker)
     planner = InventoryPlanner(
         config=config,
         recoverability_scorer=recoverability_scorer,
         risk_policy=InventoryRiskPolicy(config.risk),
         economics_model=EconomicsModel(
             config.economics,
-            BrokerCostSchedule(
-                fixed_fee_per_fill=ETORO_FIXED_FEE_ASSUMPTION_PER_REQUEST,
-            ),
+            cost_schedule,
         ),
     )
 
@@ -430,9 +428,9 @@ def _run_main(settings: Settings, storage: RuntimeStorageScope) -> None:
             "hedge_execution_enabled": False,
             "live_capital_authority": False,
             "broker_cost_assumption": {
-                "fixed_fee_per_request_usd": (
-                    ETORO_FIXED_FEE_ASSUMPTION_PER_REQUEST
-                ),
+                "fixed_fee_per_request_usd": cost_schedule.fixed_fee_per_fill,
+                "commission_pct_per_fill": cost_schedule.commission_pct_per_fill,
+                "slippage_pct_per_fill": cost_schedule.slippage_pct_per_fill,
                 "authority": "research_estimate_not_broker_actual",
             },
             "run_journal_root": str(run_paths.root),

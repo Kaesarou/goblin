@@ -48,6 +48,72 @@ def confirm(executor):
     return executor.drain()
 
 
+def test_alpaca_cost_evidence_is_separate_from_unproven_ledger_fees(tmp_path):
+    executor, api = opened_executor(tmp_path)
+    entry = next(
+        event for event in executor.event_store.events()
+        if event.event_type == "ENTRY_FILLED"
+    )
+    assert entry.payload["broker_response"]["asset_class"] == "us_equity"
+    assert entry.payload["broker_cost_evidence"]["status"] == "unavailable"
+    assert entry.payload["broker_cost_evidence"]["amount"] is None
+    assert entry.payload["fee"] == 0.0
+
+    close_id = submit_close(executor)
+    assert executor.drain() == ()
+    # Alpaca's trading order does not include an authoritative fee amount;
+    # missing commission must stay unknown, not masquerade as a proven zero.
+    assert confirm(executor) == ("close",)
+    exit_fill = next(
+        event for event in executor.event_store.events()
+        if event.event_type == "EXIT_FILLED"
+    )
+    assert exit_fill.payload["broker_cost_evidence"]["status"] == "unavailable"
+    assert exit_fill.payload["broker_cost_evidence"]["amount"] is None
+    assert exit_fill.payload["broker_cost_evidence"]["ledger_applied"] is False
+    assert exit_fill.payload["fee"] == 0.0
+    assert executor.book.active_for_symbol("AAPL").fees_paid == 0.0
+
+
+def test_alpaca_profit_exit_dust_collapses_to_full_close(tmp_path):
+    client, api = broker(tmp_path)
+    executor = _executor(
+        tmp_path,
+        CachedBrokerClient(client),
+        InventoryBook(),
+    )
+    assert executor.schedule(
+        replace(_open_intent(), notional=50),
+        snapshot=_snapshot(),
+    )
+    assert executor.drain() == ("i1",)
+    inventory = executor.book.active_for_symbol("AAPL")
+    assert inventory is not None
+    assert inventory.total_units == pytest.approx(0.5)
+
+    assert executor.schedule(
+        _close_intent(inventory, 0.84, "dust-close"),
+        snapshot=_snapshot(110),
+    )
+    assert executor.drain() == ()
+    sell = api.submissions[-1]
+    assert sell["side"] == "sell"
+    assert sell["position_intent"] == "sell_to_close"
+    assert Decimal(sell["qty"]) == Decimal("0.500000000")
+
+    started = [
+        event
+        for event in executor.event_store.events()
+        if event.event_type == "CLOSE_SUBMISSION_STARTED"
+    ][-1]
+    assert started.payload["full_close"] is True
+    assert started.payload["dust_collapse"] is True
+
+    assert confirm(executor) == ("dust-close",)
+    assert executor.book.active_for_symbol("AAPL") is None
+    assert executor.new_risk_allowed
+
+
 @pytest.mark.parametrize("crash_before_completion", [False, True])
 @pytest.mark.parametrize("lost_response", [False, True])
 def test_close_identity_survives_lost_response_and_v3_completion_crash(
