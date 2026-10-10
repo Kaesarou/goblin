@@ -711,10 +711,33 @@ class V3BrokerExecutor:
         self._open_economics.attempts += 1
 
         def operation():
-            active = tuple(check.position_id for check in checks if check.current_units > 0)
-            closed = tuple(check.position_id for check in checks if check.current_units == 0)
-            return (lookup(active) if active else {},
-                    self.broker.get_open_position_units(closed) if closed else {})
+            active_checks = tuple(
+                check for check in checks if check.current_units > 0
+            )
+            closed = tuple(
+                check.position_id for check in checks if check.current_units == 0
+            )
+            recover = getattr(
+                self.broker,
+                "recover_open_position_economics_from_fill",
+                None,
+            )
+            local_evidence = {}
+            if callable(recover):
+                for check in active_checks:
+                    evidence = recover(check.fill)
+                    if evidence is not None:
+                        local_evidence[check.position_id] = evidence
+            remote_ids = tuple(
+                check.position_id
+                for check in active_checks
+                if check.position_id not in local_evidence
+            )
+            remote_evidence = lookup(remote_ids) if remote_ids else {}
+            return (
+                {**remote_evidence, **local_evidence},
+                self.broker.get_open_position_units(closed) if closed else {},
+            )
 
         self.task_runner.submit(kind="v3_open_economics_revalidation",
                                 task_id="v3-open-economics-revalidation", context=checks,
