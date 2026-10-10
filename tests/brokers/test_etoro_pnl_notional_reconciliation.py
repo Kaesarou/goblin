@@ -11,8 +11,15 @@ from app.config.settings import Settings
 # https://api-portal.etoro.com/api-reference/trading--demo/get-account-pnl-and-portfolio-details
 
 
-def _client(monkeypatch, *, instrument_price=100.0, units=3.0,
-            order_notional=1.0, pnl=None):
+def _client(
+    monkeypatch,
+    *,
+    instrument_price=100.0,
+    units=3.0,
+    order_notional=1.0,
+    pnl=None,
+    execution_fields=None,
+):
     client = ResilientEtoroClient(settings=Settings.model_construct(
         broker="etoro_demo", base_currency="USD",
         etoro_api_key="api", etoro_user_key="user",
@@ -26,8 +33,10 @@ def _client(monkeypatch, *, instrument_price=100.0, units=3.0,
     monkeypatch.setattr(client, "_wait_for_executed_order", lambda *_args, **_kwargs: {
         "status": {"name": "Executed", "errorCode": 0},
         "positionExecutions": [{
-            "positionId": "position-1", "investedAmountCurrency": order_notional,
+            "positionId": "position-1",
+            "investedAmountCurrency": order_notional,
             "openingData": {"avgPrice": instrument_price, "units": units},
+            **(execution_fields or {}),
         }],
     })
     def get_pnl(path):
@@ -48,6 +57,57 @@ def test_one_dollar_order_field_uses_exact_pnl_position_usd_amount(monkeypatch):
     assert result.position_id == "position-1"
     assert result.executed_notional == 299.0
     assert result.executed_units == 3.0
+    assert calls == ["/api/v1/trading/info/demo/pnl"]
+
+
+def test_one_dollar_order_field_uses_convergent_documented_account_exposure(monkeypatch):
+    client, calls = _client(
+        monkeypatch,
+        order_notional=1.0,
+        pnl=RuntimeError("P&L must not be needed"),
+        execution_fields={
+            "initialExposureAccountCurrency": 327.95,
+            "marginAccountCurrency": 327.96,
+            "leverage": 1,
+        },
+    )
+    result = client.open_position("INTC", "BUY", 328.0, 50.0, 1_000.0)
+    assert result.executed_notional == pytest.approx(327.95)
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "execution_fields",
+    [
+        {
+            "initialExposureAccountCurrency": 327.95,
+            "marginAccountCurrency": 327.96,
+            "leverage": 2,
+        },
+        {
+            "initialExposureAccountCurrency": 327.95,
+            "marginAccountCurrency": 250.0,
+            "leverage": 1,
+        },
+        {
+            "initialExposureAccountCurrency": 100.0,
+            "marginAccountCurrency": 100.0,
+            "leverage": 1,
+        },
+    ],
+)
+def test_suspicious_order_notional_does_not_trust_inconsistent_exposure_fields(
+    monkeypatch,
+    execution_fields,
+):
+    client, calls = _client(
+        monkeypatch,
+        order_notional=1.0,
+        pnl={"clientPortfolio": {"positions": []}},
+        execution_fields=execution_fields,
+    )
+    result = client.open_position("INTC", "BUY", 328.0, 50.0, 1_000.0)
+    assert result.executed_notional == 1.0
     assert calls == ["/api/v1/trading/info/demo/pnl"]
 
 
