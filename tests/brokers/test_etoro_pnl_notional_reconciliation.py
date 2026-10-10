@@ -111,6 +111,62 @@ def test_suspicious_order_notional_does_not_trust_inconsistent_exposure_fields(
     assert calls == ["/api/v1/trading/info/demo/pnl"]
 
 
+def test_persisted_order_response_recovers_exact_notional_without_network(monkeypatch):
+    client, calls = _client(monkeypatch)
+    fill = {
+        "position_id": "position-1",
+        "requested_notional": 328.0,
+        "notional": 328.0,
+        "broker_response": {
+            "positionExecutions": [{
+                "positionId": "position-1",
+                "investedAmountCurrency": 1.0,
+                "initialExposureAccountCurrency": 327.95,
+                "marginAccountCurrency": 327.96,
+                "leverage": 1,
+                "openingData": {
+                    "avgPrice": 65.31,
+                    "units": 4.480142,
+                    "orderId": "broker-open-1",
+                },
+            }],
+        },
+    }
+
+    evidence = client.recover_open_position_economics_from_fill(fill)
+
+    assert evidence is not None
+    assert evidence.position_id == "position-1"
+    assert evidence.account_notional == pytest.approx(327.95)
+    assert evidence.units == pytest.approx(4.480142)
+    assert evidence.entry_price == pytest.approx(65.31)
+    assert evidence.source == "etoro_order_convergent_account_exposure"
+    assert evidence.broker_response["orderId"] == "broker-open-1"
+    assert calls == []
+
+
+def test_persisted_order_response_does_not_recover_inconsistent_exposure(monkeypatch):
+    client, _ = _client(monkeypatch)
+    fill = {
+        "position_id": "position-1",
+        "requested_notional": 328.0,
+        "broker_response": {
+            "positionExecutions": [{
+                "positionId": "position-1",
+                "initialExposureAccountCurrency": 327.95,
+                "marginAccountCurrency": 200.0,
+                "leverage": 1,
+                "openingData": {
+                    "avgPrice": 65.31,
+                    "units": 4.480142,
+                },
+            }],
+        },
+    }
+
+    assert client.recover_open_position_economics_from_fill(fill) is None
+
+
 def test_european_instrument_amount_stays_usd_not_units_times_euro_price(monkeypatch):
     client, _ = _client(monkeypatch, instrument_price=210.0, units=1.4,
                         pnl={"clientPortfolio": {"positions": [
