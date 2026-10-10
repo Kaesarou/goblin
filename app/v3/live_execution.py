@@ -19,6 +19,7 @@ from app.brokers.base import (
 from app.market.models import MarketSnapshot
 from app.runtime.broker_task_runner import BrokerTaskCompletion, BrokerTaskLane
 from app.v3.book import InventoryBook
+from app.v3.broker_fee_evidence import broker_order_cost_evidence
 from app.v3.close_recovery import (
     _CloseContext,
     _PendingCloseConfirmation,
@@ -1703,6 +1704,7 @@ class V3BrokerExecutor:
             "purpose": context.intent.purpose.value,
             "broker_raw_price": result.executed_entry_price,
             "broker_response": result.broker_response,
+            "broker_cost_evidence": broker_order_cost_evidence(result.broker_response),
             "causal_quote": causal_quote,
             "entry_price_deviation_bp": (
                 (float(result.executed_entry_price) / context.trigger_price - 1) * 10_000
@@ -1954,6 +1956,7 @@ class V3BrokerExecutor:
             close_order_id=pending.close_order_id,
             executed_units=executed_units,
             broker_execution_position_id=execution.broker_execution_position_id,
+            broker_response=execution.broker_response,
         )
         if not confirmed:
             self._defer_confirmation(pending, result_state="invalid_execution")
@@ -1968,6 +1971,7 @@ class V3BrokerExecutor:
         close_order_id: str,
         executed_units: float,
         broker_execution_position_id: str | None = None,
+        broker_response: dict | None = None,
     ) -> bool:
         if context.action_id in self._resolved_close_action_ids:
             return False
@@ -2026,6 +2030,7 @@ class V3BrokerExecutor:
                     "entry_economics_resolved": reconciled.entry_economics_resolved,
                     "price": exit_price,
                     "fee": 0.0,
+                    "broker_cost_evidence": broker_order_cost_evidence(broker_response),
                     "close_order_id": close_order_id,
                     "purpose": context.intent.purpose.value,
                     "executed_at": filled_at,
@@ -2057,6 +2062,7 @@ class V3BrokerExecutor:
             close_order_id=close_order_id,
             executed_units=executed_units,
             broker_execution_position_id=broker_execution_position_id,
+            broker_response=broker_response,
         )
 
     def _confirm_direct_close(
@@ -2068,6 +2074,7 @@ class V3BrokerExecutor:
         close_order_id: str,
         executed_units: float,
         broker_execution_position_id: str | None,
+        broker_response: dict | None = None,
     ) -> bool:
         inventory = self.book.active_for_symbol(context.intent.symbol)
         if inventory is None:
@@ -2124,6 +2131,7 @@ class V3BrokerExecutor:
                 "price": exit_price,
                 "executed_at": filled_at,
                 "fee": 0.0,
+                "broker_cost_evidence": broker_order_cost_evidence(broker_response),
                 "close_order_id": close_order_id,
                 "purpose": context.intent.purpose.value,
             },
