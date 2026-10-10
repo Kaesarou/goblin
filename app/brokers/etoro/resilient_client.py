@@ -78,9 +78,12 @@ class ResilientEtoroClient(EtoroClient):
         if not isinstance(raw, dict):
             return None
         position_id = str(fill.get("position_id", ""))
+        raw_requested = fill.get("requested_notional")
+        if raw_requested is None:
+            raw_requested = fill.get("notional")
         try:
-            requested = float(fill.get("requested_notional", fill["notional"]))
-        except (KeyError, TypeError, ValueError):
+            requested = float(raw_requested)
+        except (TypeError, ValueError):
             return None
         matching = [
             details
