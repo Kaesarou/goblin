@@ -61,16 +61,15 @@ def test_alpaca_cost_evidence_is_separate_from_unproven_ledger_fees(tmp_path):
 
     close_id = submit_close(executor)
     assert executor.drain() == ()
-    # Alpaca Broker API may surface an optional commission; record its
-    # provenance without assuming it is the entire economic cost of the trade.
-    api.orders[close_id]["commission"] = "0.25"
+    # Alpaca's trading order does not include an authoritative fee amount;
+    # missing commission must stay unknown, not masquerade as a proven zero.
     assert confirm(executor) == ("close",)
     exit_fill = next(
         event for event in executor.event_store.events()
         if event.event_type == "EXIT_FILLED"
     )
-    assert exit_fill.payload["broker_cost_evidence"]["amount"] == 0.25
-    assert exit_fill.payload["broker_cost_evidence"]["currency"] == "USD"
+    assert exit_fill.payload["broker_cost_evidence"]["status"] == "unavailable"
+    assert exit_fill.payload["broker_cost_evidence"]["amount"] is None
     assert exit_fill.payload["broker_cost_evidence"]["ledger_applied"] is False
     assert exit_fill.payload["fee"] == 0.0
     assert executor.book.active_for_symbol("AAPL").fees_paid == 0.0
