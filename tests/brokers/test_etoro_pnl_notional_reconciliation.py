@@ -48,6 +48,92 @@ def _client(
     return client, calls
 
 
+def _ifx_order_info_payload():
+    # Exact financial shape observed in the 12 October 2026 eToro DEMO fill;
+    # synthetic position/order IDs keep the test independent of the account.
+    return {
+        "orderCurrency": "usd",
+        "asset": {
+            "symbol": "IFX.DE",
+            "instrumentId": 1221,
+            "currency": "EUR",
+            "settlementType": "REAL",
+            "leverage": 1,
+            "side": "long",
+        },
+        "status": {"id": 3, "name": "Filled", "errorCode": 0},
+        "positionExecutions": [{
+            "positionId": "ifx-position",
+            "investedAmountCurrency": 1,
+            "initialExposureAccountCurrency": 327.8138011064046,
+            "marginAccountCurrency": 327.81,
+            "openingData": {
+                "units": 5.047099,
+                "avgPrice": 57.98,
+                "orderId": "ifx-order",
+            },
+        }],
+    }
+
+
+def test_ifx_actual_order_shape_resolves_new_buy_without_pnl_get(monkeypatch):
+    client, calls = _client(monkeypatch, pnl=RuntimeError("P&L should not be read"))
+    monkeypatch.setattr(client, "_wait_for_executed_order",
+                        lambda *_args, **_kwargs: _ifx_order_info_payload())
+    result = client.open_position("IFX.DE", "BUY", 328.043821239, 50.0, 1000.0)
+
+    assert result.position_id == "ifx-position"
+    assert result.executed_notional == pytest.approx(327.8138011064046)
+    assert result.executed_units == pytest.approx(5.047099)
+    assert calls == []
+
+
+def test_ifx_persisted_entry_recovers_after_restart_without_broker_post(monkeypatch):
+    client, calls = _client(monkeypatch, pnl=RuntimeError("network unavailable"))
+    persisted = {
+        "symbol": "IFX.DE",
+        "position_id": "ifx-position",
+        "requested_notional": 328.043821239,
+        "notional": 328.043821239,
+        "broker_response": _ifx_order_info_payload(),
+    }
+
+    proof = client.recover_open_position_economics_from_fill(persisted)
+
+    assert proof is not None
+    assert proof.source == "etoro_order_convergent_account_exposure"
+    assert proof.position_id == "ifx-position"
+    assert proof.account_notional == pytest.approx(327.8138011064046)
+    assert proof.units == pytest.approx(5.047099)
+    assert proof.entry_price == pytest.approx(57.98)
+    assert calls == []
+
+
+@pytest.mark.parametrize("bad_asset_leverage", [2, True, None, 0, -1])
+def test_ifx_unproven_asset_leverage_never_recovers_stored_notional(
+    monkeypatch, bad_asset_leverage,
+):
+    client, _ = _client(monkeypatch)
+    payload = _ifx_order_info_payload()
+    payload["asset"]["leverage"] = bad_asset_leverage
+    assert client.recover_open_position_economics_from_fill({
+        "position_id": "ifx-position",
+        "requested_notional": 328.043821239,
+        "broker_response": payload,
+    }) is None
+
+
+def test_ifx_inconsistent_execution_vs_asset_leverage_fails_closed(monkeypatch):
+    client, _ = _client(monkeypatch)
+    payload = _ifx_order_info_payload()
+    payload["positionExecutions"][0]["leverage"] = 2
+    assert client.recover_open_position_economics_from_fill({
+        "position_id": "ifx-position",
+        "requested_notional": 328.043821239,
+        "broker_response": payload,
+    }) is None
+
+
 def test_one_dollar_order_field_uses_exact_pnl_position_usd_amount(monkeypatch):
     client, calls = _client(monkeypatch, pnl={"clientPortfolio": {"positions": [
         {"positionId": "different", "amount": 10_000.0},
