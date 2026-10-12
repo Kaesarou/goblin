@@ -94,6 +94,34 @@ def test_extract_executed_position_details_from_opening_data():
     assert details.executed_units == pytest.approx(1.234567)
 
 
+def test_etoro_asset_level_leverage_used_when_execution_omits_field():
+    payload = executed_order_payload()
+    payload["asset"] = {"leverage": 1}
+    details = extract_executed_position_details(payload)
+    assert details is not None
+    assert details.leverage == 1
+
+
+def test_execution_level_leverage_remains_compatible_without_asset_envelope():
+    payload = executed_order_payload()
+    payload["positionExecutions"][0]["leverage"] = 1
+    assert extract_executed_position_details(payload).leverage == 1
+
+
+@pytest.mark.parametrize("asset_leverage,execution_leverage", [
+    (1, 2), (2, 1), (1, None), (None, 1),
+])
+def test_conflicting_or_invalid_leverage_remains_unproven(
+    asset_leverage, execution_leverage,
+):
+    payload = executed_order_payload()
+    payload["asset"] = {"leverage": asset_leverage}
+    payload["positionExecutions"][0]["leverage"] = execution_leverage
+    details = extract_executed_position_details(payload)
+    assert details is not None
+    assert details.leverage is None
+
+
 def test_extract_executed_position_details_returns_none_when_opening_data_is_missing():
     payload = {'positionExecutions': [{'positionId': 9001}]}
 
