@@ -70,7 +70,26 @@ def extract_executed_position_details_list(payload: dict) -> list[ExecutedPositi
             execution.get('initialExposureAccountCurrency')
         )
         margin_account = _optional_float(execution.get('marginAccountCurrency'))
-        leverage = _optional_float(execution.get('leverage'))
+        # The actual eToro DEMO order-info envelope reports the instrument
+        # leverage at asset.leverage, not necessarily on each positionExecution.
+        # If both locations are populated, disagreement is unproven leverage
+        # and must not authorize account-notional recovery.
+        asset = payload.get('asset')
+        asset_has_leverage = isinstance(asset, dict) and 'leverage' in asset
+        execution_has_leverage = 'leverage' in execution
+        asset_leverage = (
+            _optional_float(asset.get('leverage')) if asset_has_leverage else None
+        )
+        execution_leverage = (
+            _optional_float(execution.get('leverage'))
+            if execution_has_leverage else None
+        )
+        leverage = (
+            None
+            if asset_has_leverage and execution_has_leverage
+            and asset_leverage != execution_leverage
+            else execution_leverage if execution_has_leverage else asset_leverage
+        )
         # V3 opens by cash amount. eToro is authoritative for the resulting units;
         # deriving units locally from amount / avgPrice is unsafe for FX-converted
         # equities and broker rounding. The account-currency invested amount is
