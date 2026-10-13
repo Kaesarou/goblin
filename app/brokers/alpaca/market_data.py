@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import queue
-import time
 from datetime import UTC, datetime
 
 from app.brokers.alpaca.schema import number, timestamp
-from app.brokers.alpaca.stream import AlpacaStream
+from app.brokers.alpaca.stream import AlpacaStream, QuoteQueueOverflow
 from app.market.models import MarketSnapshot, PriceSource
 from app.market_data.contracts import LiveMarketDataFeed
 from app.market_data.models import MarketDataEvent, MarketDataSource
@@ -99,6 +98,9 @@ class AlpacaRestMarketDataClient:
 
 
 class AlpacaMarketDataFeed(LiveMarketDataFeed):
+    # Operational freshness bounds, not trading-strategy parameters.
+    max_entry_quote_age_seconds = 5.0
+    max_queue_delivery_age_seconds = 5.0
     def __init__(
         self,
         *,
@@ -126,6 +128,8 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
         self.queue_high_watermark = self.discarded_quotes = 0
         self.queue_backpressure_events = 0
         self.queue_backpressure_wait_seconds = 0.0
+        self.stale_queue_events = 0
+        self.max_queue_delivery_age_observed_seconds = 0.0
 
     def _queue_diagnostics(self) -> dict:
         return {
@@ -139,6 +143,10 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
                 6,
             ),
             "discarded_quotes": self.discarded_quotes,
+            "stale_queue_events": self.stale_queue_events,
+            "max_queue_delivery_age_observed_seconds": round(
+                self.max_queue_delivery_age_observed_seconds, 6,
+            ),
         }
 
     @property
@@ -170,7 +178,21 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
             event = self._queue.get(timeout=timeout_seconds)
         except queue.Empty:
             return None
-        if event.connection_id != str(self._stream.connections):
+        age = max(0.0, (datetime.now(UTC) - event.received_at).total_seconds())
+        self.max_queue_delivery_age_observed_seconds = max(
+            self.max_queue_delivery_age_observed_seconds, age,
+        )
+        if age > self.max_queue_delivery_age_seconds:
+            # This quote may have crossed an intent long ago, but cannot be
+            # replayed as an executable *current* price. Revoke all entry
+            # authority and start a fresh connection instead of running down
+            # an arbitrarily deep old backlog.
+            self.stale_queue_events += 1
+            self.discarded_quotes += 1
+            self._stream.revoke_market_data(reconnect=True, reason="quote_queue_stale")
+            return None
+        if (not self._stream.healthy()
+                or event.connection_id != str(self._stream.connections)):
             # An old queued quote must not regain entry authority merely
             # because a replacement socket has authenticated successfully.
             self.ordering_drops += 1
@@ -210,7 +232,6 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
         if previous is not None and snapshot.timestamp <= previous:
             self.ordering_drops += 1
             return False
-        self._last_timestamp[symbol] = snapshot.timestamp
         event = MarketDataEvent(
             symbol,
             MarketDataSource.WEBSOCKET,
@@ -224,28 +245,17 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
                 self.queue_high_watermark,
                 self._queue.qsize(),
             )
+            self._last_timestamp[symbol] = snapshot.timestamp
             return True
-        except queue.Full:
-            # Local overload must never erase an executable crossing. Apply
-            # backpressure to the WebSocket consumer instead of purging FIFO
-            # history. The queue remains memory-bounded and preserves causal
-            # order; shutdown can still interrupt the wait promptly.
+        except queue.Full as exc:
+            # Never park the reader thread on a full FIFO: doing so starves
+            # WebSocket ping/pong and produces seconds-old executable quotes.
+            # We cannot safely discard individual crossings and claim market
+            # continuity. Invalidate this epoch, log the gap and reconnect;
+            # no BUY is authorized until a fresh feed is healthy again.
             self.queue_backpressure_events += 1
+            self.queue_overflows += 1
             self.queue_high_watermark = self._queue.maxsize
-            started = time.monotonic()
-            while not self._stream.stopping():
-                try:
-                    self._queue.put(event, timeout=0.1)
-                    self.queue_backpressure_wait_seconds += max(
-                        0.0,
-                        time.monotonic() - started,
-                    )
-                    return True
-                except queue.Full:
-                    continue
-            self.queue_backpressure_wait_seconds += max(
-                0.0,
-                time.monotonic() - started,
-            )
             self.discarded_quotes += 1
-            return False
+            self._stream.revoke_market_data()
+            raise QuoteQueueOverflow() from exc
