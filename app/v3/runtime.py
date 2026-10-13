@@ -450,6 +450,7 @@ class GoblinV3Runtime:
             is None
         )
 
+        fresh_for_entry = self._entry_quote_fresh(snapshot, now=now)
         for intent in self.intent_book.triggered(snapshot):
             if self._stop_requested:
                 break
@@ -469,6 +470,7 @@ class GoblinV3Runtime:
                 )
             if not intent.reduce_only and not (
                 session_allows_new_risk
+                and fresh_for_entry
                 and self._operational_entry_allowed(symbol)
             ):
                 continue
@@ -1164,6 +1166,28 @@ class GoblinV3Runtime:
             if decision.session_active:
                 result.add(symbol)
         return result
+
+    def _entry_quote_fresh(self, snapshot: MarketSnapshot, *, now: datetime) -> bool:
+        """Alpaca BUYs require an actually recent broker quote and local delivery.
+
+        Test/replay clocks older than 5 minutes use their explicit now instead
+        of mixing historical market timestamps with the real wall clock.
+        This is an entry-authority gate; reduce-only exits stay independent.
+        eToro/research feeds without this transport bound remain unchanged.
+        """
+        max_age = getattr(self.live_market_data, "max_entry_quote_age_seconds", None)
+        if max_age is None:
+            return True
+        wall_now = datetime.now(UTC)
+        replay_clock = _utc(now)
+        live = abs((wall_now - replay_clock).total_seconds()) <= 300
+        reference = wall_now if live else replay_clock
+        exchange_age = (reference - _utc(snapshot.timestamp)).total_seconds()
+        receive_age = (reference - _utc(snapshot.received_at)).total_seconds()
+        return (
+            -1.0 <= exchange_age <= max_age
+            and (not live or -1.0 <= receive_age <= max_age)
+        )
 
     def _operational_entry_allowed(self, symbol: str) -> bool:
         session = self.session_decisions.get(symbol)
