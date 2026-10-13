@@ -105,6 +105,22 @@ class AlpacaStream:
     def stopping(self) -> bool:
         return self._stop.is_set()
 
+    def revoke_market_data(self, *, reconnect: bool = False, reason: str = "quote_queue_stale") -> None:
+        """Revoke entry authority before the next quote can be dispatched.
+
+        The WebSocket reader owns normal reconnects on callback exceptions.
+        The V3 consumer can also detect an excessively aged local backlog:
+        in that case request a fresh subscription without blocking its thread.
+        Only the market-data connection may be invalidated this way.
+        """
+        if not self._market or not self._healthy:
+            return
+        self._healthy = False
+        self._applied = ()
+        if reconnect:
+            self._record_disconnect(StreamFailure(reason), 0.0)
+            self._changed.set()
+
     def check_error(self) -> None:
         if self._fatal is not None:
             raise RuntimeError(
