@@ -130,49 +130,18 @@ def test_market_silence_is_normal_when_executable_data_is_not_expected(monkeypat
     assert stream.diagnostics()["data_expected"] is False
 
 
-def test_slow_consumer_backpressure_is_bounded_and_preserves_connection():
-    feed = AlpacaMarketDataFeed(
-        api_key="key",
-        secret_key="secret",
-        queue_capacity=1,
-    )
+def test_overflow_fails_closed_without_keeping_websocket_reader_blocked():
+    from app.brokers.alpaca.stream import QuoteQueueOverflow
+    feed = AlpacaMarketDataFeed(api_key="key", secret_key="secret", queue_capacity=1)
     stream = feed._stream
-    stream._healthy = True
-    stream._applied = ("AAPL",)
-    stream.connections = 1
+    stream._healthy, stream._applied, stream.connections = True, ("AAPL",), 1
     feed._on_quote({**QUOTE, "t": "2026-09-25T14:00:00Z"})
-
-    completed = threading.Event()
-
-    def produce_second():
-        try:
-            assert feed._on_quote(
-                {**QUOTE, "t": "2026-09-25T14:00:01Z"}
-            )
-        finally:
-            completed.set()
-
-    producer = threading.Thread(target=produce_second)
-    producer.start()
-    deadline = time.monotonic() + 1
-    while feed.queue_backpressure_events == 0 and time.monotonic() < deadline:
-        time.sleep(0.001)
-
-    diagnostic = feed.diagnostics()
-    assert diagnostic["queue_size"] == 1
-    assert diagnostic["queue_high_watermark"] == 1
-    assert diagnostic["queue_backpressure_events"] == 1
-    assert diagnostic["queue_overflows"] == 0
-    assert diagnostic["discarded_quotes"] == 0
-    assert diagnostic["last_disconnect"] is None
-    assert not completed.is_set()
-
-    first = feed.next_event(0)
-    assert first.snapshot.timestamp.second == 0
-    assert completed.wait(1)
-    producer.join(timeout=1)
-    second = feed.next_event(0)
-    assert second.snapshot.timestamp.second == 1
-    assert feed.diagnostics()["discarded_quotes"] == 0
-
-
+    started = time.monotonic()
+    with pytest.raises(QuoteQueueOverflow):
+        feed._on_quote({**QUOTE, "t": "2026-09-25T14:00:01Z"})
+    assert time.monotonic() - started < 0.5
+    assert feed.queue_backpressure_events == 1
+    assert feed.queue_overflows == 1
+    assert feed.discarded_quotes == 1
+    assert not stream.healthy()
+    assert feed.next_event(0) is None
