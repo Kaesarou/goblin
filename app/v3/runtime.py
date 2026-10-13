@@ -595,10 +595,7 @@ class GoblinV3Runtime:
             and not candle.quality_degraded
         )
         entry_allowed = bool(
-            quality_ok
-            and decision_snapshot is not None
-            and self._entry_quote_fresh(decision_snapshot, now=now)
-            and self._operational_entry_allowed(symbol)
+            quality_ok and self._operational_entry_allowed(symbol)
         )
         expected = self._expected_symbols_at(candle.opened_at)
         recorded = False
@@ -717,9 +714,7 @@ class GoblinV3Runtime:
             market_states[symbol] = feature.market_state(
                 snapshot=snapshot,
                 entry_allowed=(
-                    quality_ok
-                    and self._entry_quote_fresh(snapshot, now=batch.closed_at)
-                    and self._operational_entry_allowed(symbol)
+                    quality_ok and self._operational_entry_allowed(symbol)
                 ),
                 quality_ok=quality_ok,
             )
