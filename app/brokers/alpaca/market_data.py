@@ -191,7 +191,7 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
             self.discarded_quotes += 1
             self._stream.revoke_market_data(reconnect=True, reason="quote_queue_stale")
             return None
-        if (not self._stream.healthy()
+        if (not self._stream.subscribed_symbols()
                 or event.connection_id != str(self._stream.connections)):
             # An old queued quote must not regain entry authority merely
             # because a replacement socket has authenticated successfully.
