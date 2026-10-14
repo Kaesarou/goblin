@@ -79,11 +79,11 @@ def test_old_stale_epoch_must_not_disconnect_new_socket():
 def test_stale_current_epoch_is_purged_once_not_replayed_as_crossings():
     feed = feed_with_active_socket(capacity=10)
     assert feed._on_quote(QUOTE)
-    assert feed._on_quote({**QUOTE, "t": "2026-10-12T14:00:01Z"})
     old = feed._queue.get_nowait()
     feed._queue.put_nowait(replace(
         old, received_at=datetime.now(UTC) - timedelta(seconds=20),
     ))
+    assert feed._on_quote({**QUOTE, "t": "2026-10-12T14:00:01Z"})
     # Last queued tick is stale too; it must not trigger another reconnect.
     assert feed.next_event(0) is None
     assert feed.epoch_queue_discarded == 1
