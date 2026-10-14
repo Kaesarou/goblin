@@ -101,6 +101,11 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
     # Operational freshness bounds, not trading-strategy parameters.
     max_entry_quote_age_seconds = 5.0
     max_queue_delivery_age_seconds = 5.0
+    # Drain several validated events before repeating expensive V3 clock,
+    # inventory and maintenance bookkeeping. Each event remains in FIFO order
+    # for exact crossing and candle semantics.
+    runtime_drain_max_events = 128
+    runtime_drain_max_seconds = 0.025
     def __init__(
         self,
         *,
