@@ -188,6 +188,10 @@ class GoblinV3Runtime:
             "intents_planned": 0,
             "orders_submitted": 0,
             "market_data_rejected": 0,
+            "market_data_batch_cycles": 0,
+            "market_data_batch_events": 0,
+            "market_data_batch_max": 0,
+            "market_data_batch_time_limited": 0,
             "errors": 0,
             "equity_refresh_attempts": 0,
             "equity_refresh_failures": 0,
@@ -302,6 +306,50 @@ class GoblinV3Runtime:
         if self.stop_reason != "error":
             self.stop_reason = reason
 
+    def _consume_market_data_cycle(
+        self, first_event: MarketDataEvent, *, now: datetime,
+    ) -> None:
+        """Drain Alpaca's FIFO in bounded microbatches, without coalescing ticks.
+
+        Every event still passes the normal V3 validation, candle builder and
+        resting-intent crossing checks, in arrival order. The 25 ms budget and
+        max 128 events bound how long broker reconciliation, exits, equity
+        maintenance and heartbeats can be deferred by a busy market stream.
+        Feeds without explicit opt-in (including eToro) keep one-event cycles.
+        """
+        limit = max(1, min(
+            int(getattr(self.live_market_data, "runtime_drain_max_events", 1)),
+            256,
+        ))
+        if limit == 1:
+            self._handle_event(first_event, now)
+            return
+
+        budget = max(0.001, min(
+            float(getattr(self.live_market_data, "runtime_drain_max_seconds", 0.025)),
+            0.05,
+        ))
+        deadline = time.monotonic() + budget
+        handled = 1
+        self._handle_event(first_event, now)
+        while handled < limit and not self._stop_requested:
+            if time.monotonic() >= deadline:
+                self.metrics["market_data_batch_time_limited"] += 1
+                break
+            event = self.live_market_data.next_event(0.0)
+            if event is None:
+                break
+            # Use the actual processing wall clock for each subsequent quote,
+            # not the timestamp of the first item in the batch.
+            self._handle_event(event, datetime.now(UTC))
+            handled += 1
+
+        self.metrics["market_data_batch_cycles"] += 1
+        self.metrics["market_data_batch_events"] += handled
+        self.metrics["market_data_batch_max"] = max(
+            self.metrics["market_data_batch_max"], handled,
+        )
+
     def run(self, *, timeout_seconds: float = 1.0) -> None:
         if not self._stop_requested:
             self.stop_reason = None
@@ -323,7 +371,9 @@ class GoblinV3Runtime:
                 if self._stop_requested:
                     break
                 if event is not None:
-                    self._handle_event(event, now)
+                    self._consume_market_data_cycle(event, now=now)
+                    if getattr(self.live_market_data, "runtime_drain_max_events", 1) > 1:
+                        now = datetime.now(UTC)
 
                 self._finalize_clocked_candles(now)
                 self._flush_decision_windows(now)

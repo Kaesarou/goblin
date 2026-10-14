@@ -101,6 +101,11 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
     # Operational freshness bounds, not trading-strategy parameters.
     max_entry_quote_age_seconds = 5.0
     max_queue_delivery_age_seconds = 5.0
+    # Drain several validated events before repeating expensive V3 clock,
+    # inventory and maintenance bookkeeping. Each event remains in FIFO order
+    # for exact crossing and candle semantics.
+    runtime_drain_max_events = 128
+    runtime_drain_max_seconds = 0.025
     def __init__(
         self,
         *,
@@ -130,6 +135,8 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
         self.queue_backpressure_wait_seconds = 0.0
         self.stale_queue_events = 0
         self.max_queue_delivery_age_observed_seconds = 0.0
+        self.epoch_queue_purges = 0
+        self.epoch_queue_discarded = 0
 
     def _queue_diagnostics(self) -> dict:
         return {
@@ -144,6 +151,8 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
             ),
             "discarded_quotes": self.discarded_quotes,
             "stale_queue_events": self.stale_queue_events,
+            "epoch_queue_purges": self.epoch_queue_purges,
+            "epoch_queue_discarded": self.epoch_queue_discarded,
             "max_queue_delivery_age_observed_seconds": round(
                 self.max_queue_delivery_age_observed_seconds, 6,
             ),
@@ -170,6 +179,23 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
     def subscribed_symbols(self) -> tuple[str, ...]:
         return self._stream.subscribed_symbols()
 
+    def _purge_invalid_epoch(self) -> None:
+        """Drop missing-continuity ticks; never replay them as later crossings.
+
+        Queue operations remain bounded by its configured capacity, and the
+        socket must already have had new-entry authority revoked by caller.
+        """
+        count = 0
+        while True:
+            try:
+                self._queue.get_nowait()
+                count += 1
+            except queue.Empty:
+                break
+        self.epoch_queue_purges += 1
+        self.epoch_queue_discarded += count
+        self.discarded_quotes += count
+
     def next_event(self, timeout_seconds: float) -> MarketDataEvent | None:
         self._stream.check_error()
         if self._trade_stream:
@@ -177,6 +203,13 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
         try:
             event = self._queue.get(timeout=timeout_seconds)
         except queue.Empty:
+            return None
+        # Epoch identity takes precedence over freshness. An obsolete quote
+        # must never revoke an already established replacement connection.
+        if (not self._stream.subscribed_symbols()
+                or event.connection_id != str(self._stream.connections)):
+            self.ordering_drops += 1
+            self.discarded_quotes += 1
             return None
         age = max(0.0, (datetime.now(UTC) - event.received_at).total_seconds())
         self.max_queue_delivery_age_observed_seconds = max(
@@ -189,14 +222,11 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
             # an arbitrarily deep old backlog.
             self.stale_queue_events += 1
             self.discarded_quotes += 1
-            self._stream.revoke_market_data(reconnect=True, reason="quote_queue_stale")
-            return None
-        if (not self._stream.subscribed_symbols()
-                or event.connection_id != str(self._stream.connections)):
-            # An old queued quote must not regain entry authority merely
-            # because a replacement socket has authenticated successfully.
-            self.ordering_drops += 1
-            self.discarded_quotes += 1
+            if self._stream.revoke_market_data(
+                reconnect=True, reason="quote_queue_stale",
+                expected_connection_id=event.connection_id,
+            ):
+                self._purge_invalid_epoch()
             return None
         return event
 
@@ -257,5 +287,8 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
             self.queue_overflows += 1
             self.queue_high_watermark = self._queue.maxsize
             self.discarded_quotes += 1
-            self._stream.revoke_market_data()
+            if self._stream.revoke_market_data(
+                expected_connection_id=event.connection_id,
+            ):
+                self._purge_invalid_epoch()
             raise QuoteQueueOverflow() from exc

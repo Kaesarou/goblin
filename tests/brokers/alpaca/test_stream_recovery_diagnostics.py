@@ -142,6 +142,7 @@ def test_overflow_fails_closed_without_keeping_websocket_reader_blocked():
     assert time.monotonic() - started < 0.5
     assert feed.queue_backpressure_events == 1
     assert feed.queue_overflows == 1
-    assert feed.discarded_quotes == 1
+    assert feed.discarded_quotes == 2  # rejected quote + purged FIFO entry
+    assert feed.epoch_queue_discarded == 1
     assert not stream.healthy()
     assert feed.next_event(0) is None
