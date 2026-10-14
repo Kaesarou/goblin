@@ -2,6 +2,7 @@
 from collections import deque
 from datetime import UTC, datetime, timedelta
 from math import ceil
+import time
 
 from app.market.models import MarketSnapshot
 from app.v3.intents import RestingIntentBook
@@ -106,3 +107,21 @@ def test_microbatch_respects_stop_and_preserves_eToro_single_event_semantics():
     runtime._consume_market_data_cycle(runtime.live_market_data.next_event(0), now=now)
     assert len(runtime.live_market_data.events) == 9
     assert runtime.metrics["market_data_batch_cycles"] == 0
+
+
+def test_microbatch_time_budget_preempts_continuous_feed_before_maintenance():
+    runtime = fake_runtime(range(1000))
+    runtime.live_market_data.runtime_drain_max_seconds = 0.001
+    seen = []
+
+    def slow_handler(event, _):
+        seen.append(event)
+        time.sleep(0.005)
+
+    runtime._handle_event = slow_handler
+    runtime._consume_market_data_cycle(
+        runtime.live_market_data.next_event(0), now=datetime.now(UTC),
+    )
+    assert seen == [0]
+    assert runtime.metrics["market_data_batch_time_limited"] == 1
+    assert len(runtime.live_market_data.events) == 999
