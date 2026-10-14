@@ -235,7 +235,8 @@ def test_feed_drops_out_of_order_and_fails_closed_on_overload():
         feed._on_quote({**QUOTE, "t": "2026-09-25T14:00:01Z"})
     assert feed.queue_backpressure_events == 1
     assert feed.queue_overflows == 1
-    assert feed.discarded_quotes == 1
+    assert feed.discarded_quotes == 2  # rejected quote + purged FIFO entry
+    assert feed.epoch_queue_discarded == 1
     assert not feed.connection_healthy()
     assert feed.next_event(0) is None
 
