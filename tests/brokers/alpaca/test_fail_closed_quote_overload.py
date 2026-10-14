@@ -68,7 +68,7 @@ def test_old_stale_epoch_must_not_disconnect_new_socket():
     feed._stream._healthy = True
     feed._stream._applied = ("AAPL",)
     assert feed.next_event(0) is None
-    assert feed.connection_healthy()
+    assert feed.subscribed_symbols() == ("AAPL",)
     assert feed.stale_queue_events == 0
     assert feed.diagnostics()["disconnect_reasons"] == {}
     assert feed._on_quote({**QUOTE, "t": "2026-10-12T14:00:01Z"})
