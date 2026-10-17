@@ -30,7 +30,7 @@ from app.v3.close_recovery import (
 )
 from app.v3.execution import ProRataPartialCloseAllocator, assess_inventory_close
 from app.v3.external_account_gate import gate_active, record_external_broker_activity
-from app.v3.models import IntentPurpose, OrderIntent
+from app.v3.models import ExecutionStyle, IntentPurpose, OrderIntent
 from app.v3.open_economics import (
     OPEN_ECONOMICS_HALT_REASONS,
     OPEN_PRICE_MAX_DEVIATION_BP,
@@ -303,6 +303,49 @@ class V3BrokerExecutor:
             self._open_by_symbol.pop(symbol, None)
         self._unresolved_open_actions.discard(action)
 
+    def schedule_exceptional_close(self, *, snapshot: MarketSnapshot) -> bool:
+        """Close only an independently confirmed favorable outlier broker leg.
+
+        The durable open-action identity is reused across restarts. A rejected
+        or uncertain close never creates a second broker mutation blindly.
+        Callers must supply a fresh, session-valid accepted WebSocket quote.
+        """
+        if self.halted_reason not in {
+            "open_fill_economics_unresolved",
+            "open_fill_economics_unresolved_at_restart",
+            "open_account_notional_mismatch",
+            "open_account_notional_mismatch_at_restart",
+        }:
+            return False
+        for action, proof in sorted(self._open_economics.confirmed_outliers.items()):
+            if action not in self._open_economics.price_anomalies:
+                continue
+            if proof.get("symbol") != snapshot.symbol:
+                continue
+            pid = str(proof["position_id"])
+            inventory = self.book.active_for_symbol(snapshot.symbol)
+            if inventory is None:
+                continue
+            leg = next((item for item in inventory.broker_legs
+                        if item.position_id == pid and item.units > 0), None)
+            if leg is None:
+                continue
+            intent = OrderIntent(
+                intent_id=f"exceptional-close:{action}",
+                purpose=IntentPurpose.RISK_REDUCTION,
+                symbol=snapshot.symbol,
+                side="SELL",
+                notional=float(leg.units) * float(snapshot.bid),
+                created_at=_utc_now(),
+                execution_style=ExecutionStyle.MARKET,
+                inventory_id=inventory.inventory_id,
+                reduce_only=True,
+                metadata={"close_fraction_of_units": 1.0,
+                          "exceptional_position_id": pid},
+            )
+            return self._schedule_inventory_close(intent, snapshot=snapshot)
+        return False
+
     def _schedule_intent(self, intent: OrderIntent, *, snapshot: MarketSnapshot) -> bool:
         if intent.intent_id in self._pending_actions:
             return False
@@ -389,7 +432,11 @@ class V3BrokerExecutor:
         inventory = self.book.active_for_symbol(intent.symbol)
         if inventory is None:
             return False
-        if not inventory.economics_resolved and intent.purpose == IntentPurpose.PROFIT_EXIT:
+        if intent.purpose == IntentPurpose.PROFIT_EXIT and (
+            not inventory.economics_resolved
+            or any(proof.get("symbol") == inventory.symbol
+                   for proof in self._open_economics.confirmed_outliers.values())
+        ):
             return False
         assessment = assess_inventory_close(
             inventory=inventory,
@@ -402,6 +449,19 @@ class V3BrokerExecutor:
         if assessment is None:
             return False
         plan = assessment.plan
+        exceptional_pid = intent.metadata.get("exceptional_position_id")
+        if exceptional_pid is not None:
+            if intent.purpose != IntentPurpose.RISK_REDUCTION:
+                return False
+            selected = tuple(request for request in plan.requests
+                             if request.position_id == str(exceptional_pid)
+                             and request.full_close)
+            if len(selected) != 1:
+                return False
+            plan = replace(plan, requests=selected,
+                           target_units=selected[0].units,
+                           planned_units=selected[0].units,
+                           absolute_error_units=0.0)
         # A plan is pro-rata across its legs. Wait for an active mutation instead
         # of silently submitting only the currently unlocked subset of the plan.
         if any(request.position_id in self._active_close_mutations_by_position
@@ -772,7 +832,9 @@ class V3BrokerExecutor:
                 exits = sum(float(event.payload["units"]) for event in self.event_store.events()
                             if event.event_type in {"EXIT_FILLED", "EXIT_ECONOMICS_CONFIRMED"}
                             and str(event.payload.get("position_id")) == check.position_id)
-                if (price_unresolved or isinstance(closed, bool) or closed != 0.0
+                if ((price_unresolved
+                     and check.action_id not in self._open_economics.confirmed_outliers)
+                        or isinstance(closed, bool) or closed != 0.0
                         or not _units_close(exits, float(check.fill["units"]))):
                     self._record_open_economics_failure(check, "closed_exposure_not_proven")
                     continue
@@ -782,6 +844,40 @@ class V3BrokerExecutor:
                            "original_account_notional_resolved": False}
             else:
                 evidence = evidence_by_id.get(check.position_id)
+                if (price_unresolved
+                        and self._open_economics.validate(
+                            check, evidence, units_close=_units_close,
+                            allow_favorable_outlier=True,
+                        )
+                        and not price_sanity(evidence.entry_price,
+                                             check.fill.get("causal_quote") or {})):
+                    # Validated independently by the broker, but do not lift
+                    # the risk halt until an exact full close is confirmed.
+                    proof = {
+                        "action_id": check.action_id,
+                        "position_id": check.position_id,
+                        "symbol": check.fill["symbol"],
+                        "resolution": "broker_confirmed_favorable_outlier",
+                        "price": evidence.entry_price,
+                        "notional": evidence.account_notional,
+                        "units": evidence.units,
+                        "source": evidence.source,
+                        "broker_response": evidence.broker_response,
+                    }
+                    inserted = self._append(
+                        event_type="OPEN_EXCEPTIONAL_PRICE_CONFIRMED",
+                        inventory_id=check.inventory_id,
+                        event_id=f"{check.action_id}:exceptional-price-confirmed",
+                        payload=proof,
+                    )
+                    if inserted:
+                        self.book.reconcile_entry_economics(
+                            position_id=check.position_id, price=proof["price"],
+                            account_notional=proof["notional"],
+                            observed_at=_utc_now(), resolve_price=True,
+                        )
+                        self._open_economics.confirmed_outliers[check.action_id] = proof
+                    continue
                 if not self._open_economics.validate(check, evidence, units_close=_units_close):
                     self._record_open_economics_failure(check, "exact_economics_not_proven",
                                                         evidence=evidence)
@@ -805,6 +901,7 @@ class V3BrokerExecutor:
                         resolve_price=event_type == "OPEN_FILL_ECONOMICS_RECONCILED")
             self._notional_anomaly_action_ids.discard(check.action_id)
             self._open_economics.price_anomalies.discard(check.action_id)
+            self._open_economics.confirmed_outliers.pop(check.action_id, None)
             self._open_economics.reconciled += 1
         if (not self._notional_anomaly_action_ids and not self._open_economics.price_anomalies
                 and self.halted_reason in OPEN_ECONOMICS_HALT_REASONS):
