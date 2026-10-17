@@ -392,9 +392,12 @@ def test_quote_disconnect_rest_fallback_is_reduce_only_then_resubscribes(tmp_pat
         replacement = [s for s in harness.sockets if s.market][-1]
         assert replacement.sent[-1] == {"action": "subscribe", "quotes": ["AAPL", "SPY"]}
         assert not runtime._operational_entry_allowed("AAPL")  # transport alone is insufficient
-        runtime.intent_book.cancel_symbol("AAPL")
+        # Do NOT manually clear stale resting intents: epoch recovery must
+        # invalidate them before the new socket's first executable quote.
         for seconds in (83, 84, 85):
             harness.emit(runtime, seconds=seconds)
+        assert runtime.metrics["market_data_epoch_intent_invalidations"] >= 1
+        assert not runtime.intent_book.snapshot()
         assert runtime._operational_entry_allowed("AAPL")
         assert len(harness.api.submissions) == 2
 
