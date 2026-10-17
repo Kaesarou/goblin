@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import queue
+from collections import Counter
 from datetime import UTC, datetime
 
 from app.brokers.alpaca.schema import number, timestamp
@@ -130,6 +131,10 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
             diagnostics_context=self._queue_diagnostics,
         )
         self.invalid_quotes = self.ordering_drops = self.queue_overflows = 0
+        self.ordering_equal_timestamps = 0
+        self.ordering_older_timestamps = 0
+        self.ordering_old_epoch = 0
+        self.ordering_by_symbol: Counter[str] = Counter()
         self.queue_high_watermark = self.discarded_quotes = 0
         self.queue_backpressure_events = 0
         self.queue_backpressure_wait_seconds = 0.0
@@ -209,6 +214,7 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
         if (not self._stream.subscribed_symbols()
                 or event.connection_id != str(self._stream.connections)):
             self.ordering_drops += 1
+            self.ordering_old_epoch += 1
             self.discarded_quotes += 1
             return None
         age = max(0.0, (datetime.now(UTC) - event.received_at).total_seconds())
@@ -244,6 +250,10 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
             "mode": "alpaca_websocket",
             "invalid_quotes": self.invalid_quotes,
             "ordering_drops": self.ordering_drops,
+            "ordering_equal_timestamps": self.ordering_equal_timestamps,
+            "ordering_older_timestamps": self.ordering_older_timestamps,
+            "ordering_old_epoch": self.ordering_old_epoch,
+            "ordering_by_symbol": dict(sorted(self.ordering_by_symbol.items())),
             **self._queue_diagnostics(),
             "trade_updates": self._trade_stream.diagnostics() if self._trade_stream else None,
         }
@@ -261,6 +271,11 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
         previous = self._last_timestamp.get(symbol)
         if previous is not None and snapshot.timestamp <= previous:
             self.ordering_drops += 1
+            self.ordering_by_symbol[symbol] += 1
+            if snapshot.timestamp == previous:
+                self.ordering_equal_timestamps += 1
+            else:
+                self.ordering_older_timestamps += 1
             return False
         event = MarketDataEvent(
             symbol,
