@@ -21,6 +21,7 @@ class FavorablePriceBroker:
     @staticmethod
     def attach(broker):
         broker.close_calls = []
+        broker.forget_position_instrument = lambda position_id: None
 
         def close_position(position_id, units_to_deduct=None):
             broker.close_calls.append((position_id, units_to_deduct))
@@ -78,7 +79,7 @@ def test_favorable_price_is_verified_then_fully_closed_and_rearmed(tmp_path):
 def test_unproved_outlier_never_triggers_close(tmp_path):
     executor, broker, store, _, quote = setup_executor(tmp_path)
     FavorablePriceBroker.attach(broker)
-    broker.evidence = {"p1": evidence(price=56.02)}
+    broker.evidence = {"p1": evidence(price=52.0)}
     assert executor._schedule_open_economics_revalidation(NOW)
     executor.drain()
     assert not executor.schedule_exceptional_close(snapshot=quote)
