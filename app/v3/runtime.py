@@ -501,6 +501,17 @@ class GoblinV3Runtime:
         )
 
         fresh_for_entry = self._entry_quote_fresh(snapshot, now=now)
+        # Exceptional eToro broker fills are an execution recovery operation,
+        # not Point-M trading. Use only accepted, fresh, session-valid quotes.
+        if (session is not None and session.session_active
+                and session_allows_new_risk and fresh_for_entry
+                and self.coordinator.entry_allowed(symbol)
+                and self.executor.schedule_exceptional_close(snapshot=snapshot)):
+            self.metrics["orders_submitted"] += 1
+            self.trade_journal.write("v3_exceptional_broker_close_submitted", {
+                "symbol": symbol, "timestamp": snapshot.timestamp,
+                "bid": snapshot.bid, "source": event.source.value,
+            })
         for intent in self.intent_book.triggered(snapshot):
             if self._stop_requested:
                 break
@@ -1547,7 +1558,33 @@ class GoblinV3Runtime:
         }
 
     def _heartbeat_metrics(self) -> dict[str, object]:
+        inventory_observability = []
+        observed_at = datetime.now(UTC)
+        for inventory in self._active_inventories():
+            latest = self.latest_snapshots.get(inventory.symbol)
+            bid = latest.bid if latest is not None else None
+            inventory_observability.append({
+                "symbol": inventory.symbol,
+                "inventory_id": inventory.inventory_id,
+                "age_hours": round(max(0.0, (observed_at - inventory.opened_at).total_seconds()) / 3600, 2),
+                "entry_fill_count": inventory.entry_fill_count,
+                "profit_exit_fill_count": inventory.profit_exit_fill_count,
+                "units": inventory.total_units,
+                "account_notional": inventory.total_notional,
+                "average_entry_price": inventory.average_entry_price,
+                "last_bid": bid,
+                "unrealized_price_units_proxy": (
+                    (bid - inventory.average_entry_price) * inventory.total_units
+                    if bid is not None else None
+                ),
+                "mfe_pct": inventory.mfe_pct,
+                "mae_pct": inventory.mae_pct,
+                "trailing_max_since_open": inventory.trailing_max_since_open,
+                "trailing_min_since_max": inventory.trailing_min_since_max,
+                "entry_economics_resolved": inventory.economics_resolved,
+            })
         return {
+            "active_inventory_observability": inventory_observability,
             **self.metrics,
             "decision_reason_counts": dict(
                 sorted(self._decision_reason_counts.items())
