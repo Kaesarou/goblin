@@ -1581,6 +1581,12 @@ class GoblinV3Runtime:
         for inventory in self._active_inventories():
             latest = self.latest_snapshots.get(inventory.symbol)
             bid = latest.bid if latest is not None else None
+            resting_exits = [
+                intent for intent in self.intent_book.snapshot()
+                if intent.symbol == inventory.symbol
+                and intent.side.upper() == "SELL"
+                and intent.limit_price is not None
+            ]
             inventory_observability.append({
                 "symbol": inventory.symbol,
                 "inventory_id": inventory.inventory_id,
@@ -1591,6 +1597,13 @@ class GoblinV3Runtime:
                 "account_notional": inventory.total_notional,
                 "average_entry_price": inventory.average_entry_price,
                 "last_bid": bid,
+                "active_resting_sell_limits": sorted(float(intent.limit_price)
+                                                      for intent in resting_exits),
+                "resting_sell_required_bid_improvement_bp": (
+                    min((float(intent.limit_price) / bid - 1.0) * 10_000
+                        for intent in resting_exits)
+                    if bid is not None and bid > 0 and resting_exits else None
+                ),
                 "unrealized_price_units_proxy": (
                     (bid - inventory.average_entry_price) * inventory.total_units
                     if bid is not None else None
