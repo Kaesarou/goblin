@@ -101,6 +101,34 @@ def test_exceptional_close_targets_only_the_affected_leg(tmp_path):
     assert not executor.new_risk_allowed
 
 
+def test_accepted_exceptional_close_is_not_resubmitted_after_restart(tmp_path):
+    executor, broker, store, _, quote = setup_executor(
+        tmp_path, price=53.0, ask=56.02, notional=300.0,
+    )
+    broker.evidence = {"p1": evidence(price=53.0)}
+    assert executor._schedule_open_economics_revalidation(NOW)
+    executor.drain()
+    submissions = []
+
+    def close_position(position_id, units_to_deduct=None):
+        submissions.append((position_id, units_to_deduct))
+        return ClosePositionSubmission(
+            position_id, "close-pending-1", None, NOW, NOW, {},
+        )
+
+    broker.close_position = close_position
+    assert executor.schedule_exceptional_close(snapshot=quote)
+    executor.drain()
+    assert submissions == [("p1", None)]
+    assert any(e.event_type == "CLOSE_SUBMISSION_ACCEPTED" for e in store.events())
+
+    recovered = restart(executor, broker, store)
+    recovered.restore_pending_close_confirmations(store.events())
+    assert not recovered.new_risk_allowed
+    assert not recovered.schedule_exceptional_close(snapshot=quote)
+    assert submissions == [("p1", None)]
+
+
 def test_unproved_outlier_never_triggers_close(tmp_path):
     executor, broker, store, _, quote = setup_executor(tmp_path)
     FavorablePriceBroker.attach(broker)
