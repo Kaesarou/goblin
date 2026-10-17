@@ -47,6 +47,41 @@ def test_outage_with_ack_but_no_quotes_triggers_silence(monkeypatch):
     assert [item["action"] for item in socket.sent] == ["auth", "subscribe"]
 
 
+def test_eighty_minute_silence_recovers_without_new_entry_authority(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("app.brokers.alpaca.stream.time.monotonic", lambda: clock[0])
+    stream = AlpacaStream(
+        api_key="key", secret_key="secret", on_message=lambda _: True, feed="iex",
+    )
+
+    def outage_socket(_):
+        return ScriptedSocket(clock, acknowledged() + [(16, TimeoutError())])
+
+    def fake_backoff(delay):
+        clock[0] += delay
+        if clock[0] - 100 >= 80 * 60:
+            stream._stop.set()
+
+    stream._connector = outage_socket
+    monkeypatch.setattr(stream._stop, "wait", fake_backoff)
+    stream.update_symbols(["AAPL"])
+    stream._run()
+    assert stream.connections > 20
+    assert stream.diagnostics()["disconnect_reasons"]["quotes_silent"] > 20
+    assert stream.diagnostics()["reconnect_delay_seconds"] <= 30
+    assert not stream.fresh_quotes_healthy()
+
+    stream._stop.clear()
+    recovery = ScriptedSocket(
+        clock, acknowledged() + [(0, [QUOTE]), (0, ConnectionError("end"))],
+    )
+    stream._connector = lambda _: recovery
+    with pytest.raises(ConnectionError, match="end"):
+        stream._connection(("AAPL",))
+    assert stream.fresh_quotes_healthy()
+    assert stream.diagnostics()["market_data_phase"] == "live"
+
+
 def test_quote_rejection_reasons_preserve_strict_ordering():
     feed = AlpacaMarketDataFeed(api_key="key", secret_key="secret")
     feed._stream._healthy = True
