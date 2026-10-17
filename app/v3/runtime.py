@@ -155,6 +155,7 @@ class GoblinV3Runtime:
         )
 
         self.latest_snapshots: dict[str, MarketSnapshot] = {}
+        self._last_live_connection_by_symbol: dict[str, str] = {}
         self._last_session_snapshots: dict[str, MarketSnapshot] = {}
         self.latest_features: dict[str, OnlineFeatureSnapshot] = {}
         self.session_decisions: dict[str, object] = {}
@@ -188,6 +189,7 @@ class GoblinV3Runtime:
             "intents_planned": 0,
             "orders_submitted": 0,
             "market_data_rejected": 0,
+            "market_data_epoch_intent_invalidations": 0,
             "market_data_batch_cycles": 0,
             "market_data_batch_events": 0,
             "market_data_batch_max": 0,
@@ -463,6 +465,18 @@ class GoblinV3Runtime:
 
         self._record_market_quality_recovery(symbol=symbol, source=event.source)
         self.coordinator.mark_accepted(event)
+        if (self.live_market_data.requires_websocket_health
+                and event.source == MarketDataSource.WEBSOCKET
+                and event.connection_id is not None):
+            # An old resting limit is not allowed to cross on the replacement
+            # socket's first fresh quote after an unobserved price gap.
+            previous_epoch = self._last_live_connection_by_symbol.get(symbol)
+            if previous_epoch is not None and previous_epoch != event.connection_id:
+                self._replace_resting_intents(
+                    symbol, (), reason="market_data_epoch_changed",
+                )
+                self.metrics["market_data_epoch_intent_invalidations"] += 1
+            self._last_live_connection_by_symbol[symbol] = event.connection_id
         self.latest_snapshots[symbol] = snapshot
         self.market_context_service.observe_accepted_snapshot(snapshot)
         self.fallback_validator.observe_accepted(snapshot)
