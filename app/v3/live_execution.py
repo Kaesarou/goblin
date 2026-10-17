@@ -343,7 +343,8 @@ class V3BrokerExecutor:
                 metadata={"close_fraction_of_units": 1.0,
                           "exceptional_position_id": pid},
             )
-            return self._schedule_inventory_close(intent, snapshot=snapshot)
+            if self._schedule_inventory_close(intent, snapshot=snapshot):
+                return True
         return False
 
     def _schedule_intent(self, intent: OrderIntent, *, snapshot: MarketSnapshot) -> bool:
