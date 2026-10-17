@@ -1264,8 +1264,12 @@ class GoblinV3Runtime:
         )
 
     def _transport_entry_allowed(self) -> bool:
-        return (not self.live_market_data.requires_websocket_health
-                or self.live_market_data.connection_healthy())
+        if not self.live_market_data.requires_websocket_health:
+            return True
+        executable = getattr(self.live_market_data, "executable_connection_healthy", None)
+        if callable(executable):
+            return bool(executable())
+        return self.live_market_data.connection_healthy()
 
     def _symbol_risk_authority(self, symbol: str) -> dict[str, object]:
         session = self.session_decisions.get(symbol)
