@@ -80,8 +80,6 @@ class OpenEconomicsRecovery:
             iid, payload = fill
             pid = str(payload["position_id"])
             current_units = legs[pid].units if pid in legs else 0.0
-            if current_units > 0 and action in self.confirmed_outliers:
-                continue
             checks.append(OpenEconomicsCheck(action, iid, pid,
                                             current_units, payload))
         return tuple(checks)
