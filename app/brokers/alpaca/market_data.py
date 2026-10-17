@@ -244,6 +244,9 @@ class AlpacaMarketDataFeed(LiveMarketDataFeed):
     def connection_healthy(self) -> bool:
         return self._stream.healthy()
 
+    def executable_connection_healthy(self) -> bool:
+        return self._stream.fresh_quotes_healthy()
+
     def diagnostics(self) -> dict:
         return {
             **self._stream.diagnostics(),
