@@ -796,9 +796,19 @@ class V3BrokerExecutor:
                 if check.position_id not in local_evidence
             )
             remote_evidence = lookup(remote_ids) if remote_ids else {}
+            # Persisted eToro order evidence alone cannot prove the position
+            # is still open at the broker. A fresh portfolio units read is
+            # mandatory for exceptional-price confirmation from that source.
+            verify_ids = tuple(check.position_id for check in active_checks
+                               if check.position_id in local_evidence
+                               and check.action_id in self._open_economics.price_anomalies
+                               and local_evidence[check.position_id].source
+                               == "etoro_order_convergent_account_exposure")
+            observed_ids = tuple(sorted(set(closed + verify_ids)))
             return (
                 {**remote_evidence, **local_evidence},
-                self.broker.get_open_position_units(closed) if closed else {},
+                self.broker.get_open_position_units(observed_ids)
+                if observed_ids else {},
             )
 
         self.task_runner.submit(kind="v3_open_economics_revalidation",
@@ -849,6 +859,14 @@ class V3BrokerExecutor:
                         and self._open_economics.validate(
                             check, evidence, units_close=_units_close,
                             allow_favorable_outlier=True,
+                            verified_live_units=(
+                                not isinstance(closed_units.get(check.position_id), bool)
+                                and positive_number(closed_units.get(check.position_id))
+                                and _units_close(
+                                    closed_units[check.position_id],
+                                    check.current_units,
+                                )
+                            ),
                         )
                         and not price_sanity(evidence.entry_price,
                                              check.fill.get("causal_quote") or {})):
