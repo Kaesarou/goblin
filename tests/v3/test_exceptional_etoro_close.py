@@ -161,6 +161,45 @@ def test_persisted_etoro_execution_requires_fresh_live_broker_units(tmp_path):
     assert not executor.new_risk_allowed
 
 
+def test_confirmed_partial_exceptional_close_creates_new_durable_leg_action(tmp_path):
+    executor, broker, store, _, quote = setup_executor(
+        tmp_path, price=53.0, ask=56.02, notional=300.0,
+    )
+    FavorablePriceBroker.attach(broker)
+    broker.evidence = {"p1": evidence(price=53.0)}
+    assert executor._schedule_open_economics_revalidation(NOW)
+    executor.drain()
+
+    def accepted_close(position_id, units_to_deduct=None):
+        broker.close_calls.append((position_id, units_to_deduct))
+        return ClosePositionSubmission(
+            position_id, f"accepted-{len(broker.close_calls)}", None,
+            NOW, NOW, {},
+        )
+
+    broker.close_position = accepted_close
+    assert executor.schedule_exceptional_close(snapshot=quote)
+    executor.drain()
+    first = next(iter(executor._active_close_context_by_action.values()))
+    assert first.action_id.endswith(":0:p1")
+    assert executor._confirm_close(
+        context=first, exit_price=56.0, filled_at=NOW,
+        close_order_id="accepted-1", executed_units=1.0,
+    )
+    assert executor.book.active_for_symbol("IFX.DE").total_units == pytest.approx(2.0)
+    assert executor.schedule_exceptional_close(snapshot=quote)
+    executor.drain()
+    second = next(iter(executor._active_close_context_by_action.values()))
+    assert second.action_id.endswith(":1:p1")
+    assert broker.close_calls == [("p1", None), ("p1", None)]
+    assert not executor.schedule_exceptional_close(snapshot=quote)
+
+    recovered = restart(executor, broker, store)
+    recovered.restore_pending_close_confirmations(store.events())
+    assert not recovered.schedule_exceptional_close(snapshot=quote)
+    assert broker.close_calls == [("p1", None), ("p1", None)]
+
+
 def test_unproved_outlier_never_triggers_close(tmp_path):
     executor, broker, store, _, quote = setup_executor(tmp_path)
     FavorablePriceBroker.attach(broker)
