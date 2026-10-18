@@ -330,8 +330,19 @@ class V3BrokerExecutor:
                         if item.position_id == pid and item.units > 0), None)
             if leg is None:
                 continue
+            # Every *confirmed* partial close advances the durable action
+            # identity. Pending/unknown outcomes retain their original ID,
+            # preventing blind resubmission after crash or timeout.
+            confirmed_steps = sum(
+                1 for event in self.event_store.events()
+                if event.event_type in {"EXIT_FILLED", "EXIT_ECONOMICS_CONFIRMED"}
+                and str(event.payload.get("position_id")) == pid
+                and str(event.payload.get("action_id", "")).startswith(
+                    f"exceptional-close:{action}:"
+                )
+            )
             intent = OrderIntent(
-                intent_id=f"exceptional-close:{action}",
+                intent_id=f"exceptional-close:{action}:{confirmed_steps}",
                 purpose=IntentPurpose.RISK_REDUCTION,
                 symbol=snapshot.symbol,
                 side="SELL",
