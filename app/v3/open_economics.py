@@ -93,7 +93,10 @@ class OpenEconomicsRecovery:
         return {"action_id": check.action_id, "position_id": check.position_id,
                 "attempt_count": count, "next_attempt_at": deadline.isoformat()}
 
-    def validate(self, check, evidence, *, units_close, allow_favorable_outlier=False):
+    def validate(
+        self, check, evidence, *, units_close, allow_favorable_outlier=False,
+        verified_live_units=False,
+    ):
         if (not isinstance(evidence, BrokerPositionEconomics)
                 or evidence.position_id != check.position_id
                 or not evidence.source
@@ -122,7 +125,13 @@ class OpenEconomicsRecovery:
             raw_price = check.fill.get("broker_raw_price")
             ask = (check.fill.get("causal_quote") or {}).get("ask")
             return (
-                evidence.source == "etoro_exact_pnl_position_usd"
+                (
+                    evidence.source == "etoro_exact_pnl_position_usd"
+                    or (
+                        evidence.source == "etoro_order_convergent_account_exposure"
+                        and verified_live_units
+                    )
+                )
                 and positive_number(raw_price) and positive_number(ask)
                 and float(raw_price) < float(ask) * (
                     1 - OPEN_PRICE_MAX_DEVIATION_BP / 10_000
