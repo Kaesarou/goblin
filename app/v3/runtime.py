@@ -155,6 +155,7 @@ class GoblinV3Runtime:
         )
 
         self.latest_snapshots: dict[str, MarketSnapshot] = {}
+        self._last_live_connection_by_symbol: dict[str, str] = {}
         self._last_session_snapshots: dict[str, MarketSnapshot] = {}
         self.latest_features: dict[str, OnlineFeatureSnapshot] = {}
         self.session_decisions: dict[str, object] = {}
@@ -188,6 +189,7 @@ class GoblinV3Runtime:
             "intents_planned": 0,
             "orders_submitted": 0,
             "market_data_rejected": 0,
+            "market_data_epoch_intent_invalidations": 0,
             "market_data_batch_cycles": 0,
             "market_data_batch_events": 0,
             "market_data_batch_max": 0,
@@ -463,6 +465,18 @@ class GoblinV3Runtime:
 
         self._record_market_quality_recovery(symbol=symbol, source=event.source)
         self.coordinator.mark_accepted(event)
+        if (self.live_market_data.requires_websocket_health
+                and event.source == MarketDataSource.WEBSOCKET
+                and event.connection_id is not None):
+            # An old resting limit is not allowed to cross on the replacement
+            # socket's first fresh quote after an unobserved price gap.
+            previous_epoch = self._last_live_connection_by_symbol.get(symbol)
+            if previous_epoch is not None and previous_epoch != event.connection_id:
+                self._replace_resting_intents(
+                    symbol, (), reason="market_data_epoch_changed",
+                )
+                self.metrics["market_data_epoch_intent_invalidations"] += 1
+            self._last_live_connection_by_symbol[symbol] = event.connection_id
         self.latest_snapshots[symbol] = snapshot
         self.market_context_service.observe_accepted_snapshot(snapshot)
         self.fallback_validator.observe_accepted(snapshot)
@@ -501,6 +515,17 @@ class GoblinV3Runtime:
         )
 
         fresh_for_entry = self._entry_quote_fresh(snapshot, now=now)
+        # Exceptional eToro broker fills are an execution recovery operation,
+        # not Point-M trading. Use only accepted, fresh, session-valid quotes.
+        if (session is not None and session.session_active
+                and session_allows_new_risk and fresh_for_entry
+                and self.coordinator.entry_allowed(symbol)
+                and self.executor.schedule_exceptional_close(snapshot=snapshot)):
+            self.metrics["orders_submitted"] += 1
+            self.trade_journal.write("v3_exceptional_broker_close_submitted", {
+                "symbol": symbol, "timestamp": snapshot.timestamp,
+                "bid": snapshot.bid, "source": event.source.value,
+            })
         for intent in self.intent_book.triggered(snapshot):
             if self._stop_requested:
                 break
@@ -1253,8 +1278,12 @@ class GoblinV3Runtime:
         )
 
     def _transport_entry_allowed(self) -> bool:
-        return (not self.live_market_data.requires_websocket_health
-                or self.live_market_data.connection_healthy())
+        if not self.live_market_data.requires_websocket_health:
+            return True
+        executable = getattr(self.live_market_data, "executable_connection_healthy", None)
+        if callable(executable):
+            return bool(executable())
+        return self.live_market_data.connection_healthy()
 
     def _symbol_risk_authority(self, symbol: str) -> dict[str, object]:
         session = self.session_decisions.get(symbol)
@@ -1547,7 +1576,46 @@ class GoblinV3Runtime:
         }
 
     def _heartbeat_metrics(self) -> dict[str, object]:
+        inventory_observability = []
+        observed_at = datetime.now(UTC)
+        for inventory in self._active_inventories():
+            latest = self.latest_snapshots.get(inventory.symbol)
+            bid = latest.bid if latest is not None else None
+            resting_exits = [
+                intent for intent in self.intent_book.snapshot()
+                if intent.symbol == inventory.symbol
+                and intent.side.upper() == "SELL"
+                and intent.limit_price is not None
+            ]
+            inventory_observability.append({
+                "symbol": inventory.symbol,
+                "inventory_id": inventory.inventory_id,
+                "age_hours": round(max(0.0, (observed_at - inventory.opened_at).total_seconds()) / 3600, 2),
+                "entry_fill_count": inventory.entry_fill_count,
+                "profit_exit_fill_count": inventory.profit_exit_fill_count,
+                "units": inventory.total_units,
+                "account_notional": inventory.total_notional,
+                "average_entry_price": inventory.average_entry_price,
+                "last_bid": bid,
+                "active_resting_sell_limits": sorted(float(intent.limit_price)
+                                                      for intent in resting_exits),
+                "resting_sell_required_bid_improvement_bp": (
+                    min((float(intent.limit_price) / bid - 1.0) * 10_000
+                        for intent in resting_exits)
+                    if bid is not None and bid > 0 and resting_exits else None
+                ),
+                "unrealized_price_units_proxy": (
+                    (bid - inventory.average_entry_price) * inventory.total_units
+                    if bid is not None else None
+                ),
+                "mfe_pct": inventory.mfe_pct,
+                "mae_pct": inventory.mae_pct,
+                "trailing_max_since_open": inventory.trailing_max_since_open,
+                "trailing_min_since_max": inventory.trailing_min_since_max,
+                "entry_economics_resolved": inventory.economics_resolved,
+            })
         return {
+            "active_inventory_observability": inventory_observability,
             **self.metrics,
             "decision_reason_counts": dict(
                 sorted(self._decision_reason_counts.items())

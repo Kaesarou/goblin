@@ -87,7 +87,11 @@ def test_backoff_resets_only_after_stable_usable_quotes(monkeypatch, caplog, mod
     assert waits == [1, 2, 4, 8, 16, 30, expected_last_delay]
     assert [m["action"] for m in sockets[0].sent] == ["auth", "subscribe"]
     diagnostic = stream.diagnostics()
-    assert diagnostic["disconnect_reasons"] == {"network_error": 7}
+    # Accepted data gone silent while invalid frames kept arriving: the new
+    # quote-authority guard correctly isolates this from transport failure.
+    expected = ({"network_error": 6, "quotes_silent": 1}
+                if mode == "valid_then_invalid" else {"network_error": 7})
+    assert diagnostic["disconnect_reasons"] == expected
     assert diagnostic["last_disconnect"]["retry_delay_seconds"] == expected_last_delay
     assert "secret-key" not in caplog.text
     assert "secret-value" not in json.dumps(diagnostic) + caplog.text

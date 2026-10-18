@@ -63,6 +63,14 @@ class InventoryBook:
                     filled_at=event.occurred_at,
                     economics_resolved=payload.get("economics_status") != "ECONOMICS_UNRESOLVED",
                 )
+            elif event.event_type == "OPEN_EXCEPTIONAL_PRICE_CONFIRMED":
+                book.reconcile_entry_economics(
+                    position_id=str(event.payload["position_id"]),
+                    price=float(event.payload["price"]),
+                    account_notional=float(event.payload["notional"]),
+                    observed_at=event.occurred_at,
+                    resolve_price=True,
+                )
             elif event.event_type in {"OPEN_ACCOUNT_NOTIONAL_RECONCILED", "OPEN_FILL_ECONOMICS_RECONCILED"}:
                 if event.payload.get("resolution") != "confirmed_closed_exposure":
                     book.reconcile_entry_economics(

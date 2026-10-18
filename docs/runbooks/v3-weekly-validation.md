@@ -24,8 +24,10 @@ Read-only revalidation uses one governed P&L GET for the affected open positions
 It verifies exact position identity, cached instrument, BUY/1x, current broker
 units, `openRate` and USD `amount`. If the opening order identity is retained,
 P&L `orderId` must match **positionExecutions.openingData.orderId**, not the
-distinct top-level order-lookup identity. A corrected price must still pass the
-original causal price alarm. Missing/ambiguous/invalid responses keep the halt.
+distinct top-level order-lookup identity. A corrected price that returns to normal must pass the original causal price
+alarm. A separately corroborated exceptionally favorable price follows the
+controlled full-close procedure below. Missing/ambiguous/invalid responses keep
+the halt.
 The suspect price is never replaced by the quote as broker economic truth.
 
 Successful proof appends `OPEN_FILL_ECONOMICS_RECONCILED` and/or
@@ -38,7 +40,8 @@ Retry deadlines are committed to the append-only SQLite ledger **before** GET
 dispatch. Backoff is 60, 120, 240, then 300 seconds; restart preserves deadlines.
 The shared query lane prioritizes active close mutations, periodic quantity
 reconciliation, open-economics recovery, then historical close economics. No
-recovery step sends an open or close mutation.
+read-only recovery GET sends a mutation; the exceptional close is a separate
+explicit reduce-only execution task.
 
 ## Resolved exposure is distinct from resolved historical economics
 
@@ -48,10 +51,53 @@ absence from P&L, a timeout, or local flatness cannot rearm BUY. This event carr
 `resolution=confirmed_closed_exposure` and
 `original_account_notional_resolved=false`: it removes an obsolete **risk**
 block, without certifying the original invested principal or rewriting S2 P&L.
-Closed price anomalies remain unresolved until original economics can be proven.
+Closed price anomalies without independent exact original-price proof remain
+unresolved and blocked; a broker-confirmed favorable fill can be cleared only
+after the complete close ledger and exact zero-unit broker observation.
 
 Legacy active $1 account-notional fills restore conservative requested exposure
 without altering their original immutable events.
+
+## Confirmed exceptionally favorable eToro execution
+
+An outlier is **not** automatically a trading opportunity or proof of profit.
+Only an abnormally **favorable** raw fill with an independent authoritative
+`etoro_exact_pnl_position_usd` response matching the same position, opening
+order identity, units, price and plausible account notional is eligible for
+automatic exception handling. Unfavorable, missing, conflicting or unverifiable
+fills remain quarantined. The broker's actual favorable price is preserved as
+cost-basis evidence; the original causal quote stays in the audit journal.
+
+The durable `OPEN_EXCEPTIONAL_PRICE_CONFIRMED` event does **not** clear BUY
+authority. On a fresh accepted in-session WebSocket quote, V3 schedules a
+reduce-only **100% close of only that physical position_id**, without changing
+Point-M's 84% normal close geometry or another leg's exposure. The close action
+identity is stable across restarts. A pending or unknown submission cannot be
+resubmitted blindly; broker close acceptance alone is not a fill.
+
+Even after a confirmed full close, BUY authority remains disabled until
+broker portfolio reads prove **exact zero units**, all closed units are
+attributed by durable `EXIT_FILLED` / `EXIT_ECONOMICS_CONFIRMED` events, and
+no independent halt survives. Later corrected independent broker evidence may
+supersede a preliminary outlier report; it must still pass the normal causal
+sanity check. Journal-based realized economics must never be called confirmed
+net P&L without matched broker cost/FX evidence.
+
+## Alpaca market-data outage
+
+Distinguish transport subscription/health from **accepted quote readiness**.
+`market_data_phase` and `fresh_quotes_healthy` describe recovery and gate
+new BUYs. The first accepted quote from a replacement connection retires old
+resting intents rather than executing stale crosses. Exit-only reconciliations,
+heartbeats and broker maintenance continue. No REST diagnostic quote is promoted
+to executable market evidence. The bounded FIFO, 128-event/25-ms runtime budget,
+IEX subscription and Point-M settings are unchanged.
+
+`ordering_equal_timestamps`, `ordering_older_timestamps`, and
+`ordering_old_epoch` distinguish causes of dropped quotes; no drop filter is
+disabled without empirical evidence. Heartbeats now include active inventory
+age, exposure, gross price-times-units proxy, MFE/MAE and resting SELL
+limit-to-bid distance. That proxy is **not** account-currency net P&L.
 
 ## Partial-close contract
 
