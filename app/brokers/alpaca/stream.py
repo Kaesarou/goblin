@@ -141,6 +141,7 @@ class AlpacaStream:
             # fresh quote. Per-symbol coordinator freshness still blocks entry
             # authority until that quote is actually accepted.
             self._last_data = time.monotonic()
+            self._last_accepted_data = None
             self._stable_since = None
             self._backoff_reset_ready = False
 
@@ -148,10 +149,19 @@ class AlpacaStream:
         return self._data_expected
 
     def healthy(self) -> bool:
+        # Transport status, retained for diagnostics and existing maintenance.
         return self._healthy and (
             not self._market
             or not self._data_expected
             or time.monotonic() - self._last_data < self._silence_seconds
+        )
+
+    def fresh_quotes_healthy(self) -> bool:
+        # Only accepted quotes in the active epoch grant entry authority.
+        return self._healthy and (
+            not self._market or not self._data_expected
+            or (self._last_accepted_data is not None
+                and time.monotonic() - self._last_accepted_data < self._silence_seconds)
         )
 
     def subscribed_symbols(self) -> tuple[str, ...]:
@@ -160,7 +170,17 @@ class AlpacaStream:
     def diagnostics(self) -> dict:
         return {
             "healthy": self.healthy(),
+            "market_data_phase": (
+                "disconnected" if not self._healthy else
+                "idle" if not self._market or not self._data_expected else
+                "live" if self.fresh_quotes_healthy() else "recovering"
+            ),
+            "fresh_quotes_healthy": self.fresh_quotes_healthy(),
             "data_expected": self._data_expected,
+            "accepted_quote_age_seconds": (
+                round(max(0.0, time.monotonic() - self._last_accepted_data), 3)
+                if self._last_accepted_data is not None else None
+            ),
             "connections": self.connections,
             "last_error": self._last_error,
             "fatal": self._fatal is not None,
@@ -261,7 +281,11 @@ class AlpacaStream:
                     self._market
                     and self._healthy
                     and self._data_expected
-                    and not self.healthy()
+                    and not self.fresh_quotes_healthy()
+                    and (time.monotonic() - (
+                        self._last_accepted_data if self._last_accepted_data is not None
+                        else self._last_data
+                    ) >= self._silence_seconds)
                 ):
                     raise StreamFailure("quotes_silent")
                 if (self.healthy() and self._stable_since is not None

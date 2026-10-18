@@ -44,6 +44,7 @@ class OpenEconomicsRecovery:
     def __init__(self, events):
         self.fills: dict[str, tuple[str, dict]] = {}
         self.price_anomalies: set[str] = set()
+        self.confirmed_outliers: dict[str, dict] = {}
         self.retries: dict[str, tuple[int, datetime]] = {}
         self.in_flight = False
         self.attempts = 0
@@ -55,8 +56,11 @@ class OpenEconomicsRecovery:
                 self.fills[action] = (event.inventory_id, event.payload)
                 if event.payload.get("economics_status") == "ECONOMICS_UNRESOLVED":
                     self.price_anomalies.add(action)
+            elif event.event_type == "OPEN_EXCEPTIONAL_PRICE_CONFIRMED":
+                self.confirmed_outliers[action] = event.payload
             elif event.event_type == "OPEN_FILL_ECONOMICS_RECONCILED":
                 self.price_anomalies.discard(action)
+                self.confirmed_outliers.pop(action, None)
             elif event.event_type == "OPEN_ECONOMICS_REVALIDATION_STARTED":
                 self.retries[action] = (
                     int(event.payload["attempt_count"]),
@@ -75,9 +79,9 @@ class OpenEconomicsRecovery:
                 continue  # Missing ledger attribution is never guessed.
             iid, payload = fill
             pid = str(payload["position_id"])
+            current_units = legs[pid].units if pid in legs else 0.0
             checks.append(OpenEconomicsCheck(action, iid, pid,
-                                            legs[pid].units if pid in legs else 0.0,
-                                            payload))
+                                            current_units, payload))
         return tuple(checks)
 
     def reserve(self, check, now):
@@ -89,7 +93,10 @@ class OpenEconomicsRecovery:
         return {"action_id": check.action_id, "position_id": check.position_id,
                 "attempt_count": count, "next_attempt_at": deadline.isoformat()}
 
-    def validate(self, check, evidence, *, units_close):
+    def validate(
+        self, check, evidence, *, units_close, allow_favorable_outlier=False,
+        verified_live_units=False,
+    ):
         if (not isinstance(evidence, BrokerPositionEconomics)
                 or evidence.position_id != check.position_id
                 or not evidence.source
@@ -113,7 +120,25 @@ class OpenEconomicsRecovery:
         if order_id is not None and str(evidence.broker_response.get("orderId")) != str(order_id):
             return False
         if check.action_id in self.price_anomalies:
-            return price_sanity(evidence.entry_price, check.fill.get("causal_quote") or {})
+            if not allow_favorable_outlier:
+                return price_sanity(evidence.entry_price, check.fill.get("causal_quote") or {})
+            raw_price = check.fill.get("broker_raw_price")
+            ask = (check.fill.get("causal_quote") or {}).get("ask")
+            return (
+                (
+                    evidence.source == "etoro_exact_pnl_position_usd"
+                    or (
+                        evidence.source == "etoro_order_convergent_account_exposure"
+                        and verified_live_units
+                    )
+                )
+                and positive_number(raw_price) and positive_number(ask)
+                and float(raw_price) < float(ask) * (
+                    1 - OPEN_PRICE_MAX_DEVIATION_BP / 10_000
+                )
+                and math.isclose(float(evidence.entry_price), float(raw_price),
+                                 rel_tol=1e-4, abs_tol=1e-8)
+            )
         return True
 
     def metrics(self):
@@ -121,4 +146,5 @@ class OpenEconomicsRecovery:
                 "open_economics_revalidation_attempts": self.attempts,
                 "open_economics_revalidation_failures": self.failures,
                 "open_economics_reconciled": self.reconciled,
-                "open_economics_revalidation_in_flight": self.in_flight}
+                "open_economics_revalidation_in_flight": self.in_flight,
+                "open_exceptional_prices_confirmed": sorted(self.confirmed_outliers)}
