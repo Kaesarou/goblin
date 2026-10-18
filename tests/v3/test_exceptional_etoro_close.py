@@ -129,6 +129,38 @@ def test_accepted_exceptional_close_is_not_resubmitted_after_restart(tmp_path):
     assert submissions == [("p1", None)]
 
 
+def test_persisted_etoro_execution_requires_fresh_live_broker_units(tmp_path):
+    """RNO-like broker openingData can prove 25/27 only if exposure still exists."""
+    from app.brokers.base import BrokerPositionEconomics
+
+    executor, broker, store, _, quote = setup_executor(
+        tmp_path, price=53.0, ask=56.02, notional=300.0,
+    )
+    FavorablePriceBroker.attach(broker)
+    local = BrokerPositionEconomics(
+        "p1", 3.0, 53.0, 300.0,
+        "etoro_order_convergent_account_exposure",
+        {"orderId": "broker-open"},
+    )
+    broker.local_evidence = local
+    broker.closed_units["p1"] = 0.0
+    assert executor._schedule_open_economics_revalidation(NOW)
+    executor.drain()
+    assert not executor._open_economics.confirmed_outliers
+    assert not executor.schedule_exceptional_close(snapshot=quote)
+    assert not broker.close_calls
+
+    # The independent portfolio GET must prove the exact still-open units.
+    broker.closed_units["p1"] = 3.0
+    assert executor._schedule_open_economics_revalidation(NOW + timedelta(seconds=61))
+    executor.drain()
+    assert executor._open_economics.confirmed_outliers
+    assert executor.schedule_exceptional_close(snapshot=quote)
+    executor.drain()
+    assert broker.close_calls == [("p1", None)]
+    assert not executor.new_risk_allowed
+
+
 def test_unproved_outlier_never_triggers_close(tmp_path):
     executor, broker, store, _, quote = setup_executor(tmp_path)
     FavorablePriceBroker.attach(broker)
