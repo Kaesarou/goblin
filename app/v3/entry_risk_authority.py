@@ -58,15 +58,15 @@ def validate_entry_dispatch(
     symbol_reserved = sum(v for s, v in reservations.values() if s == symbol)
     symbol_committed = float(active.total_notional) if active else 0.0
 
-    # Never allow additional risk while any pre-existing symbol or aggregate
-    # exposure is already beyond the safety boundary. SELLs remain independent.
+    # Quarantine over-cap exposure; never let an unrelated inventory
+    # consume an already exhausted portfolio budget. SELLs are independent.
     if (committed + reserved) / equity > config.max_portfolio_exposure_pct + EXPOSURE_TOLERANCE:
         return EntryRiskVerdict(False, "existing_portfolio_exposure_breach", committed, reserved)
-    if any(
-        (float(i.total_notional) + sum(v for s, v in reservations.values() if s == i.symbol))
-        / equity > config.max_symbol_exposure_pct + EXPOSURE_TOLERANCE
-        for i in inventories
+    if (symbol_committed + symbol_reserved) / equity > (
+        config.max_symbol_exposure_pct + EXPOSURE_TOLERANCE
     ):
+        # Quarantine only the breached symbol. Another healthy instrument
+        # may trade while the account's *global* budget is still respected.
         return EntryRiskVerdict(False, "existing_symbol_exposure_breach", committed, reserved)
     if (intent.purpose == IntentPurpose.INITIAL_ENTRY):
         if active is not None:
