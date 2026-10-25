@@ -146,6 +146,8 @@ class GoblinV3Runtime:
             event_store=event_store,
             book=self.book,
             runtime_state_store=runtime_state_store,
+            risk_config=config.risk,
+            equity_reference=lambda: (self._current_run_equity, self._equity_observed_at),
             strategy_version=config.strategy.name,
             model_version=(
                 planner.recoverability_scorer.artifact.model_version
@@ -188,6 +190,7 @@ class GoblinV3Runtime:
             "decision_quotes_outside_bucket": 0,
             "intents_planned": 0,
             "orders_submitted": 0,
+            "entry_risk_rejections": 0,
             "market_data_rejected": 0,
             "market_data_epoch_intent_invalidations": 0,
             "market_data_batch_cycles": 0,
@@ -574,6 +577,17 @@ class GoblinV3Runtime:
                         "source": "fresh_quote",
                     },
                 )
+            elif (intent.side.upper() == "BUY"
+                  and self.executor.last_entry_risk_rejection is not None
+                  and self.executor.last_entry_risk_rejection[0] == intent.intent_id):
+                # An obsolete BUY cannot cross on the next quote either.
+                reason = self.executor.last_entry_risk_rejection[1]
+                self.intent_book.resolve(intent.intent_id)
+                self.metrics["entry_risk_rejections"] += 1
+                self.trade_journal.write("v3_entry_risk_rejected", {
+                    "intent_id": intent.intent_id, "symbol": symbol,
+                    "reason": reason, "timestamp": snapshot.timestamp,
+                })
 
         if not session_allows_new_risk:
             return
@@ -1623,6 +1637,9 @@ class GoblinV3Runtime:
             "market_data_coordinator": dict(self.coordinator.metrics),
             "market_data_transport": self.live_market_data.diagnostics(),
             "broker_confirmation": self.executor.confirmation_metrics(),
+            "entry_risk_rejections_by_reason": dict(
+                self.executor._entry_risk_rejection_counts
+            ),
             "journal_budget": self._journal_budget_metrics(),
             "stop_reason": self.stop_reason,
             **self._risk_authority_snapshot(),
