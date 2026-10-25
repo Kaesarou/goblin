@@ -1660,7 +1660,8 @@ class GoblinV3Runtime:
             "symbol_cap_pct": symbol_limits,
             "portfolio_cap_pct": aggregate_limit,
             "previous_breaches": previous,
-            "new_risk_fail_closed": bool(signature),
+            "global_new_risk_blocked": "PORTFOLIO" in signature,
+            "new_risk_blocked_symbols": breached_symbols,
             "automatic_close_requested": False,
         }
         self.trade_journal.write(event_type, payload)
