@@ -177,6 +177,7 @@ class GoblinV3Runtime:
         self._last_research_boundary: datetime | None = None
         self._last_economic_checkpoint_bucket: str | None = None
         self._last_failed_economic_checkpoint_bucket: str | None = None
+        self._last_risk_breach_signature: tuple[str, ...] = ()
 
         self._market_quality_signature: dict[str, tuple[str, str, tuple[str, ...]]] = {}
         self._maintenance_errors: set[str] = set()
@@ -194,6 +195,7 @@ class GoblinV3Runtime:
             "orders_submitted": 0,
             "entry_risk_rejections": 0,
             "economic_checkpoint_write_failures": 0,
+            "risk_limit_breach_transitions": 0,
             "market_data_rejected": 0,
             "market_data_epoch_intent_invalidations": 0,
             "market_data_batch_cycles": 0,
@@ -1079,6 +1081,7 @@ class GoblinV3Runtime:
                     self._current_run_equity = float(equity)
                     self._exit_planning_equity = float(equity)
                     self._equity_observed_at, self._equity_source = now, source
+                    self._observe_risk_limit_breaches(equity=float(equity), now=now)
                     if self.metrics["equity_consecutive_failures"]:
                         self.metrics["equity_refresh_recoveries"] += 1
                     self.metrics["equity_consecutive_failures"] = 0
@@ -1622,6 +1625,49 @@ class GoblinV3Runtime:
                 "budget_exhausted": self.candle_journal.budget_exhausted,
             },
         }
+
+    def _observe_risk_limit_breaches(self, *, equity: float, now: datetime) -> None:
+        """Detect already-over-budget holdings independently of new BUY crosses.
+
+        A historic broker exposure cannot be erased by changing the book.
+        Alert on transitions; keep reduce-only exits and all previous evidence.
+        """
+        if not math.isfinite(equity) or equity <= 0:
+            return
+        portfolio = self.book.portfolio(equity=equity)
+        symbol_limits = self.config.risk.max_symbol_exposure_pct
+        aggregate_limit = self.config.risk.max_portfolio_exposure_pct
+        breached_symbols = tuple(sorted(
+            inventory.symbol for inventory in portfolio.inventories
+            if inventory.total_notional / equity > symbol_limits + 1e-9
+        ))
+        aggregate_exposure = sum(
+            inv.total_notional for inv in portfolio.inventories
+        ) / equity
+        signature = breached_symbols + (
+            ("PORTFOLIO",) if aggregate_exposure > aggregate_limit + 1e-9 else ()
+        )
+        if signature == self._last_risk_breach_signature:
+            return
+        previous = self._last_risk_breach_signature
+        self._last_risk_breach_signature = signature
+        self.metrics["risk_limit_breach_transitions"] += 1
+        event_type = "v3_risk_limit_breach" if signature else "v3_risk_limit_recovered"
+        payload = {
+            "observed_at": now, "equity": equity,
+            "symbols_over_cap": breached_symbols,
+            "portfolio_exposure_pct": aggregate_exposure,
+            "symbol_cap_pct": symbol_limits,
+            "portfolio_cap_pct": aggregate_limit,
+            "previous_breaches": previous,
+            "new_risk_fail_closed": bool(signature),
+            "automatic_close_requested": False,
+        }
+        self.trade_journal.write(event_type, payload)
+        if signature:
+            logger.warning(
+                "V3 exposure already beyond configured risk caps | %s", payload
+            )
 
     def _heartbeat_metrics(self) -> dict[str, object]:
         inventory_observability = []
