@@ -151,8 +151,10 @@ Dispatch is denied when the intended inventory ID or entry-fill count is stale,
 or when the submitted order would breach the configured five-inventory,
 five-entry-per-inventory, 4%-per-symbol or 15%-aggregate caps. Existing
 over-cap exposure (for example LRCX on October 22) is not silently normalized:
-the conservative governor rejects additional new risk, **without forced
-liquidation**, while standard reduce-only exits remain enabled.
+the governor rejects additional BUY risk **on the offending symbol**, without
+forced liquidation, while standard reduce-only exits remain enabled.
+A portfolio-wide 15% exposure breach still halts all new BUY risk; other
+healthy symbols can continue only within their own 4% and aggregate budgets.
 
 The reservation is held in memory before writing
 `ORDER_SUBMISSION_STARTED` to SQLite. If the durable append fails, no broker BUY
