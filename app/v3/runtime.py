@@ -176,6 +176,7 @@ class GoblinV3Runtime:
         self._last_equity_monotonic = 0.0
         self._last_research_boundary: datetime | None = None
         self._last_economic_checkpoint_bucket: str | None = None
+        self._last_failed_economic_checkpoint_bucket: str | None = None
 
         self._market_quality_signature: dict[str, tuple[str, str, tuple[str, ...]]] = {}
         self._maintenance_errors: set[str] = set()
@@ -192,6 +193,7 @@ class GoblinV3Runtime:
             "intents_planned": 0,
             "orders_submitted": 0,
             "entry_risk_rejections": 0,
+            "economic_checkpoint_write_failures": 0,
             "market_data_rejected": 0,
             "market_data_epoch_intent_invalidations": 0,
             "market_data_batch_cycles": 0,
@@ -1091,7 +1093,8 @@ class GoblinV3Runtime:
                         "00" if now.minute < 30 else "30"
                     )
                     if bucket != self._last_economic_checkpoint_bucket:
-                        if self.trade_journal.write("v3_economic_checkpoint", {
+                        writes_before = getattr(self.trade_journal, "written_count", None)
+                        write_ok = self.trade_journal.write("v3_economic_checkpoint", {
                             "observed_at": now, "equity": float(equity),
                             "equity_source": source,
                             "open_exposure_account_notional": sum(
@@ -1101,8 +1104,19 @@ class GoblinV3Runtime:
                             "realized_net_pnl_status": "unverified_costs_and_fx",
                             "cash_flows_status": "not_attested_by_equity_endpoint",
                             "fee_basis": "broker_confirmed_per_fill_when_available",
-                        }):
+                        })
+                        persisted = bool(write_ok) and (
+                            writes_before is None or
+                            getattr(self.trade_journal, "written_count", writes_before)
+                            > writes_before
+                        )
+                        if persisted:
                             self._last_economic_checkpoint_bucket = bucket
+                            self._last_failed_economic_checkpoint_bucket = None
+                        elif bucket != self._last_failed_economic_checkpoint_bucket:
+                            self._last_failed_economic_checkpoint_bucket = bucket
+                            self.metrics["economic_checkpoint_write_failures"] += 1
+                            logger.error("Economic checkpoint not persisted | bucket=%s", bucket)
                     self._clear_maintenance_error(
                         "equity_refresh", "v3_account_equity_recovered", {"equity": equity},
                     )
