@@ -34,6 +34,8 @@ TRADE_JOURNAL_CRITICAL_EVENT_TYPES = frozenset(
         'v3_economic_checkpoint',
         'session_heartbeat',
         'v3_entry_risk_rejected',
+        'v3_risk_limit_breach',
+        'v3_risk_limit_recovered',
         'raw_journal_budget_exhausted',
         'trade_journal_budget_active',
     }
