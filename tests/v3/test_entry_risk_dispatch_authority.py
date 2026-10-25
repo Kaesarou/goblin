@@ -103,6 +103,7 @@ def test_equity_missing_old_or_invalid_blocks_buy_without_assumed_cash():
     order = intent("AAPL", 300)
     assert check(book, order, equity=None).reason == "broker_equity_unavailable"
     assert check(book, order, observed_at=None).reason == "broker_equity_timestamp_unavailable"
+    assert check(book, order, observed_at=NOW.replace(tzinfo=None)).reason == "broker_equity_timestamp_unavailable"
     assert check(book, order, observed_at=NOW-timedelta(minutes=4)).reason == "broker_equity_stale"
     assert check(book, intent("AAPL", float("nan"))).reason == "invalid_entry_notional"
 
@@ -152,3 +153,26 @@ def test_reduce_only_is_never_subject_to_buy_risk_gate(tmp_path, monkeypatch):
         reduce_only=True, metadata={"close_fraction_of_units": 1.0},
     )
     assert executor.schedule(sell, snapshot=MarketSnapshot("LRCX", 100, 101, 100, NOW))
+
+
+def test_durable_ledger_failure_prevents_broker_buy(tmp_path, monkeypatch):
+    """No broker mutation if START/reservation cannot be committed to SQLite."""
+    monkeypatch.setattr("app.v3.live_execution._utc_now", lambda: NOW)
+    store = InventoryEventStore(tmp_path / "write_fail.sqlite")
+    broker = PaperBrokerClient(equity=100_000)
+    runner = ImmediateRunner()
+    executor = V3BrokerExecutor(
+        broker=broker, task_runner=runner, event_store=store,
+        book=InventoryBook(), strategy_version="ETORO5", model_version=None,
+        risk_config=CONFIG, equity_reference=lambda: (100_000, NOW),
+    )
+    monkeypatch.setattr(store, "append", lambda event: False)
+    with pytest.raises(RuntimeError, match="Durable BUY risk reservation"):
+        executor.schedule(
+            intent("AAPL", 300),
+            snapshot=MarketSnapshot("AAPL", 99, 100, 100, NOW),
+        )
+    assert runner.items == []
+    assert executor.halted_reason == "open_submission_dispatch_unknown"
+    assert executor._open_reservations
+    assert not executor.new_risk_allowed
