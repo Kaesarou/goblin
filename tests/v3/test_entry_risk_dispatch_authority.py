@@ -84,7 +84,13 @@ def test_symbol_cap_and_preexisting_breach_are_fail_closed():
     ))
     assert rejected.reason == "symbol_exposure_cap"
     book = book_with_lrcx(notional=5586.36)
-    assert check(book, intent("AAPL", 300)).reason == "existing_symbol_exposure_breach"
+    assert check(book, intent(
+        "LRCX", 300, purpose=IntentPurpose.REENTRY,
+        inventory="lrcx-1", count=4,
+    )).reason == "existing_symbol_exposure_breach"
+    # An already-breached instrument cannot contaminate another symbol's
+    # independent cap while total committed exposure remains below 15%.
+    assert check(book, intent("AAPL", 300)).allowed
 
 
 def test_cross_symbol_reservations_prevent_portfolio_budget_double_spend():
