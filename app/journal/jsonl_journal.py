@@ -28,6 +28,12 @@ TRADE_JOURNAL_CRITICAL_EVENT_TYPES = frozenset(
         'v3_startup_rejected',
         'v3_inventory_event',
         'v3_intent_triggered',
+        # Economic truth and safeguards must survive the 256-MiB soft cap.
+        # The hard disk ceiling and minimum free-space reserve still prevail.
+        'v3_account_equity_snapshot',
+        'v3_economic_checkpoint',
+        'session_heartbeat',
+        'v3_entry_risk_rejected',
         'raw_journal_budget_exhausted',
         'trade_journal_budget_active',
     }
