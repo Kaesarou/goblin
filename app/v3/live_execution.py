@@ -321,10 +321,18 @@ class V3BrokerExecutor:
                     payload={
                         "action_id": action, "symbol": symbol,
                         "reason": verdict.reason,
-                        "requested_notional": intent.notional,
+                        "requested_notional": (
+                            intent.notional if isinstance(intent.notional, (int, float))
+                            and not isinstance(intent.notional, bool)
+                            and math.isfinite(intent.notional) else None
+                        ),
                         "committed_notional": verdict.committed_notional,
                         "reserved_notional": verdict.reserved_notional,
-                        "equity": equity,
+                        "equity": (
+                            equity if isinstance(equity, (int, float))
+                            and not isinstance(equity, bool)
+                            and math.isfinite(equity) else None
+                        ),
                     },
                 )
                 return False
