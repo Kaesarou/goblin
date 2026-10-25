@@ -1096,8 +1096,14 @@ class GoblinV3Runtime:
                         "00" if now.minute < 30 else "30"
                     )
                     if bucket != self._last_economic_checkpoint_bucket:
-                        writes_before = getattr(self.trade_journal, "written_count", None)
-                        write_ok = self.trade_journal.write("v3_economic_checkpoint", {
+                        # Production uses AnalysisJournal (a routing wrapper)
+                        # whose write() returns None, not a success boolean.
+                        # Observe its physical JsonlJournal writer instead.
+                        physical_journal = getattr(
+                            self.trade_journal, "trade_journal", self.trade_journal
+                        )
+                        writes_before = getattr(physical_journal, "written_count", None)
+                        write_result = self.trade_journal.write("v3_economic_checkpoint", {
                             "observed_at": now, "equity": float(equity),
                             "equity_source": source,
                             "open_exposure_account_notional": sum(
@@ -1108,10 +1114,12 @@ class GoblinV3Runtime:
                             "cash_flows_status": "not_attested_by_equity_endpoint",
                             "fee_basis": "broker_confirmed_per_fill_when_available",
                         })
-                        persisted = bool(write_ok) and (
-                            writes_before is None or
-                            getattr(self.trade_journal, "written_count", writes_before)
-                            > writes_before
+                        writes_after = getattr(physical_journal, "written_count", None)
+                        persisted = (
+                            writes_after > writes_before
+                            if isinstance(writes_before, int)
+                            and isinstance(writes_after, int)
+                            else write_result is not False
                         )
                         if persisted:
                             self._last_economic_checkpoint_bucket = bucket
