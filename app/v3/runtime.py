@@ -175,6 +175,7 @@ class GoblinV3Runtime:
         self._last_close_confirmation_monotonic = 0.0
         self._last_equity_monotonic = 0.0
         self._last_research_boundary: datetime | None = None
+        self._last_economic_checkpoint_bucket: str | None = None
 
         self._market_quality_signature: dict[str, tuple[str, str, tuple[str, ...]]] = {}
         self._maintenance_errors: set[str] = set()
@@ -1083,6 +1084,25 @@ class GoblinV3Runtime:
                     self.trade_journal.write("v3_account_equity_snapshot", {
                         "equity": equity, "source": source, "observed_at": now,
                     })
+                    # Every UTC 30-min bucket receives an independently
+                    # labelled broker-equity checkpoint. Gross estimates and
+                    # unverified costs are not silently called net profits.
+                    bucket = now.strftime("%Y-%m-%dT%H:") + (
+                        "00" if now.minute < 30 else "30"
+                    )
+                    if bucket != self._last_economic_checkpoint_bucket:
+                        if self.trade_journal.write("v3_economic_checkpoint", {
+                            "observed_at": now, "equity": float(equity),
+                            "equity_source": source,
+                            "open_exposure_account_notional": sum(
+                                inv.total_notional for inv in self._active_inventories()
+                            ),
+                            "active_inventory_count": len(self._active_inventories()),
+                            "realized_net_pnl_status": "unverified_costs_and_fx",
+                            "cash_flows_status": "not_attested_by_equity_endpoint",
+                            "fee_basis": "broker_confirmed_per_fill_when_available",
+                        }):
+                            self._last_economic_checkpoint_bucket = bucket
                     self._clear_maintenance_error(
                         "equity_refresh", "v3_account_equity_recovered", {"equity": equity},
                     )
