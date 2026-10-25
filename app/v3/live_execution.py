@@ -28,6 +28,7 @@ from app.v3.close_recovery import (
     reconciled_reduction_attributable,
     replay_close_events,
 )
+from app.v3.entry_risk_authority import validate_entry_dispatch
 from app.v3.execution import ProRataPartialCloseAllocator, assess_inventory_close
 from app.v3.external_account_gate import gate_active, record_external_broker_activity
 from app.v3.models import ExecutionStyle, IntentPurpose, OrderIntent
@@ -127,7 +128,14 @@ class V3BrokerExecutor:
         strategy_version: str,
         model_version: str | None,
         runtime_state_store: V3RuntimeStateStore | None = None,
+        risk_config=None,
+        equity_reference=None,
     ) -> None:
+        self.risk_config = risk_config
+        self.equity_reference = equity_reference
+        self._open_reservations: dict[str, tuple[str, float]] = {}
+        self.last_entry_risk_rejection: tuple[str, str] | None = None
+        self._entry_risk_rejection_counts: dict[str, int] = {}
         self.broker = broker
         self.task_runner = task_runner
         self.event_store = event_store
@@ -191,6 +199,7 @@ class V3BrokerExecutor:
             if leg.units > 0
         }
         started: dict[str, str] = {}
+        started_amounts: dict[str, float] = {}
         resolved: set[str] = set()
         unknown: set[str] = set()
         recoverable: dict[str, tuple[_OpenContext, datetime]] = {}
@@ -203,6 +212,9 @@ class V3BrokerExecutor:
                 if not symbol:
                     symbol = event.inventory_id.split(":", 1)[0].strip().upper()
                 started[action] = symbol
+                amount = event.payload.get("notional")
+                if isinstance(amount, (int, float)) and not isinstance(amount, bool) and math.isfinite(amount) and amount > 0:
+                    started_amounts[action] = float(amount)
                 self._open_action_ids.add(action)
                 if event.payload.get("client_order_id"):
                     recoverable[action] = restored_open_context(event), event.occurred_at
@@ -236,6 +248,14 @@ class V3BrokerExecutor:
                 self._notional_anomaly_action_ids.discard(action)
         self._resolved_open_action_ids.update(resolved)
         self._unresolved_open_actions = (set(started) | unknown) - resolved
+        self._open_reservations = {
+            action: (started[action], started_amounts[action])
+            for action in self._unresolved_open_actions
+            if action in started and action in started_amounts
+        }
+        if any(action not in self._open_reservations
+               for action in self._unresolved_open_actions):
+            self.halted_reason = "unresolved_open_reservation_amount"
         self._unknown_open_action_ids.update(self._unresolved_open_actions)
         retries = self.runtime_state_store.load_open_retries()
         now, mono = _utc_now(), time.monotonic()
@@ -281,9 +301,38 @@ class V3BrokerExecutor:
         if (not self.new_risk_allowed or symbol in self._open_by_symbol
                 or action in self._open_action_ids):
             return False
+        if self.risk_config is not None:
+            equity, observed_at = (self.equity_reference()
+                                   if callable(self.equity_reference) else (None, None))
+            verdict = validate_entry_dispatch(
+                intent=intent, book=self.book, equity=equity,
+                observed_at=observed_at, now=_utc_now(),
+                config=self.risk_config, reservations=self._open_reservations,
+            )
+            if not verdict.allowed:
+                self.last_entry_risk_rejection = (action, verdict.reason)
+                self._entry_risk_rejection_counts[verdict.reason] = (
+                    self._entry_risk_rejection_counts.get(verdict.reason, 0) + 1
+                )
+                self._append(
+                    event_type="ENTRY_RISK_REJECTED",
+                    inventory_id=(intent.inventory_id or f"{symbol}:{action}"),
+                    event_id=f"{action}:risk-rejected:{verdict.reason}",
+                    payload={
+                        "action_id": action, "symbol": symbol,
+                        "reason": verdict.reason,
+                        "requested_notional": intent.notional,
+                        "committed_notional": verdict.committed_notional,
+                        "reserved_notional": verdict.reserved_notional,
+                        "equity": equity,
+                    },
+                )
+                return False
+        self.last_entry_risk_rejection = None
         # Reserve before the durable START and before task_runner.submit() can
         # dispatch a broker request. No second intent can use the same symbol.
         self._open_by_symbol[symbol] = action
+        self._open_reservations[action] = (symbol, float(intent.notional))
         self._unresolved_open_actions.add(action)
         self._open_action_ids.add(action)
         try:
@@ -302,6 +351,7 @@ class V3BrokerExecutor:
         if self._open_by_symbol.get(symbol) == action:
             self._open_by_symbol.pop(symbol, None)
         self._unresolved_open_actions.discard(action)
+        self._open_reservations.pop(action, None)
 
     def schedule_exceptional_close(self, *, snapshot: MarketSnapshot) -> bool:
         """Close only an independently confirmed favorable outlier broker leg.
@@ -390,7 +440,7 @@ class V3BrokerExecutor:
         trigger_price = float(snapshot.ask)
         prepare_identity = getattr(self.broker, "prepare_open_order_id", None)
         client_order_id = prepare_identity(action_id) if prepare_identity else None
-        self._append(
+        if not self._append(
             event_type="ORDER_SUBMISSION_STARTED",
             inventory_id=inventory_id,
             event_id=f"{action_id}:open-start",
@@ -401,6 +451,10 @@ class V3BrokerExecutor:
                 "symbol": intent.symbol,
                 "purpose": intent.purpose.value,
                 "notional": intent.notional,
+                "risk_reservation_notional": intent.notional,
+                "inventory_entry_fill_count_at_dispatch": (
+                    inventory.entry_fill_count if inventory is not None else 0
+                ),
                 "trigger_price": trigger_price,
                 "cost_estimate": asdict(intent.cost_estimate) if intent.cost_estimate else None,
                 "causal_quote": {
@@ -409,7 +463,8 @@ class V3BrokerExecutor:
                     "received_at": snapshot.received_at.isoformat(),
                 },
             },
-        )
+        ):
+            raise RuntimeError("Durable BUY risk reservation could not be persisted")
         context = _OpenContext(action_id, intent, inventory_id, trigger_price, client_order_id=client_order_id, causal_quote={
             "bid": snapshot.bid, "ask": snapshot.ask, "last": snapshot.last,
             "timestamp": snapshot.timestamp.isoformat(),
