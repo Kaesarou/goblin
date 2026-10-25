@@ -150,8 +150,13 @@ def test_reduce_only_is_never_subject_to_buy_risk_gate(tmp_path, monkeypatch):
         strategy_version="ETORO5", model_version=None,
         risk_config=CONFIG, equity_reference=lambda: (100_000, NOW),
     )
-    assert not executor.schedule(intent("AAPL", 300),
-                                 snapshot=MarketSnapshot("AAPL", 99, 100, 100, NOW))
+    assert not executor.schedule(intent(
+        "LRCX", 300, purpose=IntentPurpose.REENTRY,
+        inventory="lrcx-1", count=1,
+    ), snapshot=MarketSnapshot("LRCX", 99, 100, 100, NOW))
+    assert executor.last_entry_risk_rejection[1] == "existing_symbol_exposure_breach"
+    assert executor.schedule(intent("AAPL", 300),
+                             snapshot=MarketSnapshot("AAPL", 99, 100, 100, NOW))
     # A broker-owned SELL still goes through the original independent close path.
     sell = OrderIntent(
         "exit-lrcx", IntentPurpose.RISK_REDUCTION, "LRCX", "SELL",
