@@ -38,7 +38,8 @@ def validate_entry_dispatch(
         not math.isfinite(equity) or equity <= 0
     ):
         return EntryRiskVerdict(False, "broker_equity_unavailable")
-    if not isinstance(observed_at, datetime):
+    if (not isinstance(observed_at, datetime) or observed_at.tzinfo is None
+            or now.tzinfo is None):
         return EntryRiskVerdict(False, "broker_equity_timestamp_unavailable")
     age = (now.astimezone(UTC) - observed_at.astimezone(UTC)).total_seconds()
     if not -5.0 <= age <= EQUITY_MAX_AGE_SECONDS:
