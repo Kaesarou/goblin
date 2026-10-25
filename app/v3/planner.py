@@ -114,7 +114,7 @@ class InventoryPlanner:
         expected=max(0.0,self._close_threshold(m,(i.total_notional+n)/max(p.equity,1e-12)/max(c.effective_wallet_exposure_limit_pct,1e-12)))
         e=self.economics_model.estimate(market=m,notional=n,expected_gross_capture_pct=expected,side='BUY')
         if not e.allowed:return self._decision(m,DecisionReason.ECONOMICS_REJECTED)
-        it=OrderIntent(_id(i.inventory_id,'reentry',i.entry_fill_count+1,m.asof,rp),IntentPurpose.REENTRY,m.symbol,'BUY',n,m.asof,ExecutionStyle.PASSIVE_LIMIT,limit_price=rp,inventory_id=i.inventory_id,cost_estimate=e.costs,metadata={'requested_exposure_pct':req,'requested_units':requested_units,'recoverability_rank':rec.rank_quantile,'reentry_threshold':threshold,'retracement_pct':rt_pct})
+        it=OrderIntent(_id(i.inventory_id,'reentry',i.entry_fill_count+1,m.asof,rp),IntentPurpose.REENTRY,m.symbol,'BUY',n,m.asof,ExecutionStyle.PASSIVE_LIMIT,limit_price=rp,inventory_id=i.inventory_id,cost_estimate=e.costs,metadata={'requested_exposure_pct':req,'requested_units':requested_units,'recoverability_rank':rec.rank_quantile,'reentry_threshold':threshold,'retracement_pct':rt_pct,'inventory_entry_fill_count':i.entry_fill_count})
         return DecisionBatch((it,),(DecisionRecord(m.symbol,DecisionReason.RECOVERABILITY_ACCEPTED,m.asof,{'rank':rec.rank_quantile}),))
     def _exit(self,m,p,i):
         c=self.config.strategy; ratio=self._exp_ratio(i,p); cap=self._close_threshold(m,ratio)

@@ -139,3 +139,53 @@ Endpoint contracts checked against official eToro documentation:
 
 - https://api-portal.etoro.com/api-reference/trading--demo/get-account-pnl-and-portfolio-details
 - https://api-portal.etoro.com/api-reference/trading--demo/get-order-information-and-position-details
+
+## 25 October 2026 — dispatch-time BUY risk authority
+
+The planner's historical decision is **not** a broker authorization. Immediately
+before an actual BUY submission, the live V3 executor now recomputes authority
+against the latest authoritative inventory book, recent broker equity (at most
+180 seconds old), and every pending/unknown BUY reservation.
+
+Dispatch is denied when the intended inventory ID or entry-fill count is stale,
+or when the submitted order would breach the configured five-inventory,
+five-entry-per-inventory, 4%-per-symbol or 15%-aggregate caps. Existing
+over-cap exposure (for example LRCX on October 22) is not silently normalized:
+the governor rejects additional BUY risk **on the offending symbol**, without
+forced liquidation, while standard reduce-only exits remain enabled.
+A portfolio-wide 15% exposure breach still halts all new BUY risk; other
+healthy symbols can continue only within their own 4% and aggregate budgets.
+
+The reservation is held in memory before writing
+`ORDER_SUBMISSION_STARTED` to SQLite. If the durable append fails, no broker BUY
+may be sent. At restart, unresolved BUY reservations are restored from this
+existing append-only evidence; missing/invalid reserve amounts block new risk.
+A broker outcome that is unknown **cannot** free a reservation. Only terminal
+rejection or an attributed fill can do that.
+
+Expected economic behavior: these gates can reduce the number of trades in an
+already-invalid account, but do not change Point-M's signal thresholds, sizing,
+reentry math, stop/exit geometry, or capital fractions. In particular, **do
+not increase the 4%/15% limits while validating this correction**.
+
+## 25 October 2026 — economic journal continuity
+
+The journal retains `v3_account_equity_snapshot`, `v3_economic_checkpoint`
+and `session_heartbeat` after its **256-MiB soft cap**. Other low-priority
+diagnostics remain suppressible. The **384-MiB hard cap** and **1-GiB free disk
+reserve** remain enforced, including for economic events.
+
+Every half-hour UTC bucket with a successful broker equity read emits a
+checkpoint indicating equity source, open principal estimate, and the fact
+that costs/FX and external cash flows are **not fully attested** by the equity
+endpoint. This is a proof of account-value observation, **not** certified
+net profit. A suppressed or failed checkpoint increments
+`economic_checkpoint_write_failures` and emits an application error; it
+must not be counted as successfully stored merely because the soft-budget API
+returned True.
+
+Validation checklist before using another week's logs: verify no P0
+`ENTRY_RISK_REJECTED` events indicating a newly over-budget submission,
+inspect existing breaches and reservation-replay warnings, check every
+expected broker equity checkpoint survives the soft-cap rollover, and use
+actual cost and FX evidence before labeling any result as net.
