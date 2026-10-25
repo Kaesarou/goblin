@@ -176,3 +176,33 @@ def test_durable_ledger_failure_prevents_broker_buy(tmp_path, monkeypatch):
     assert executor.halted_reason == "open_submission_dispatch_unknown"
     assert executor._open_reservations
     assert not executor.new_risk_allowed
+
+
+def test_existing_broker_breach_is_reported_without_liquidation(tmp_path):
+    from tests.v3.test_runtime_equity_authority import runtime_for_test
+
+    runtime = runtime_for_test(tmp_path)
+    inventory = runtime.book.apply_entry_fill(
+        inventory_id="lrcx-legacy", symbol="LRCX", position_id="lrcx-p1",
+        units=55.8636, price=100.0, account_notional=5586.36,
+        fee=0.0, filled_at=NOW,
+    )
+    runtime._observe_risk_limit_breaches(equity=100_000, now=NOW)
+    events = [e for e in runtime.trade_journal.events
+              if e[0] == "v3_risk_limit_breach"]
+    assert len(events) == 1
+    assert events[0][1]["symbols_over_cap"] == ("LRCX",)
+    assert not events[0][1]["automatic_close_requested"]
+    assert runtime.book.active_for_symbol("LRCX") is not None
+    runtime._observe_risk_limit_breaches(equity=100_000, now=NOW)
+    assert len([e for e in runtime.trade_journal.events
+                if e[0] == "v3_risk_limit_breach"]) == 1
+
+    runtime.book.apply_exit_fill(
+        position_id="lrcx-p1", exit_price=100.0, units=30.0,
+        fee=0.0, filled_at=NOW,
+    )
+    runtime._observe_risk_limit_breaches(equity=100_000, now=NOW)
+    assert [e[0] for e in runtime.trade_journal.events
+            if e[0] in ("v3_risk_limit_breach", "v3_risk_limit_recovered")
+            ] == ["v3_risk_limit_breach", "v3_risk_limit_recovered"]
