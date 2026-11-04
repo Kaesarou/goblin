@@ -4,11 +4,17 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from app.config.settings import Settings
 from app.instruments.models import AssetClass
 from app.market.models import Candle
 from app.market.timeframes import Timeframe
 from app.market_data.models import CandleBuildResult, CandleQuality, MarketDataEvent, MarketDataSource
-from app.runtime.trading_session_window import AssetTradingSessionConfig, TradingSessionService, parse_trading_sessions
+from app.runtime.trading_session_window import (
+    AssetTradingSessionConfig,
+    TradingSessionService,
+    parse_trading_sessions,
+    trading_session_service_from_settings,
+)
 from tests.v3.test_runtime import NOW, _snapshot
 from tests.v3.test_runtime_equity_authority import runtime_for_test, trailing_inventory
 
@@ -24,6 +30,37 @@ def feed(runtime, timestamp):
 
 def candles(runtime):
     return [payload["candle"] for name, payload in runtime.candle_journal.events if name == "candle_finalized"]
+
+
+def test_dst_mismatch_runtime_collects_first_us_minute_and_journals_bounds(tmp_path):
+    runtime = runtime_for_test(tmp_path, with_eu=True)
+    settings = Settings(
+        _env_file=None,
+        TRADING_SESSION_TIMEZONE="Europe/Paris",
+        TRADING_SESSION_TIMEZONE_EQUITY_US="America/New_York",
+        TRADING_SESSIONS_EQUITY_US="09:30-16:00",
+        TRADING_SESSION_TIMEZONE_EQUITY_EU="Europe/Paris",
+        TRADING_SESSIONS_EQUITY_EU="09:00-17:30",
+    )
+    runtime.trading_session_service = trading_session_service_from_settings(settings)
+    us_open = datetime(2026, 10, 26, 13, 30, tzinfo=timezone.utc)
+    us_close = us_open.replace(hour=20, minute=0)
+    feed(runtime, us_open - timedelta(seconds=1))
+    feed(runtime, us_open + timedelta(seconds=5))
+    feed(runtime, us_open + timedelta(minutes=1, seconds=5))
+
+    assert [candle.opened_at for candle in candles(runtime)] == [us_open]
+    opening_events = {
+        payload["symbol"]: payload
+        for name, payload in runtime.trade_journal.events
+        if name == "v3_session_state" and payload["session_active"]
+    }
+    assert opening_events["AAPL"]["session_start_utc"] == us_open
+    assert opening_events["AAPL"]["session_end_utc"] == us_close
+    assert opening_events["AIR.PA"]["session_start_utc"] == us_open.replace(hour=8, minute=0)
+    assert opening_events["AIR.PA"]["session_end_utc"] == us_open.replace(hour=16)
+    assert runtime._expected_symbols_at(us_close - timedelta(seconds=1)) == {"AAPL"}
+    assert runtime._expected_symbols_at(us_close) == set()
 
 
 def test_friday_to_monday_keeps_last_session_candle_and_no_ghosts(tmp_path):

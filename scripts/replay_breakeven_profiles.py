@@ -448,6 +448,8 @@ def _build_settings(
         MAX_OPEN_POSITIONS_PER_SYMBOL=int(raw_settings.get("MAX_OPEN_POSITIONS_PER_SYMBOL", 1)),
         MAX_TRADES_PER_SESSION=int(raw_settings.get("MAX_TRADES_PER_SESSION", 3)),
         TRADING_SESSION_TIMEZONE=str(raw_settings.get("TRADING_SESSION_TIMEZONE", timezone_name)),
+        TRADING_SESSION_TIMEZONE_EQUITY_US=raw_settings.get("TRADING_SESSION_TIMEZONE_EQUITY_US"),
+        TRADING_SESSION_TIMEZONE_EQUITY_EU=raw_settings.get("TRADING_SESSION_TIMEZONE_EQUITY_EU"),
         TRADING_SESSIONS_CRYPTO=str(raw_settings.get("TRADING_SESSIONS_CRYPTO", "")),
         TRADING_SESSIONS_EQUITY_US=str(
             raw_settings.get("TRADING_SESSIONS_EQUITY_US", "15:30-22:00")

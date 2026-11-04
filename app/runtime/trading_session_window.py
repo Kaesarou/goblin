@@ -116,6 +116,18 @@ class TradingSessionService:
             for asset_class, config in configs.items()
         }
 
+    def calendar_metadata(self) -> dict[str, dict[str, str | list[str]]]:
+        return {
+            asset_class.value: {
+                'timezone': self._timezone_by_asset_class[asset_class].key,
+                'local_windows': [
+                    f'{session.start:%H:%M}-{session.end:%H:%M}'
+                    for session in config.sessions
+                ],
+            }
+            for asset_class, config in self.configs.items()
+        }
+
     def evaluate(self, *, asset_class: AssetClass, now: datetime) -> TradingSessionDecision:
         config = self.configs[asset_class]
         local_now = self._to_local_time(now, self._timezone_by_asset_class[asset_class])

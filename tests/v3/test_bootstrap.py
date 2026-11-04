@@ -12,6 +12,7 @@ from app.config.settings import Settings
 from app.instruments.instrument_registry import InstrumentRegistry
 from app.journal.run_paths import build_run_journal_paths
 from app.main import _assert_v3_execution_mode
+from app.runtime.trading_session_window import trading_session_service_from_settings
 from app.v3.config import (
     EconomicsPolicy,
     RecoverabilityConfig,
@@ -41,6 +42,11 @@ def test_v3_manifest_declares_authority_and_replayable_log_budget(tmp_path):
         EQUITY_US_SYMBOLS="AAPL",
         EQUITY_EU_SYMBOLS="",
         CRYPTO_SYMBOLS="",
+        TRADING_SESSION_TIMEZONE="Europe/Paris",
+        TRADING_SESSION_TIMEZONE_EQUITY_US="America/New_York",
+        TRADING_SESSIONS_EQUITY_US="09:30-16:00",
+        TRADING_SESSION_TIMEZONE_EQUITY_EU=None,
+        TRADING_SESSIONS_EQUITY_EU="09:00-17:30",
         JOURNAL_PATH=str(tmp_path / "logs" / "trades.jsonl"),
         POSITION_STORE_PATH=str(tmp_path / "goblin.sqlite"),
         RUN_MANIFEST_PATH=str(tmp_path / "logs" / "run_manifest.json"),
@@ -62,6 +68,7 @@ def test_v3_manifest_declares_authority_and_replayable_log_budget(tmp_path):
     )
     manifest = build_v3_run_manifest(
         settings=settings,
+        trading_session_service=trading_session_service_from_settings(settings),
         config=config,
         recoverability_scorer=RecoverabilityScorer.from_default_artifact(),
         instrument_registry=registry,
@@ -74,6 +81,13 @@ def test_v3_manifest_declares_authority_and_replayable_log_budget(tmp_path):
     )
 
     assert manifest["schema_version"] == 21
+    sessions = manifest["runtime"]["trading_sessions"]
+    assert sessions["EQUITY_US"] == {
+        "timezone": "America/New_York", "local_windows": ["09:30-16:00"],
+    }
+    assert sessions["EQUITY_EU"] == {
+        "timezone": "Europe/Paris", "local_windows": ["09:00-17:30"],
+    }
     assert manifest["strategy"]["name"] == "INVENTORY_RR5_V1"
     assert manifest["strategy"]["direction_model"] is None
     assert manifest["strategy"]["wait_confirmation"] is None

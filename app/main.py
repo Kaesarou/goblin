@@ -335,8 +335,10 @@ def _run_main(settings: Settings, storage: RuntimeStorageScope) -> None:
         latest_payload_schema_path=latest_payload_schema_path,
     )
 
+    trading_session_service = trading_session_service_from_settings(settings)
     manifest = build_v3_run_manifest(
         settings=settings,
+        trading_session_service=trading_session_service,
         config=config,
         recoverability_scorer=recoverability_scorer,
         instrument_registry=instrument_registry,
@@ -394,7 +396,7 @@ def _run_main(settings: Settings, storage: RuntimeStorageScope) -> None:
             rest_market_data=clients.rest_market_data,
             live_market_data=clients.live_market_data,
             candle_builders=build_candle_builders(symbols),
-            trading_session_service=trading_session_service_from_settings(settings),
+            trading_session_service=trading_session_service,
             market_context_service=market_context_service,
             multi_timeframe_service=multi_timeframe_service,
             market_data_validator=MarketDataValidator(),
