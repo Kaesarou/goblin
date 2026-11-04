@@ -26,6 +26,7 @@ class TradingSessionWindow(NamedTuple):
 class AssetTradingSessionConfig(NamedTuple):
     asset_class: AssetClass
     sessions: tuple[TradingSessionWindow, ...]
+    timezone_name: str | None = None
 
     @property
     def is_24_7(self) -> bool:
@@ -110,10 +111,26 @@ class TradingSessionService:
     ):
         self.configs = configs
         self.timezone = ZoneInfo(timezone_name)
+        self._timezone_by_asset_class = {
+            asset_class: ZoneInfo(config.timezone_name) if config.timezone_name else self.timezone
+            for asset_class, config in configs.items()
+        }
+
+    def calendar_metadata(self) -> dict[str, dict[str, str | list[str]]]:
+        return {
+            asset_class.value: {
+                'timezone': self._timezone_by_asset_class[asset_class].key,
+                'local_windows': [
+                    f'{session.start:%H:%M}-{session.end:%H:%M}'
+                    for session in config.sessions
+                ],
+            }
+            for asset_class, config in self.configs.items()
+        }
 
     def evaluate(self, *, asset_class: AssetClass, now: datetime) -> TradingSessionDecision:
         config = self.configs[asset_class]
-        local_now = self._to_local_time(now)
+        local_now = self._to_local_time(now, self._timezone_by_asset_class[asset_class])
         equity = asset_class in {AssetClass.EQUITY_EU, AssetClass.EQUITY_US}
         if equity and local_now.weekday() >= 5:
             return self._decision_closed(asset_class)
@@ -207,18 +224,18 @@ class TradingSessionService:
         session: TradingSessionWindow,
         local_now: datetime,
     ) -> tuple[datetime, datetime]:
-        start_at = datetime.combine(local_now.date(), session.start, tzinfo=self.timezone)
+        start_at = datetime.combine(local_now.date(), session.start, tzinfo=local_now.tzinfo)
         end_day = local_now.date() + timedelta(days=1) if session.crosses_midnight else local_now.date()
-        end_at = datetime.combine(end_day, session.end, tzinfo=self.timezone)
+        end_at = datetime.combine(end_day, session.end, tzinfo=local_now.tzinfo)
         if session.crosses_midnight and local_now.time() < session.end:
             start_at -= timedelta(days=1)
             end_at -= timedelta(days=1)
         return start_at, end_at
 
-    def _to_local_time(self, now: datetime) -> datetime:
+    def _to_local_time(self, now: datetime, timezone: ZoneInfo) -> datetime:
         if now.tzinfo is None:
             now = now.replace(tzinfo=UTC)
-        return now.astimezone(self.timezone)
+        return now.astimezone(timezone)
 
 
 def trading_session_service_from_settings(settings: Settings) -> TradingSessionService:
@@ -231,10 +248,12 @@ def trading_session_service_from_settings(settings: Settings) -> TradingSessionS
             AssetClass.EQUITY_US: AssetTradingSessionConfig(
                 asset_class=AssetClass.EQUITY_US,
                 sessions=parse_trading_sessions(settings.trading_sessions_equity_us),
+                timezone_name=settings.trading_session_timezone_equity_us,
             ),
             AssetClass.EQUITY_EU: AssetTradingSessionConfig(
                 asset_class=AssetClass.EQUITY_EU,
                 sessions=parse_trading_sessions(settings.trading_sessions_equity_eu),
+                timezone_name=settings.trading_session_timezone_equity_eu,
             ),
         },
         timezone_name=settings.trading_session_timezone,
