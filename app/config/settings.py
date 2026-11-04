@@ -130,6 +130,14 @@ class Settings(BaseSettings):
         default='Europe/Paris',
         alias='TRADING_SESSION_TIMEZONE',
     )
+    trading_session_timezone_equity_us: str | None = Field(
+        default=None,
+        alias='TRADING_SESSION_TIMEZONE_EQUITY_US',
+    )
+    trading_session_timezone_equity_eu: str | None = Field(
+        default=None,
+        alias='TRADING_SESSION_TIMEZONE_EQUITY_EU',
+    )
     trading_sessions_crypto: str = Field(
         default='',
         alias='TRADING_SESSIONS_CRYPTO',
