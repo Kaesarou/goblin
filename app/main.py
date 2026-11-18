@@ -25,7 +25,7 @@ from app.runtime.runtime_policy import (
 )
 from app.runtime.stop_signals import runtime_stop_signals
 from app.runtime.storage_scope import RuntimeStorageScope
-from app.runtime.trading_session_window import trading_session_service_from_settings
+from app.runtime.trading_session_window import regular_market_session_service
 from app.utils.logging import configure_logging
 from app.v3.config import RecoverabilityConfig, etoro5_research_config
 from app.v3.economics import EconomicsModel, broker_cost_schedule
@@ -335,8 +335,10 @@ def _run_main(settings: Settings, storage: RuntimeStorageScope) -> None:
         latest_payload_schema_path=latest_payload_schema_path,
     )
 
+    trading_session_service = regular_market_session_service()
     manifest = build_v3_run_manifest(
         settings=settings,
+        trading_session_service=trading_session_service,
         config=config,
         recoverability_scorer=recoverability_scorer,
         instrument_registry=instrument_registry,
@@ -394,7 +396,7 @@ def _run_main(settings: Settings, storage: RuntimeStorageScope) -> None:
             rest_market_data=clients.rest_market_data,
             live_market_data=clients.live_market_data,
             candle_builders=build_candle_builders(symbols),
-            trading_session_service=trading_session_service_from_settings(settings),
+            trading_session_service=trading_session_service,
             market_context_service=market_context_service,
             multi_timeframe_service=multi_timeframe_service,
             market_data_validator=MarketDataValidator(),

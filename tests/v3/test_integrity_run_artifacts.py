@@ -27,6 +27,7 @@ def test_failed_run_checkpoints_qc_manifest_and_heartbeat_share_authority(tmp_pa
     paths = build_run_journal_paths(journal_path=tmp_path / "logs/trades.jsonl", run_id=runtime.run_id)
     manifest = build_v3_run_manifest(
         settings=runtime.settings, config=runtime.config,
+        trading_session_service=runtime.trading_session_service,
         recoverability_scorer=runtime.planner.recoverability_scorer,
         instrument_registry=runtime.instrument_registry, symbols=runtime.symbols,
         run_id=runtime.run_id, started_at=NOW, run_paths=paths,

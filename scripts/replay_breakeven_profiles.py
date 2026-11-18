@@ -27,7 +27,7 @@ from app.backtesting.stateful_managed_replay import (
     ReplayCandidateBatch,
     StatefulManagedReplay,
 )
-from app.config.settings import Settings
+from app.config.settings import HistoricalReplaySettings, Settings
 from app.execution.breakeven_profile import BreakevenProfileName
 from app.execution.position_close_reason import POSITION_CLOSE_TAXONOMY_VERSION
 from app.execution.position_lifecycle_engine import (
@@ -437,9 +437,17 @@ def _build_settings(
                 else AssetClass(candidate.session_key.split(":", maxsplit=1)[0])
             )
             symbols[asset].add(candidate.symbol)
-    raw_settings = (manifests[-1].get("runtime") or {}).get("settings") or {}
+    runtime = manifests[-1].get("runtime") or {}
+    raw_settings = dict(runtime.get("settings") or {})
+    # New manifests store the actual calendar independently of runtime settings.
+    for asset in AssetClass:
+        recorded = (runtime.get("trading_sessions") or {}).get(asset.value)
+        if recorded is not None:
+            raw_settings[f"TRADING_SESSIONS_{asset.value}"] = ",".join(recorded["local_windows"])
+            raw_settings[f"TRADING_SESSION_TIMEZONE_{asset.value}"] = recorded["timezone"]
     watchlist = sorted(set().union(*symbols.values()))
-    return Settings(
+    return HistoricalReplaySettings(
+        _env_file=None,
         WATCHLIST=",".join(watchlist),
         CRYPTO_SYMBOLS=",".join(sorted(symbols[AssetClass.CRYPTO])),
         EQUITY_US_SYMBOLS=",".join(sorted(symbols[AssetClass.EQUITY_US])),
@@ -448,6 +456,9 @@ def _build_settings(
         MAX_OPEN_POSITIONS_PER_SYMBOL=int(raw_settings.get("MAX_OPEN_POSITIONS_PER_SYMBOL", 1)),
         MAX_TRADES_PER_SESSION=int(raw_settings.get("MAX_TRADES_PER_SESSION", 3)),
         TRADING_SESSION_TIMEZONE=str(raw_settings.get("TRADING_SESSION_TIMEZONE", timezone_name)),
+        TRADING_SESSION_TIMEZONE_CRYPTO=raw_settings.get("TRADING_SESSION_TIMEZONE_CRYPTO"),
+        TRADING_SESSION_TIMEZONE_EQUITY_US=raw_settings.get("TRADING_SESSION_TIMEZONE_EQUITY_US"),
+        TRADING_SESSION_TIMEZONE_EQUITY_EU=raw_settings.get("TRADING_SESSION_TIMEZONE_EQUITY_EU"),
         TRADING_SESSIONS_CRYPTO=str(raw_settings.get("TRADING_SESSIONS_CRYPTO", "")),
         TRADING_SESSIONS_EQUITY_US=str(
             raw_settings.get("TRADING_SESSIONS_EQUITY_US", "15:30-22:00")

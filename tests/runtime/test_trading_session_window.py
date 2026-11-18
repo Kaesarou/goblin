@@ -1,10 +1,15 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
+import pytest
+
+from app.config.settings import HistoricalReplaySettings, Settings
 from app.instruments.models import AssetClass
 from app.runtime.trading_session_window import (
     AssetTradingSessionConfig,
     TradingSessionService,
     parse_trading_sessions,
+    historical_trading_session_service,
+    regular_market_session_service,
 )
 
 
@@ -108,3 +113,91 @@ def test_multiple_sessions_are_supported():
 
     assert decision.session_active
     assert decision.reason == 'session_tradable'
+
+
+@pytest.mark.parametrize(
+    ('day', 'us_start_hour', 'us_end_hour', 'eu_start_hour', 'eu_end_hour'),
+    [
+        ('2026-03-09', 13, 20, 8, 16),
+        ('2026-03-30', 13, 20, 7, 15),
+        ('2026-10-26', 13, 20, 8, 16),
+        ('2026-10-30', 13, 20, 8, 16),
+        ('2026-11-02', 14, 21, 8, 16),
+    ],
+)
+def test_market_windows_follow_their_own_dst(
+    day, us_start_hour, us_end_hour, eu_start_hour, eu_end_hour,
+):
+    session_service = regular_market_session_service()
+    expected = {
+        AssetClass.EQUITY_US: ((us_start_hour, 30), (us_end_hour, 0)),
+        AssetClass.EQUITY_EU: ((eu_start_hour, 0), (eu_end_hour, 30)),
+    }
+    midnight = datetime.fromisoformat(day).replace(tzinfo=timezone.utc)
+    for asset_class, (open_time, close_time) in expected.items():
+        start = midnight + timedelta(hours=open_time[0], minutes=open_time[1])
+        end = midnight + timedelta(hours=close_time[0], minutes=close_time[1])
+        evaluate = session_service.evaluate
+        assert not evaluate(asset_class=asset_class, now=start - timedelta(seconds=1)).collect_snapshots
+        opening = evaluate(asset_class=asset_class, now=start)
+        assert opening.collect_snapshots and opening.new_entries_allowed
+        assert opening.session_start_time.astimezone(timezone.utc) == start
+        assert opening.session_end_time.astimezone(timezone.utc) == end
+        cutoff = evaluate(asset_class=asset_class, now=end - timedelta(hours=1))
+        assert cutoff.collect_snapshots and not cutoff.new_entries_allowed
+        assert not evaluate(asset_class=asset_class, now=end).collect_snapshots
+
+
+@pytest.mark.parametrize(
+    ('timezone_name', 'sessions', 'opening_hour'),
+    [('America/New_York', '09:30-16:00', 13), ('Europe/Paris', '15:30-22:00', 14)],
+)
+def test_market_without_override_uses_configured_legacy_timezone(
+    timezone_name, sessions, opening_hour,
+):
+    settings = HistoricalReplaySettings(
+        _env_file=None,
+        TRADING_SESSION_TIMEZONE=timezone_name,
+        TRADING_SESSION_TIMEZONE_EQUITY_US=None,
+        TRADING_SESSIONS_EQUITY_US=sessions,
+    )
+    opening = datetime(2026, 10, 26, opening_hour, 30, tzinfo=timezone.utc)
+    decision = historical_trading_session_service(settings).evaluate(
+        asset_class=AssetClass.EQUITY_US, now=opening,
+    )
+    assert decision.session_start_time == opening
+
+
+def test_retired_dotenv_keys_cannot_change_live_calendar(tmp_path, monkeypatch):
+    env = tmp_path / '.env'
+    env.write_text('TRADING_SESSION_TIMEZONE=invalid\nTRADING_SESSIONS_EQUITY_US=\n')
+    monkeypatch.setenv('TRADING_SESSION_TIMEZONE_EQUITY_US', 'UTC')
+    settings = Settings(_env_file=env)
+    assert 'TRADING_SESSIONS_EQUITY_US' not in settings.model_dump(by_alias=True)
+    assert regular_market_session_service().calendar_metadata()['EQUITY_US'] == {
+        'timezone': 'America/New_York', 'local_windows': ['09:30-16:00'],
+    }
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, UNRELATED_UNKNOWN_KEY='invalid')
+
+
+def test_replay_reconstructs_new_manifest_calendar_and_old_timezone(monkeypatch):
+    from scripts.replay_breakeven_profiles import _build_settings
+
+    monkeypatch.setenv('TRADING_SESSION_TIMEZONE_EQUITY_US', 'UTC')
+    modern = regular_market_session_service().calendar_metadata()
+    settings = _build_settings(
+        batches=[], manifests=[{'runtime': {'trading_sessions': modern}}],
+        timezone_name='Europe/Paris',
+    )
+    assert historical_trading_session_service(settings).calendar_metadata() == modern
+
+    legacy = _build_settings(
+        batches=[], manifests=[{'runtime': {'settings': {
+            'TRADING_SESSION_TIMEZONE': 'Europe/Paris',
+            'TRADING_SESSIONS_EQUITY_US': '15:30-22:00',
+        }}}], timezone_name='UTC',
+    )
+    assert historical_trading_session_service(legacy).calendar_metadata()['EQUITY_US'] == {
+        'timezone': 'Europe/Paris', 'local_windows': ['15:30-22:00'],
+    }

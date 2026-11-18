@@ -135,3 +135,11 @@ sys.exit(int(os.environ["GOBLIN_TEST_DOCKER_EXIT"]))
 
 def test_deploy_release_bash_syntax():
     subprocess.run(["bash", "-n", str(SCRIPT)], check=True, capture_output=True)
+
+
+def test_logs_are_reset_after_stopping_and_before_starting_release():
+    source = SCRIPT.read_text()
+    assert source.index('docker pull "$image"') < source.index('scripts.prepare_deployment_logs validate')
+    assert source.index('scripts.prepare_deployment_logs validate') < source.index('prepared_compose stop')
+    assert source.index('prepared_compose stop') < source.index('scripts.prepare_deployment_logs reset')
+    assert source.index('scripts.prepare_deployment_logs reset') < source.index('up --detach --force-recreate')
