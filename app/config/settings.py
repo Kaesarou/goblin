@@ -185,6 +185,10 @@ class HistoricalReplaySettings(Settings):
         default='Europe/Paris',
         alias='TRADING_SESSION_TIMEZONE',
     )
+    trading_session_timezone_crypto: str | None = Field(
+        default=None,
+        alias='TRADING_SESSION_TIMEZONE_CRYPTO',
+    )
     trading_session_timezone_equity_us: str | None = Field(
         default=None,
         alias='TRADING_SESSION_TIMEZONE_EQUITY_US',

@@ -179,3 +179,25 @@ def test_retired_dotenv_keys_cannot_change_live_calendar(tmp_path, monkeypatch):
     }
     with pytest.raises(ValueError):
         Settings(_env_file=None, UNRELATED_UNKNOWN_KEY='invalid')
+
+
+def test_replay_reconstructs_new_manifest_calendar_and_old_timezone(monkeypatch):
+    from scripts.replay_breakeven_profiles import _build_settings
+
+    monkeypatch.setenv('TRADING_SESSION_TIMEZONE_EQUITY_US', 'UTC')
+    modern = regular_market_session_service().calendar_metadata()
+    settings = _build_settings(
+        batches=[], manifests=[{'runtime': {'trading_sessions': modern}}],
+        timezone_name='Europe/Paris',
+    )
+    assert historical_trading_session_service(settings).calendar_metadata() == modern
+
+    legacy = _build_settings(
+        batches=[], manifests=[{'runtime': {'settings': {
+            'TRADING_SESSION_TIMEZONE': 'Europe/Paris',
+            'TRADING_SESSIONS_EQUITY_US': '15:30-22:00',
+        }}}], timezone_name='UTC',
+    )
+    assert historical_trading_session_service(legacy).calendar_metadata()['EQUITY_US'] == {
+        'timezone': 'Europe/Paris', 'local_windows': ['15:30-22:00'],
+    }

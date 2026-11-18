@@ -263,6 +263,7 @@ def historical_trading_session_service(settings: HistoricalReplaySettings) -> Tr
             AssetClass.CRYPTO: AssetTradingSessionConfig(
                 asset_class=AssetClass.CRYPTO,
                 sessions=parse_trading_sessions(settings.trading_sessions_crypto),
+                timezone_name=settings.trading_session_timezone_crypto,
             ),
             AssetClass.EQUITY_US: AssetTradingSessionConfig(
                 asset_class=AssetClass.EQUITY_US,
