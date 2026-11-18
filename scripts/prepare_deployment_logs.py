@@ -6,10 +6,12 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 
 from app.config.settings import Settings
+from app.runtime.storage_scope import STORAGE_SCOPE_VERSION
 
 DATA_ROOT = Path("/app/data")
 LOG_FIELDS = (
@@ -23,6 +25,16 @@ def _inside(path: Path, directory: Path) -> bool:
     # Check both the configured pathname and its resolved target.
     return (Path(os.path.abspath(path)).is_relative_to(directory)
             or path.resolve().is_relative_to(directory))
+
+
+def _mountpoints() -> tuple[Path, ...]:
+    # Linux mountinfo identifies bind mounts too, including same-device mounts
+    # that pathlib.is_mount() cannot reliably identify.
+    with Path("/proc/self/mountinfo").open(encoding="utf-8", errors="surrogateescape") as handle:
+        return tuple(
+            Path(re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), line.split()[4]))
+            for line in handle
+        )
 
 
 def validate_log_directory(settings: Settings, data_root: Path = DATA_ROOT) -> Path:
@@ -44,7 +56,7 @@ def validate_log_directory(settings: Settings, data_root: Path = DATA_ROOT) -> P
         raise ValueError("Refusing symlinked runtime identity")
     if marker.exists():
         identity = json.loads(marker.read_text(encoding="utf-8"))
-        if identity != {"version": 1, "broker": settings.broker, "database": database.name}:
+        if identity != {"version": STORAGE_SCOPE_VERSION, "broker": settings.broker, "database": database.name}:
             raise ValueError("Runtime storage identity does not match deployment broker/database")
 
     order_db = Path(f"{database}.{settings.broker}.orders.sqlite")
@@ -67,13 +79,9 @@ def validate_log_directory(settings: Settings, data_root: Path = DATA_ROOT) -> P
                 and path.resolve() != logs):
             raise ValueError("Configured log output is outside the dedicated logs directory")
 
-    # Never cross an additional filesystem mounted beneath logs.
-    if logs.exists():
-        for directory, subdirectories, _ in os.walk(logs, followlinks=False):
-            for name in subdirectories:
-                child = Path(directory) / name
-                if not child.is_symlink() and child.is_mount():
-                    raise ValueError("Refusing a nested mount inside logs")
+    # Never delete through a nested mount (including a mounted single file).
+    if any(mount.is_relative_to(logs) for mount in _mountpoints()):
+        raise ValueError("Refusing a nested mount inside logs")
     return logs
 
 
@@ -86,7 +94,11 @@ def reset_deployment_logs(settings: Settings, data_root: Path = DATA_ROOT) -> Pa
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         logs = validate_log_directory(settings, data_root)
-        logs.mkdir(exist_ok=True)
+        # A fresh Alpaca storage root must remain empty until its runtime
+        # identity is established. An absent logs directory already has no
+        # previous log entries; the runtime will create it itself.
+        if not logs.exists():
+            return logs
         for item in logs.iterdir():
             if item.is_symlink() or not item.is_dir():
                 item.unlink()
@@ -113,7 +125,8 @@ def main() -> int:
             print("GOBLIN_DEPLOYMENT_LOG_PATHS_VALID", flush=True)
         else:
             logs = reset_deployment_logs(settings)
-            print(f"GOBLIN_DEPLOYMENT_LOGS_EMPTY broker={settings.broker} path={logs} entries=0",
+            state = "directory" if logs.exists() else "absent"
+            print(f"GOBLIN_DEPLOYMENT_LOGS_EMPTY broker={settings.broker} path={logs} entries=0 state={state}",
                   flush=True)
     except Exception:
         # Configuration validation errors can contain credentials.

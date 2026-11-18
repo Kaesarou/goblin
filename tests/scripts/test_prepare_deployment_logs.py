@@ -109,3 +109,23 @@ def test_order_database_symlink_target_cannot_be_deleted(storage):
     with pytest.raises(ValueError):
         reset_deployment_logs(Settings(_env_file=None, BROKER="alpaca_demo"), root)
     assert (logs / "orders.sqlite").read_text() == "durable"
+
+
+def test_fresh_alpaca_storage_is_not_populated_with_logs(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("GOBLIN_RESTART_GUARD_PATH", raising=False)
+    root = tmp_path / "data"
+    root.mkdir()
+    assert reset_deployment_logs(Settings(_env_file=None, BROKER="alpaca_demo"), root) == root / "logs"
+    assert not (root / "logs").exists()
+    assert {p.name for p in root.iterdir()} == {".goblin-runtime.lock"}
+
+
+def test_nested_mount_is_rejected_before_cleanup(storage, monkeypatch):
+    from scripts import prepare_deployment_logs
+
+    root, logs = storage
+    monkeypatch.setattr(prepare_deployment_logs, "_mountpoints", lambda: (logs / "runs",))
+    with pytest.raises(ValueError):
+        reset_deployment_logs(Settings(_env_file=None), root)
+    assert (logs / ".hidden").exists()
