@@ -40,6 +40,7 @@ from app.research.summary import (
     RESEARCH_SUMMARY_SCHEMA_VERSION,
     research_summary_contract_metadata,
 )
+from app.runtime.trading_session_window import TradingSessionService
 from app.v3.live_execution import (
     BROKER_RECONCILIATION_INTERVAL_SECONDS,
     CONFIRMATION_BACKOFF_MAX_SECONDS,
@@ -71,6 +72,7 @@ def build_run_id(started_at: datetime | None = None) -> str:
 def build_v3_run_manifest(
     *,
     settings,
+    trading_session_service: TradingSessionService,
     config,
     recoverability_scorer,
     instrument_registry,
@@ -166,6 +168,7 @@ def build_v3_run_manifest(
             ),
         },
         "runtime": {
+            "trading_sessions": trading_session_service.calendar_metadata(),
             "contracts": {
                 "v3_runtime": V3_RUNTIME_CONTRACT_VERSION,
                 "v3_runtime_state": V3_RUNTIME_STATE_VERSION,

@@ -13,7 +13,7 @@ from app.backtesting.replay_pricing import (
     ReplayMode,
     ReplayPriceProvenance,
 )
-from app.config.settings import Settings
+from app.config.settings import HistoricalReplaySettings, Settings
 from app.execution.candidate_economics import (
     CandidateEconomicsEstimator,
     EvaluatedTradeCandidate,
@@ -61,7 +61,8 @@ from app.runtime.candidate_flow import (
 )
 from app.runtime.trading_session_window import (
     TradingSessionService,
-    trading_session_service_from_settings,
+    historical_trading_session_service,
+    regular_market_session_service,
 )
 from app.strategies.balanced_strategy_config import BalancedStrategyConfig
 from app.utils.commons import spread_percent
@@ -251,7 +252,9 @@ class StatefulManagedReplay:
         self.cooldown_store = _ReplayClosedTradeMemory()
         self.cooldown_guard = TradeCooldownGuard(self.cooldown_store)
         self.session_service: TradingSessionService = (
-            trading_session_service_from_settings(settings)
+            historical_trading_session_service(settings)
+            if isinstance(settings, HistoricalReplaySettings)
+            else regular_market_session_service()
         )
         self.open_metadata: dict[str, _OpenTradeMetadata] = {}
         self.trades: list[ReplayTrade] = []

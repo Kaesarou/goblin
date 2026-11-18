@@ -32,6 +32,16 @@ See [V3 inventory architecture](docs/v3-inventory-recoverability.md),
 [broker integrity](docs/v3-runtime-broker-integrity.md), and
 [experimental refactoring checkpoints](docs/refactoring-experimental.md).
 
+## Market session definitions
+
+Regular sessions are fixed in code, independent of broker and server timezone:
+US equities 09:30–16:00 America/New_York, EU equities 09:00–17:30 Europe/Paris,
+crypto 24/7 UTC. Old TRADING_SESSION* dotenv keys are ignored and may be removed.
+The run manifest records the effective timezone and local windows in
+`runtime.trading_sessions`. Historical replays use the source manifest, not
+the current environment. Exchange holidays and early closes require separate
+calendar support; weekdays only for equity sessions.
+
 ## Historical directional research (V1/V2)
 
 The sections below document the earlier directional experiments and retained
