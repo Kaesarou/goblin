@@ -132,12 +132,23 @@ if args[0] == "inspect":
 elif args[0] == "compose":
     if "run" in args and failure == "configuration":
         sys.exit(1)
+    if "reset" in args and failure == "reset":
+        sys.exit(1)
+    if "validate" in args and failure == "log_validation":
+        sys.exit(1)
+    if "stop" in args and failure == "stop":
+        sys.exit(1)
     if "up" in args and failure == "startup":
         sys.exit(1)
     if "ps" in args:
         print("alpaca-container-id")
 elif args[0] == "pull" and failure == "pull":
     sys.exit(1)
+elif args[0] == "ps":
+    if failure == "running":
+        print("goblin-alpaca")
+    if failure == "ps":
+        sys.exit(1)
 ''')
     fake_docker.chmod(0o755)
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
@@ -168,9 +179,13 @@ def test_successful_release_only_controls_its_explicit_compose_project(deploymen
     assert not any(args[0] in {"stop", "update"} for args in calls)
     startup = next(args for args in calls if args[0] == "compose" and "up" in args)
     assert "--force-recreate" in startup and "--no-deps" in startup
+    validate = next(args for args in calls if "scripts.prepare_deployment_logs" in args and "validate" in args)
+    stop = next(args for args in calls if args[0] == "compose" and "stop" in args)
+    reset = next(args for args in calls if "scripts.prepare_deployment_logs" in args and "reset" in args)
+    assert calls.index(validate) < calls.index(stop) < calls.index(reset) < calls.index(startup)
 
 
-@pytest.mark.parametrize("failure", ["configuration", "pull", "owner"])
+@pytest.mark.parametrize("failure", ["configuration", "pull", "owner", "log_validation"])
 def test_failed_preparation_leaves_existing_containers_and_release_untouched(deployment, failure):
     app_dir, run = deployment
     installed = app_dir / "docker-compose.alpaca.yml"
@@ -179,6 +194,17 @@ def test_failed_preparation_leaves_existing_containers_and_release_untouched(dep
     assert result.returncode != 0
     assert installed.read_text() == "previous release"
     assert not any(args[0] in {"stop", "update"} or "up" in args for args in calls)
+
+
+@pytest.mark.parametrize("failure", ["stop", "reset", "running", "ps"])
+def test_failed_stop_or_log_reset_never_starts_new_runtime(deployment, failure):
+    app_dir, run = deployment
+    result, calls = run(failure=failure)
+    assert result.returncode != 0
+    assert not any("up" in args for args in calls)
+    assert not (app_dir / "deployment.json").exists()
+    if failure != "reset":
+        assert not any("reset" in args for args in calls)
 
 
 @pytest.mark.parametrize("failure", ["startup", "image"])
