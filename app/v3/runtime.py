@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
+from app.instruments.models import AssetClass
 from app.market.data_quality import MarketDataStatus, MarketDataValidator
 from app.market.models import Candle, MarketSnapshot
 from app.market_data.coordinator import MarketDataCoordinator
@@ -90,6 +91,7 @@ class GoblinV3Runtime:
         candle_journal,
         heartbeat,
         research_pipeline=None,
+        shadow_experiment=None,
     ) -> None:
         self.settings = settings
         self.symbols = [symbol.strip().upper() for symbol in symbols]
@@ -114,6 +116,7 @@ class GoblinV3Runtime:
         self.candle_journal = candle_journal
         self.heartbeat = heartbeat
         self.research_pipeline = research_pipeline
+        self.shadow_experiment = shadow_experiment
 
         self.asset_class_by_symbol = {
             symbol: instrument_registry.resolve(symbol).asset_class
@@ -488,6 +491,11 @@ class GoblinV3Runtime:
         self.latest_snapshots[symbol] = snapshot
         self.market_context_service.observe_accepted_snapshot(snapshot)
         self.fallback_validator.observe_accepted(snapshot)
+        if self.shadow_experiment is not None and symbol in self.context_asset_classes:
+            try:
+                self.shadow_experiment.observe_benchmark(snapshot)
+            except Exception:
+                self._disable_adaptive_shadow()
 
         if event.price_changed:
             self.metrics["market_snapshots"] += 1
@@ -813,6 +821,14 @@ class GoblinV3Runtime:
                 quality_ok=quality_ok,
             )
 
+        # Entirely separate from broker equity, executor gates and the active
+        # book. Shadow failure must never affect the baseline strategy.
+        if self.shadow_experiment is not None and self.shadow_experiment.disabled_reason is None:
+            try:
+                self._step_adaptive_shadow(batch, market_states)
+            except Exception:
+                self._disable_adaptive_shadow()
+
         equity_reference = self._current_run_equity or self._exit_planning_equity
         if equity_reference is None:
             self._process_equity_independent_reduce_only(market_states)
@@ -908,6 +924,41 @@ class GoblinV3Runtime:
                 self._clear_logged_decision(symbol)
 
         self._record_incomplete_decision_window(batch)
+
+    def _disable_adaptive_shadow(self) -> None:
+        if self.shadow_experiment is not None:
+            self.shadow_experiment.disabled_reason = "shadow_exception"
+        logger.exception("Adaptive shadow disabled; active RR5 continues unchanged")
+
+    def _step_adaptive_shadow(self, batch, market_states) -> None:
+        # Use the session of the closed M1, not whichever session is current
+        # after a delayed decision window has been processed.
+        asof = batch.closed_at
+        session = self.trading_session_service.evaluate(
+            asset_class=AssetClass.EQUITY_US, now=asof - timedelta(microseconds=1))
+        if not session.session_active or not session.session_key or session.session_start_time is None:
+            return
+        entry_session = self.trading_session_service.evaluate(
+            asset_class=AssetClass.EQUITY_US, now=asof)
+        expected = {s for s in batch.expected_symbols
+                    if self.asset_class_by_symbol.get(s) == AssetClass.EQUITY_US}
+        if not expected:
+            return
+        markets = {}
+        for symbol in expected:
+            market = market_states.get(symbol)
+            quote = batch.snapshots.get(symbol)
+            if (market is None or quote is None or not market.quality_ok
+                    or quote.received_at > asof or quote.timestamp >= asof):
+                continue
+            markets[symbol] = replace(market, entry_allowed=bool(
+                entry_session.new_entries_allowed
+                and self._transport_entry_allowed()
+                and self.coordinator.entry_allowed(symbol)))
+        self.shadow_experiment.step(
+            asof=asof, session=session.session_key,
+            session_start=_utc(session.session_start_time),
+            expected=expected, markets=markets, features=batch.features)
 
     def _process_equity_independent_reduce_only(
         self,
@@ -1684,6 +1735,15 @@ class GoblinV3Runtime:
                 "V3 exposure already beyond configured risk caps | %s", payload
             )
 
+    def _adaptive_shadow_metrics(self):
+        if self.shadow_experiment is None:
+            return None
+        try:
+            return self.shadow_experiment.metrics()
+        except Exception:
+            self._disable_adaptive_shadow()
+            return {"status": "disabled", "disabled_reason": "metrics_exception"}
+
     def _heartbeat_metrics(self) -> dict[str, object]:
         inventory_observability = []
         observed_at = datetime.now(UTC)
@@ -1725,6 +1785,7 @@ class GoblinV3Runtime:
             })
         return {
             "active_inventory_observability": inventory_observability,
+            "adaptive_shadow": self._adaptive_shadow_metrics(),
             **self.metrics,
             "decision_reason_counts": dict(
                 sorted(self._decision_reason_counts.items())
