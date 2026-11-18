@@ -41,6 +41,7 @@ from app.research.summary import (
     research_summary_contract_metadata,
 )
 from app.runtime.trading_session_window import TradingSessionService
+from app.v3.adaptive_shadow import shadow_metadata
 from app.v3.live_execution import (
     BROKER_RECONCILIATION_INTERVAL_SECONDS,
     CONFIRMATION_BACKOFF_MAX_SECONDS,
@@ -169,6 +170,7 @@ def build_v3_run_manifest(
         },
         "runtime": {
             "trading_sessions": trading_session_service.calendar_metadata(),
+            "adaptive_shadow": shadow_metadata(settings.broker),
             "contracts": {
                 "v3_runtime": V3_RUNTIME_CONTRACT_VERSION,
                 "v3_runtime_state": V3_RUNTIME_STATE_VERSION,
@@ -357,6 +359,7 @@ def build_v3_run_manifest(
             "errors": str(run_paths.errors),
             "market": str(run_paths.market),
             "candles": str(run_paths.candles),
+            "adaptive_shadow": str(run_paths.root / "adaptive_shadow.jsonl.gz"),
             "debug_decisions": str(run_paths.debug_decisions),
             "research": str(run_paths.research),
             "research_summary": str(run_paths.research_summary),
