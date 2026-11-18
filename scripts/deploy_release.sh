@@ -80,95 +80,16 @@ prepared_compose() {
     --env-file "$next_image_env" -f "$next_compose" "$@"
 }
 
-# Validate using the new image and the actual .env before stopping the old bot.
+# Validate using the incoming image and actual .env before stopping the old bot.
 prepared_compose run --rm --no-deps --entrypoint python goblin -m scripts.prepare_deployment_logs validate
 prepared_compose stop --timeout 120 goblin
-if [[ -n "$(docker ps --filter 'name=^/goblin-bot "$next_compose" "$compose_file"
-mv "$next_image_env" "$image_env"
-
-start_release() {
-  docker compose \
-    --project-directory "$app_dir" \
-    --env-file "$image_env" \
-    -f "$compose_file" \
-    up --detach --force-recreate --remove-orphans --wait --wait-timeout 90
-}
-
-capture_failed_release_diagnostics() {
-  {
-    printf '=== Goblin failed release diagnostics ===\n'
-    printf 'git_sha=%s\nimage=%s\ncaptured_at=%s\n' \
-      "$git_sha" "$image" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    printf '\n=== docker compose ps -a ===\n'
-    docker compose \
-      --project-directory "$app_dir" \
-      --env-file "$image_env" \
-      -f "$compose_file" \
-      ps -a || true
-    printf '\n=== container operational state ===\n'
-    docker inspect --format '{{json .State}}' goblin-bot || true
-    printf '\n=== docker logs --tail 500 goblin-bot ===\n'
-    docker logs --timestamps --tail 500 goblin-bot || true
-  } 2>&1 | tee "$deployment_diagnostics" >&2 || true
-}
-
-fail_closed() {
-  printf 'DEMO close-watch deployment not validated; stopping the container without rolling back to an older trading image\n' >&2
-  docker update --restart=no goblin-bot || true
-  docker stop --time 30 goblin-bot || true
-  exit 1
-}
-
-if ! start_release; then
-  printf 'Deployment failed for %s\n' "$image" >&2
-  capture_failed_release_diagnostics
-  fail_closed
-fi
-
-container_id="$(docker compose \
-  --project-directory "$app_dir" \
-  --env-file "$image_env" \
-  -f "$compose_file" \
-  ps --quiet goblin)"
-running_image="$(docker inspect --format '{{.Config.Image}}' "$container_id")"
-
-if [[ "$running_image" != "$image" ]]; then
-  printf 'Running image mismatch: expected %s, got %s\n' "$image" "$running_image" >&2
-  capture_failed_release_diagnostics
-  fail_closed
-fi
-
-# PID-1 health alone does not prove the manual closes filled or trading armed.
-# The watcher checks flatness at t~0 and t~180s. Probe at t~120s to avoid
-# overlapping the account-read budget of the watcher.
-printf 'Observing DEMO close watcher before read-only payload validation\n'
-sleep 120
-if ! docker inspect --format '{{.State.Running}}' "$container_id" | grep -qx true; then
-  printf 'Goblin exited during observation window\n' >&2
-  capture_failed_release_diagnostics
-  fail_closed
-fi
-if ! docker exec "$container_id" python -m scripts.inspect_etoro_payload_schema_readonly; then
-  printf 'Read-only DEMO schema probe failed; refusing to certify the release\n' >&2
-  capture_failed_release_diagnostics
-  fail_closed
-fi
-printf '=== Runtime startup/health summary (no raw broker payloads) ===\n'
-docker logs --timestamps --tail 180 "$container_id" 2>&1 | \
-  grep -E 'DEMO_REARM|v3_runtime_started|external_broker_activity|observation|CRITICAL|ERROR|Traceback|429|Timeout' | \
-  tail -n 60 || true
-
-# Staging success is NOT evidence that manual closes filled or BUYs are enabled.
-deployed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-printf '{"git_commit":"%s","image":"%s","deployed_at":"%s","observation_only_at_deploy":true,"auto_rearm_requires_two_flat_broker_checks":true}\n' \
-  "$git_sha" "$image" "$deployed_at" > "$app_dir/deployment.json"
-printf 'Goblin DEMO close-watch release staged on %s (%s); BUY only after two broker-flat checks and normal V3 preflight\n' "$image" "$container_id"
- --format '{{.Names}}')" ]]; then
+running="$(docker ps --filter 'name=^/goblin-bot$' --format '{{.Names}}')"
+if [[ -n "$running" ]]; then
   printf 'Refusing log reset while goblin-bot is running\n' >&2
   exit 1
 fi
 # The one-shot helper holds the runtime lease and verifies zero entries before
-# returning success. No log reset is performed by a normal runtime restart.
+# returning success. No reset is performed by a normal runtime restart.
 prepared_compose run --rm --no-deps --entrypoint python goblin -m scripts.prepare_deployment_logs reset
 
 mv "$next_compose" "$compose_file"
@@ -179,7 +100,7 @@ start_release() {
     --project-directory "$app_dir" \
     --env-file "$image_env" \
     -f "$compose_file" \
-    up --detach --remove-orphans --wait --wait-timeout 90
+    up --detach --force-recreate --remove-orphans --wait --wait-timeout 90
 }
 
 capture_failed_release_diagnostics() {

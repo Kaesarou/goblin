@@ -79,36 +79,8 @@ prepared_compose() {
 }
 prepared_compose run --rm --no-deps --entrypoint python goblin -m scripts.prepare_deployment_logs validate
 prepared_compose stop --timeout 120 goblin
-if [[ -n "$(docker ps --filter 'name=^/goblin-alpaca "$next_compose" "$compose_file"
-mv "$next_image_env" "$image_env"
-
-fail_closed() {
-  printf 'Alpaca startup failed; stopping only its container, without automatic rollback\n' >&2
-  # Inspect only operational state, never .Config.Env or a full container dump.
-  docker inspect --format '{{json .State}}' "$container" >&2 || true
-  if assert_container_owner; then
-    docker update --restart=no "$container" || true
-    docker stop --time 120 "$container" || true
-  fi
-  exit 1
-}
-
-# Recreate even on a same-SHA retry: this applies the latest .env and restores
-# the configured restart policy after a preceding fail_closed disabled it.
-if ! compose up --detach --force-recreate --no-deps --wait --wait-timeout 180 goblin; then
-  fail_closed
-fi
-if ! container_id="$(compose ps --quiet goblin)" || [[ -z "$container_id" ]] || \
-   ! running_image="$(docker inspect --format '{{.Config.Image}}' "$container_id")" || \
-   [[ "$running_image" != "$image" ]]; then
-  fail_closed
-fi
-
-printf '{"git_commit":"%s","image":"%s","deployed_at":"%s","project":"%s","container":"%s"}\n' \
-  "$git_sha" "$image" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$project" "$container" \
-  > "$app_dir/deployment.json"
-printf 'Alpaca release deployed: %s (%s)\n' "$image" "$container_id"
- --format '{{.Names}}')" ]]; then
+running="$(docker ps --filter 'name=^/goblin-alpaca$' --format '{{.Names}}')"
+if [[ -n "$running" ]]; then
   printf 'Refusing log reset while goblin-alpaca is running\n' >&2
   exit 1
 fi
