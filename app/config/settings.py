@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.execution.breakeven_profile import BreakevenProfileName
@@ -126,30 +126,19 @@ class Settings(BaseSettings):
         default='FRA40',
         alias='MARKET_BENCHMARK_EQUITY_EU',
     )
-    trading_session_timezone: str = Field(
-        default='Europe/Paris',
-        alias='TRADING_SESSION_TIMEZONE',
-    )
-    trading_session_timezone_equity_us: str | None = Field(
-        default=None,
-        alias='TRADING_SESSION_TIMEZONE_EQUITY_US',
-    )
-    trading_session_timezone_equity_eu: str | None = Field(
-        default=None,
-        alias='TRADING_SESSION_TIMEZONE_EQUITY_EU',
-    )
-    trading_sessions_crypto: str = Field(
-        default='',
-        alias='TRADING_SESSIONS_CRYPTO',
-    )
-    trading_sessions_equity_us: str = Field(
-        default='',
-        alias='TRADING_SESSIONS_EQUITY_US',
-    )
-    trading_sessions_equity_eu: str = Field(
-        default='',
-        alias='TRADING_SESSIONS_EQUITY_EU',
-    )
+    @model_validator(mode='before')
+    @classmethod
+    def ignore_retired_session_settings(cls, values):
+        # Existing dotenv files may still contain these obsolete keys. Accept
+        # only these retired names, never weaken validation of other extras.
+        if not isinstance(values, dict) or 'trading_session_timezone' in cls.model_fields:
+            return values
+        retired = {
+            'TRADING_SESSION_TIMEZONE', 'TRADING_SESSION_TIMEZONE_EQUITY_US',
+            'TRADING_SESSION_TIMEZONE_EQUITY_EU', 'TRADING_SESSIONS_CRYPTO',
+            'TRADING_SESSIONS_EQUITY_US', 'TRADING_SESSIONS_EQUITY_EU',
+        }
+        return {key: value for key, value in values.items() if key.upper() not in retired}
 
     @field_validator('journal_max_runs')
     @classmethod
@@ -187,6 +176,35 @@ class Settings(BaseSettings):
             symbols.append(symbol)
             seen_symbols.add(symbol)
         return symbols
+
+
+class HistoricalReplaySettings(Settings):
+    """Offline only: reproduce session configuration recorded by older runs."""
+
+    trading_session_timezone: str = Field(
+        default='Europe/Paris',
+        alias='TRADING_SESSION_TIMEZONE',
+    )
+    trading_session_timezone_equity_us: str | None = Field(
+        default=None,
+        alias='TRADING_SESSION_TIMEZONE_EQUITY_US',
+    )
+    trading_session_timezone_equity_eu: str | None = Field(
+        default=None,
+        alias='TRADING_SESSION_TIMEZONE_EQUITY_EU',
+    )
+    trading_sessions_crypto: str = Field(
+        default='',
+        alias='TRADING_SESSIONS_CRYPTO',
+    )
+    trading_sessions_equity_us: str = Field(
+        default='',
+        alias='TRADING_SESSIONS_EQUITY_US',
+    )
+    trading_sessions_equity_eu: str = Field(
+        default='',
+        alias='TRADING_SESSIONS_EQUITY_EU',
+    )
 
 
 def get_settings() -> Settings:

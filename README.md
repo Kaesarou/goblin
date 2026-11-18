@@ -32,28 +32,15 @@ See [V3 inventory architecture](docs/v3-inventory-recoverability.md),
 [broker integrity](docs/v3-runtime-broker-integrity.md), and
 [experimental refactoring checkpoints](docs/refactoring-experimental.md).
 
-## Equity session timezones
+## Market session definitions
 
-Each equity schedule is expressed in the wall-clock time of its configured
-market timezone. `TRADING_SESSION_TIMEZONE` is the fallback for asset classes
-without a timezone override. The eToro example uses New York hours for US
-equities and Paris hours for EU equities.
-
-When promoting this change to an existing eToro environment configured with
-`15:30-22:00` in `Europe/Paris`, update the US timezone and hours together in
-the deployment `.env`:
-
-```dotenv
-TRADING_SESSION_TIMEZONE_EQUITY_US=America/New_York
-TRADING_SESSIONS_EQUITY_US=09:30-16:00
-```
-
-The US session then follows US daylight saving independently of the EU session.
-On 26–30 October 2026, the expected UTC windows are 13:30–20:00 for US equities
-and 08:00–16:30 for EU equities. The run manifest records the effective timezone
-and local windows in `runtime.trading_sessions`. The `v3_session_state` journal
-records UTC boundaries for active sessions. Schedules cover regular weekdays.
-Exchange holidays and early closes require separate calendar support.
+Regular sessions are fixed in code, independent of broker and server timezone:
+US equities 09:30–16:00 America/New_York, EU equities 09:00–17:30 Europe/Paris,
+crypto 24/7 UTC. Old TRADING_SESSION* dotenv keys are ignored and may be removed.
+The run manifest records the effective timezone and local windows in
+`runtime.trading_sessions`. Historical replays use the source manifest, not
+the current environment. Exchange holidays and early closes require separate
+calendar support; weekdays only for equity sessions.
 
 ## Historical directional research (V1/V2)
 

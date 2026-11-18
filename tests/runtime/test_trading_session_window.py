@@ -2,13 +2,14 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.config.settings import Settings
+from app.config.settings import HistoricalReplaySettings, Settings
 from app.instruments.models import AssetClass
 from app.runtime.trading_session_window import (
     AssetTradingSessionConfig,
     TradingSessionService,
     parse_trading_sessions,
-    trading_session_service_from_settings,
+    historical_trading_session_service,
+    regular_market_session_service,
 )
 
 
@@ -127,15 +128,7 @@ def test_multiple_sessions_are_supported():
 def test_market_windows_follow_their_own_dst(
     day, us_start_hour, us_end_hour, eu_start_hour, eu_end_hour,
 ):
-    settings = Settings(
-        _env_file=None,
-        TRADING_SESSION_TIMEZONE='Europe/Paris',
-        TRADING_SESSION_TIMEZONE_EQUITY_US='America/New_York',
-        TRADING_SESSIONS_EQUITY_US='09:30-16:00',
-        TRADING_SESSION_TIMEZONE_EQUITY_EU='Europe/Paris',
-        TRADING_SESSIONS_EQUITY_EU='09:00-17:30',
-    )
-    session_service = trading_session_service_from_settings(settings)
+    session_service = regular_market_session_service()
     expected = {
         AssetClass.EQUITY_US: ((us_start_hour, 30), (us_end_hour, 0)),
         AssetClass.EQUITY_EU: ((eu_start_hour, 0), (eu_end_hour, 30)),
@@ -162,14 +155,27 @@ def test_market_windows_follow_their_own_dst(
 def test_market_without_override_uses_configured_legacy_timezone(
     timezone_name, sessions, opening_hour,
 ):
-    settings = Settings(
+    settings = HistoricalReplaySettings(
         _env_file=None,
         TRADING_SESSION_TIMEZONE=timezone_name,
         TRADING_SESSION_TIMEZONE_EQUITY_US=None,
         TRADING_SESSIONS_EQUITY_US=sessions,
     )
     opening = datetime(2026, 10, 26, opening_hour, 30, tzinfo=timezone.utc)
-    decision = trading_session_service_from_settings(settings).evaluate(
+    decision = historical_trading_session_service(settings).evaluate(
         asset_class=AssetClass.EQUITY_US, now=opening,
     )
     assert decision.session_start_time == opening
+
+
+def test_retired_dotenv_keys_cannot_change_live_calendar(tmp_path, monkeypatch):
+    env = tmp_path / '.env'
+    env.write_text('TRADING_SESSION_TIMEZONE=invalid\nTRADING_SESSIONS_EQUITY_US=\n')
+    monkeypatch.setenv('TRADING_SESSION_TIMEZONE_EQUITY_US', 'UTC')
+    settings = Settings(_env_file=env)
+    assert 'TRADING_SESSIONS_EQUITY_US' not in settings.model_dump(by_alias=True)
+    assert regular_market_session_service().calendar_metadata()['EQUITY_US'] == {
+        'timezone': 'America/New_York', 'local_windows': ['09:30-16:00'],
+    }
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, UNRELATED_UNKNOWN_KEY='invalid')

@@ -2,7 +2,7 @@ from datetime import UTC, datetime, time, timedelta
 from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
-from app.config.settings import Settings
+from app.config.settings import HistoricalReplaySettings
 from app.instruments.models import AssetClass
 
 SESSION_CLOSED = 'session_closed'
@@ -238,7 +238,26 @@ class TradingSessionService:
         return now.astimezone(timezone)
 
 
-def trading_session_service_from_settings(settings: Settings) -> TradingSessionService:
+# Market-local regular sessions: immutable definitions, not deployment settings.
+US_REGULAR_SESSION = AssetTradingSessionConfig(
+    AssetClass.EQUITY_US, (TradingSessionWindow(time(9, 30), time(16)),), 'America/New_York',
+)
+EU_REGULAR_SESSION = AssetTradingSessionConfig(
+    AssetClass.EQUITY_EU, (TradingSessionWindow(time(9), time(17, 30)),), 'Europe/Paris',
+)
+CRYPTO_SESSION = AssetTradingSessionConfig(AssetClass.CRYPTO, (), 'UTC')
+
+
+def regular_market_session_service() -> TradingSessionService:
+    return TradingSessionService(
+        configs={config.asset_class: config for config in (
+            US_REGULAR_SESSION, EU_REGULAR_SESSION, CRYPTO_SESSION,
+        )},
+        timezone_name='UTC',
+    )
+
+
+def historical_trading_session_service(settings: HistoricalReplaySettings) -> TradingSessionService:
     return TradingSessionService(
         configs={
             AssetClass.CRYPTO: AssetTradingSessionConfig(
