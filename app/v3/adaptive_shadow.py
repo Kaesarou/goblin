@@ -393,7 +393,7 @@ class ShadowExperiment:
         self.policy = policy or AdaptiveConfig()
         self.journal = journal
         self.benchmark_symbols = tuple(benchmark_symbols)
-        self.benchmarks = {s: deque(maxlen=2048) for s in self.benchmark_symbols}
+        self.benchmarks = {s: deque(maxlen=512) for s in self.benchmark_symbols}
         self.regime = MarketRegimeService(self.policy)
         self.arms = (
             _ShadowPortfolio(name="RR5_SHADOW_BASELINE", planner=planner, config=config,
@@ -413,6 +413,19 @@ class ShadowExperiment:
     def observe_benchmark(self, snapshot):
         history = self.benchmarks.get(snapshot.symbol)
         if history is not None and math.isfinite(snapshot.bid) and math.isfinite(snapshot.ask) and 0 < snapshot.bid <= snapshot.ask:
+            # Coalesce by availability minute, not quote count. A busy IEX
+            # benchmark must not evict the entire 15-minute momentum horizon.
+            # A later bucket cannot replace an earlier causal decision sample.
+            minute = max(snapshot.timestamp, snapshot.received_at).replace(second=0, microsecond=0)
+            if history:
+                previous = history[-1]
+                previous_minute = max(previous.timestamp, previous.received_at).replace(second=0, microsecond=0)
+                if minute < previous_minute:
+                    return
+                if minute == previous_minute:
+                    if snapshot.timestamp >= previous.timestamp:
+                        history[-1] = snapshot
+                    return
             history.append(snapshot)
 
     def _benchmark_context(self, asof, session_start):
