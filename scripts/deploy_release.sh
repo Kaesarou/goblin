@@ -81,7 +81,7 @@ prepared_compose() {
 }
 
 # Validate using the incoming image and actual .env before stopping the old bot.
-prepared_compose run --rm --no-deps --entrypoint python goblin -m scripts.prepare_deployment_logs validate
+prepared_compose run --rm --no-deps --entrypoint python goblin -m scripts.prepare_deployment_logs validate --broker etoro_demo
 prepared_compose stop --timeout 120 goblin
 running="$(docker ps --filter 'name=^/goblin-bot$' --format '{{.Names}}')"
 if [[ -n "$running" ]]; then
@@ -90,7 +90,7 @@ if [[ -n "$running" ]]; then
 fi
 # The one-shot helper holds the runtime lease and verifies zero entries before
 # returning success. No reset is performed by a normal runtime restart.
-prepared_compose run --rm --no-deps --entrypoint python goblin -m scripts.prepare_deployment_logs reset
+prepared_compose run --rm --no-deps --entrypoint python goblin -m scripts.prepare_deployment_logs reset --broker etoro_demo
 
 mv "$next_compose" "$compose_file"
 mv "$next_image_env" "$image_env"

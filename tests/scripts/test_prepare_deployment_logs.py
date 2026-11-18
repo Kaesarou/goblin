@@ -1,5 +1,5 @@
-from pathlib import Path
 import fcntl
+import json
 
 import pytest
 
@@ -21,7 +21,6 @@ def storage(tmp_path, monkeypatch):
     (root / "goblin.sqlite").write_bytes(b"persistent state")
     (root / "goblin.sqlite.alpaca_demo.orders.sqlite").write_bytes(b"orders")
     (root / "runtime_restart_guard.json").write_text("guard")
-    (root / "runtime_storage.json").write_text("identity")
     (root / "alpaca_instrument_ids.json").write_text("cache")
     return root, logs
 
@@ -30,6 +29,9 @@ def storage(tmp_path, monkeypatch):
 def test_reset_only_logs_and_check_emptiness(storage, broker):
     root, logs = storage
     settings = Settings(_env_file=None, BROKER=broker)
+    (root / "runtime_storage.json").write_text(json.dumps({
+        "version": 1, "broker": broker, "database": "goblin.sqlite",
+    }))
     persistent = {p.name: p.read_bytes() for p in root.iterdir() if p.is_file()}
     assert validate_log_directory(settings, root) == logs
     assert (logs / ".hidden").exists()
@@ -86,3 +88,24 @@ def test_restart_guard_cannot_be_in_logs(storage, monkeypatch):
     with pytest.raises(ValueError):
         reset_deployment_logs(Settings(_env_file=None), root)
     assert (logs / ".hidden").exists()
+
+
+def test_other_broker_identity_leaves_old_logs_intact(storage):
+    root, logs = storage
+    (root / "runtime_storage.json").write_text(json.dumps({
+        "version": 1, "broker": "alpaca_demo", "database": "goblin.sqlite",
+    }))
+    with pytest.raises(ValueError):
+        reset_deployment_logs(Settings(_env_file=None, BROKER="etoro_demo"), root)
+    assert (logs / ".hidden").exists()
+
+
+def test_order_database_symlink_target_cannot_be_deleted(storage):
+    root, logs = storage
+    order_db = root / "goblin.sqlite.alpaca_demo.orders.sqlite"
+    order_db.unlink()
+    (logs / "orders.sqlite").write_text("durable")
+    order_db.symlink_to(logs / "orders.sqlite")
+    with pytest.raises(ValueError):
+        reset_deployment_logs(Settings(_env_file=None, BROKER="alpaca_demo"), root)
+    assert (logs / "orders.sqlite").read_text() == "durable"

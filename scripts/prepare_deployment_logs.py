@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import json
 import os
 import shutil
 from pathlib import Path
@@ -37,8 +38,21 @@ def validate_log_directory(settings: Settings, data_root: Path = DATA_ROOT) -> P
     database = Path(settings.position_store_path)
     if database.absolute().parent != root or database.resolve().parent != root:
         raise ValueError("Expected SQLite in the dedicated data directory")
+    # The storage marker is durable authority for the broker and database.
+    marker = root / "runtime_storage.json"
+    if marker.is_symlink():
+        raise ValueError("Refusing symlinked runtime identity")
+    if marker.exists():
+        identity = json.loads(marker.read_text(encoding="utf-8"))
+        if identity != {"version": 1, "broker": settings.broker, "database": database.name}:
+            raise ValueError("Runtime storage identity does not match deployment broker/database")
+
+    order_db = Path(f"{database}.{settings.broker}.orders.sqlite")
     persistent_paths = (
         database,
+        order_db,
+        *[Path(f"{db}{suffix}") for db in (database, order_db)
+          for suffix in ("-wal", "-shm", "-journal")],
         Path(settings.instrument_id_cache_path),
         Path(settings.alpaca_instrument_id_cache_path),
         Path(os.environ.get("GOBLIN_RESTART_GUARD_PATH", "data/runtime_restart_guard.json")),
@@ -88,9 +102,12 @@ def reset_deployment_logs(settings: Settings, data_root: Path = DATA_ROOT) -> Pa
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("validate", "reset"))
+    parser.add_argument("--broker", required=True, choices=("etoro_demo", "alpaca_demo"))
     args = parser.parse_args()
     try:
         settings = Settings(_env_file=None)
+        if settings.broker != args.broker:
+            raise ValueError("Deployment broker does not match runtime configuration")
         if args.mode == "validate":
             validate_log_directory(settings)
             print("GOBLIN_DEPLOYMENT_LOG_PATHS_VALID", flush=True)

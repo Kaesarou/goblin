@@ -144,6 +144,11 @@ elif args[0] == "compose":
         print("alpaca-container-id")
 elif args[0] == "pull" and failure == "pull":
     sys.exit(1)
+elif args[0] == "ps":
+    if failure == "running":
+        print("goblin-alpaca")
+    if failure == "ps":
+        sys.exit(1)
 ''')
     fake_docker.chmod(0o755)
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
@@ -191,14 +196,14 @@ def test_failed_preparation_leaves_existing_containers_and_release_untouched(dep
     assert not any(args[0] in {"stop", "update"} or "up" in args for args in calls)
 
 
-@pytest.mark.parametrize("failure", ["stop", "reset"])
+@pytest.mark.parametrize("failure", ["stop", "reset", "running", "ps"])
 def test_failed_stop_or_log_reset_never_starts_new_runtime(deployment, failure):
     app_dir, run = deployment
     result, calls = run(failure=failure)
     assert result.returncode != 0
     assert not any("up" in args for args in calls)
     assert not (app_dir / "deployment.json").exists()
-    if failure == "stop":
+    if failure != "reset":
         assert not any("reset" in args for args in calls)
 
 
