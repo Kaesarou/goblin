@@ -73,6 +73,19 @@ docker compose --project-name "$project" --project-directory "$app_dir" \
   --env-file "$next_image_env" -f "$next_compose" \
   run --rm --no-deps --entrypoint python goblin -m scripts.alpaca_deployment_check
 
+prepared_compose() {
+  docker compose --project-name "$project" --project-directory "$app_dir" \
+    --env-file "$next_image_env" -f "$next_compose" "$@"
+}
+prepared_compose run --rm --no-deps --entrypoint python goblin -m scripts.prepare_deployment_logs validate --broker alpaca_demo
+prepared_compose stop --timeout 120 goblin
+running="$(docker ps --filter 'name=^/goblin-alpaca$' --format '{{.Names}}')"
+if [[ -n "$running" ]]; then
+  printf 'Refusing log reset while goblin-alpaca is running\n' >&2
+  exit 1
+fi
+prepared_compose run --rm --no-deps --entrypoint python goblin -m scripts.prepare_deployment_logs reset --broker alpaca_demo
+
 mv "$next_compose" "$compose_file"
 mv "$next_image_env" "$image_env"
 

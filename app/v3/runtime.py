@@ -1284,6 +1284,12 @@ class GoblinV3Runtime:
                 self.trade_journal.write("v3_session_state", {
                     "symbol": symbol,
                     "session_key": decision.session_key,
+                    "session_start_utc": (
+                        _utc(decision.session_start_time) if decision.session_start_time else None
+                    ),
+                    "session_end_utc": (
+                        _utc(decision.session_end_time) if decision.session_end_time else None
+                    ),
                     "source_reason": decision.reason,
                     **self._symbol_risk_authority(symbol),
                     "v3_force_close_at_session_end": False,

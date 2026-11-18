@@ -48,6 +48,14 @@ if ! grep -Eq '^[[:space:]]+GOBLIN_OBSERVATION_ONLY:[[:space:]]*"0"[[:space:]]*$
   exit 67
 fi
 
+if [[ "$(realpath -m -- "$app_dir")" != "$app_dir" ]] || \
+   [[ "$(realpath -m -- "$app_dir/data")" != "$app_dir/data" ]]; then
+  printf 'Refusing shared or symlinked eToro deployment storage\n' >&2
+  exit 65
+fi
+exec 9>"$app_dir/.deployment.lock"
+flock -n 9 || { printf 'Another eToro deployment is running\n' >&2; exit 75; }
+
 mkdir -p "$app_dir/data"
 
 compose_file="$app_dir/docker-compose.production.yml"
@@ -67,6 +75,23 @@ docker compose \
   config --quiet
 docker pull "$image"
 
+prepared_compose() {
+  docker compose --project-directory "$app_dir" \
+    --env-file "$next_image_env" -f "$next_compose" "$@"
+}
+
+# Validate using the incoming image and actual .env before stopping the old bot.
+prepared_compose run --rm --no-deps --entrypoint python goblin -m scripts.prepare_deployment_logs validate --broker etoro_demo
+prepared_compose stop --timeout 120 goblin
+running="$(docker ps --filter 'name=^/goblin-bot$' --format '{{.Names}}')"
+if [[ -n "$running" ]]; then
+  printf 'Refusing log reset while goblin-bot is running\n' >&2
+  exit 1
+fi
+# The one-shot helper holds the runtime lease and verifies zero entries before
+# returning success. No reset is performed by a normal runtime restart.
+prepared_compose run --rm --no-deps --entrypoint python goblin -m scripts.prepare_deployment_logs reset --broker etoro_demo
+
 mv "$next_compose" "$compose_file"
 mv "$next_image_env" "$image_env"
 
@@ -75,7 +100,7 @@ start_release() {
     --project-directory "$app_dir" \
     --env-file "$image_env" \
     -f "$compose_file" \
-    up --detach --remove-orphans --wait --wait-timeout 90
+    up --detach --force-recreate --remove-orphans --wait --wait-timeout 90
 }
 
 capture_failed_release_diagnostics() {

@@ -152,3 +152,19 @@ ssh -i ~/.ssh/goblin_github_actions -o IdentitiesOnly=yes \
   goblin-deploy@54.37.13.221 \
   'docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"; docker logs --tail 80 goblin-alpaca'
 ```
+
+## Deployment log reset
+
+Each successful release preparation (eToro or Alpaca) validates the configured
+log paths using the incoming image, stops only its own Compose service, and then
+clears its dedicated `data/logs/` directory before starting the new service.
+The helper verifies the runtime lease is free and prints
+`GOBLIN_DEPLOYMENT_LOGS_EMPTY ... entries=0` in the deployment output.
+An absent logs directory also counts as zero previous entries and is left to the
+runtime to create (required for fresh Alpaca storage). The new run immediately
+creates its own logs. Any failed reset prevents startup.
+Archive logs manually **before** triggering deployment if you need them.
+Manual restarts and crash recovery do not reset logs. SQLite, broker orders,
+account identity, cache files outside logs and the restart guard are preserved.
+A retry after a failed startup is a new deployment and resets that instance's
+logs again; archive its failure evidence first if needed.
