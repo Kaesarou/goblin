@@ -27,6 +27,7 @@ from app.runtime.stop_signals import runtime_stop_signals
 from app.runtime.storage_scope import RuntimeStorageScope
 from app.runtime.trading_session_window import regular_market_session_service
 from app.utils.logging import configure_logging
+from app.v3.adaptive_shadow import ShadowExperiment
 from app.v3.config import RecoverabilityConfig, etoro5_research_config
 from app.v3.economics import EconomicsModel, broker_cost_schedule
 from app.v3.features import OnlineFeatureEngine
@@ -387,6 +388,23 @@ def _run_main(settings: Settings, storage: RuntimeStorageScope) -> None:
             symbol: instrument_registry.resolve(symbol).asset_class
             for symbol in symbols
         }
+        shadow_experiment = None
+        if settings.broker in ("etoro_demo", "alpaca_demo"):
+            try:
+                # Separate bounded artifact; never competes for the trade
+                # journal's per-stream soft budget or touches broker state.
+                shadow_experiment = ShadowExperiment(
+                    planner=planner, config=config, cost_schedule=cost_schedule,
+                    journal=JsonlJournal(
+                        str(run_paths.root / "adaptive_shadow.jsonl.gz"),
+                        run_id=run_id, stream_name="adaptive_shadow", compact=True,
+                        hard_max_bytes=32 * 1024 * 1024,
+                        min_free_bytes=1024 * 1024 * 1024,
+                    ),
+                    benchmark_symbols=settings.benchmark_symbols_by_asset_class()[AssetClass.EQUITY_US],
+                )
+            except Exception:
+                logger.exception("Could not initialize adaptive shadow; active RR5 remains unchanged")
         runtime = GoblinV3Runtime(
             settings=settings,
             symbols=symbols,
@@ -410,6 +428,7 @@ def _run_main(settings: Settings, storage: RuntimeStorageScope) -> None:
             candle_journal=candle_journal,
             heartbeat=RuntimeHeartbeat(settings.runtime_heartbeat_minutes),
             research_pipeline=research_pipeline,
+            shadow_experiment=shadow_experiment,
         )
     except Exception:
         # Failed account/universe/feed validation happens before runtime.run().

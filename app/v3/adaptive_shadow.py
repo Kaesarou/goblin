@@ -17,7 +17,7 @@ from app.v3.adaptive_policy import (
 )
 from app.v3.book import InventoryBook
 from app.v3.forager import ForagerCandidate, NoVolumeForager
-from app.v3.models import ExecutionStyle, IntentPurpose, OrderIntent
+from app.v3.models import ExecutionStyle, IntentPurpose, OrderIntent, PortfolioState
 
 STARTING_EQUITY = 100_000.0
 MIN_ENTRY_NOTIONAL = 10.0
@@ -289,18 +289,35 @@ class _ShadowPortfolio:
             normal = self.planner.plan_existing_inventory(
                 market=market, portfolio=portfolio, allow_new_risk=can_reenter)
             exits = [i for i in normal.intents if i.side == "SELL"]
-            if exits:
-                # Preserve normal profit exit precedence; no opposing BUY on
-                # the same simulated window when a close is already planned.
+            if exits and not (self.policy and self.policy.use_time_exit
+                              and state == Lifecycle.EXIT_DUE):
+                # Preserve normal profit exit precedence, except at the hard
+                # research age limit. No opposing BUY alongside a planned sell.
                 plans.extend(exits)
                 continue
             reason = None
             if self.policy:
                 remaining = [i for i in portfolio.inventories if i.inventory_id != inv.inventory_id]
-                alternative = next((
-                    r for r in ranked if r.ema_readiness <= 0
-                    and self._initial_allowed(r.market.symbol, regime, remaining)
-                ), None)
+                alternative = None
+                if (state == Lifecycle.STALE and full and not rotation_planned
+                        and self.policy.use_rotation and regime in (Regime.NORMAL, Regime.RECOVERY)):
+                    exit_fee = sum(self._fee(leg.units * market.bid) for leg in inv.broker_legs)
+                    post_equity = portfolio.equity - exit_fee
+                    if post_equity > 0:
+                        hypothetical = PortfolioState(post_equity, tuple(
+                            replace(i, wallet_exposure_pct=i.total_notional / post_equity)
+                            for i in remaining))
+                        for candidate in ranked:
+                            if (candidate.ema_readiness > 0 or not self._initial_allowed(
+                                    candidate.market.symbol, regime, remaining)):
+                                continue
+                            preview = self.planner.plan_symbol(
+                                market=candidate.market, portfolio=hypothetical)
+                            if any(i.side == "BUY" and i.cost_estimate is not None
+                                   and (i.expected_gross_capture or 0.) > i.cost_estimate.total + exit_fee
+                                   for i in preview.intents):
+                                alternative = candidate
+                                break
                 reason = self.allocation.risk_exit_reason(
                     lifecycle=state, regime=regime,
                     unrealized_return=market.bid / inv.average_entry_price - 1,
